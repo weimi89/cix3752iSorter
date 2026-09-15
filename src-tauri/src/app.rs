@@ -1,5 +1,5 @@
-//! 啟動流程：設定 → DB → 裝置層 → 狀態機 → 中介機 → 列印 → 更新檢查。
-//! 桌面模式（Tauri 視窗）與 `--headless`（supervisor／systemd）共用這一份，
+//! 啟動流程：設定 → DB → 裝置層 → 狀態機 → 中介機 → 列印。
+//! 桌面模式（Tauri 視窗）與 `--headless`（開發／模擬用，不開視窗）共用這一份，
 //! 兩者只差在誰擁有網頁伺服器的生命週期。
 
 use std::path::{Path, PathBuf};
@@ -7,7 +7,7 @@ use std::time::Instant;
 
 use tokio_util::sync::CancellationToken;
 
-use crate::{AppState, chute, config, db, device, event_log, label, middleware, runtime, tracker, updater};
+use crate::{AppState, chute, config, db, device, event_log, label, middleware, runtime, tracker};
 
 /// 啟動完成後交給呼叫端的東西：共享狀態與網頁伺服器要綁的位址
 pub struct Started {
@@ -34,7 +34,6 @@ pub async fn bootstrap(config_path: &Path, data_dir: &Path, cancel: Cancellation
         tracker: std::sync::Arc::new(std::sync::OnceLock::new()),
         resolver: std::sync::Arc::new(std::sync::OnceLock::new()),
         printer: std::sync::Arc::new(std::sync::OnceLock::new()),
-        updater: std::sync::Arc::new(std::sync::OnceLock::new()),
     };
     event_log::log(&db, event_log::Level::Info, "server", "start", format!("版本 {} 啟動", env!("CARGO_PKG_VERSION")));
 
@@ -71,11 +70,6 @@ pub async fn bootstrap(config_path: &Path, data_dir: &Path, cancel: Cancellation
     let printer = label::PrintService::new(db.clone(), config.subscribe(), mw.clone(), data_dir, cancel.clone());
     let _ = app.printer.set(printer.clone());
     label::spawn_pipeline(app.clone(), printer, label_rx, cancel.clone());
-
-    // 自動更新（headless 用：定期查 latest.json，由網頁觸發換檔；桌面模式由 Tauri updater 接手）
-    let up = updater::Updater::new(db.clone(), config.subscribe(), data_dir);
-    up.start_background(cancel.clone());
-    let _ = app.updater.set(up);
 
     Ok(Started { app, bind: cfg.server.bind.clone() })
 }

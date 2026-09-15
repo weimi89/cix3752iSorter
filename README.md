@@ -6,7 +6,7 @@
 
 - Rust：Tauri 2（桌面視窗）、tokio、axum、sqlx（SQLite）、reqwest、`image`
 - 前端：Vue 3 + Vuetify + Pinia，`vite build` 後內嵌進二進位（作法對齊 `cix3752iLabelPrint/src-tauri/src/server/assets.rs`）；同一份前端在 Tauri 視窗與瀏覽器都能跑
-- 兩種執行模式：預設開桌面視窗；`--headless`（或環境變數 `CIX_HEADLESS=1`）只跑服務，給 supervisor／systemd 用
+- 桌面程式：開視窗、登入後自動啟動；`--headless` 只給開發機接模擬器用，現場不用
 - 目標平台：工控機 Ubuntu 20.04 x86_64（20.04 沒有 webkit2gtk-4.1，發版時自編整套棧一起打包）；22.04／24.04 的建置矩陣保留，升級時再開
 
 ## 文件
@@ -25,26 +25,22 @@
 ```bash
 yarn install && yarn build                    # 前端（cargo 內嵌 ../dist；沒建過會用佔位頁）
 cd src-tauri && cargo test                    # 單元測試
-cargo run -- --headless --config config.toml --data-dir data   # 本機以服務模式跑（macOS 也能，裝置連不上會持續重連）
+cargo run -- --headless --config config.toml --data-dir data   # 本機不開視窗只跑服務（接模擬器用；macOS 也能，裝置連不上會持續重連）
 yarn tauri dev                                # 本機開桌面視窗（Vite :5180 熱更新）
 yarn tauri build                              # 本機打 macOS 版；Linux 版只能由 GHA 建（見下）
 ```
 
 **Linux 版只走 GitHub Actions**：Tauri 要連目標平台的 gtk／webkit 開發套件，macOS 交叉編譯不出來。
-`release.yml` 只建現場用的 distro（目前 Ubuntu 20.04；22.04／24.04 的矩陣項目留在註解，工控機升級再開），Release 只放 4 個檔：
+`release.yml` 只建現場用的 distro（目前 Ubuntu 20.04；22.04／24.04 的矩陣項目留在註解，工控機升級再開），Release 只放 3 個檔：
 `cix3752iSorter-<ver>-<distro>.tar.gz`（離線安裝包：.deb + `install.sh` + 服務範本 + 自編 webkit 棧 `stack/`）、
-`cix3752i-sorter_<ver>_<distro>_amd64.deb`（桌面自動更新用）、`cix3752i-sorter_<ver>_<distro>_headless.tar.gz`（服務版自動更新用）、`latest.json`（簽章與 SHA-256 都在裡面）。
+`cix3752i-sorter_<ver>_<distro>_amd64.deb`（程式內自動更新用）、`latest.json`（簽章在裡面）。
 20.04 那份第一次要自編 webkit（約 1 小時 55 分，之後走 Actions 快取；`warm-focal-cache.yml` 每週兩次刷新快取避免過期）。
 
-工控機上：`tar -xzf cix3752iSorter-<ver>-<distro>.tar.gz && cd cix3752iSorter-<ver>-<distro> && sudo bash install.sh <模式>`，一台只選一種：
+工控機上：`tar -xzf cix3752iSorter-<ver>-<distro>.tar.gz && cd cix3752iSorter-<ver>-<distro> && sudo bash install.sh`（只裝不啟動；20.04 會先把 `stack/` 放進 /usr/local），
+切換用 `sorter-switch to-new`、回退 `sorter-switch to-old`（步驟見 `docs/cutover.md`）。之後升級由程式內「發現新版本」處理（Tauri updater 裝 .deb，會要系統密碼）。
 
-| 模式 | 裝法 | 之後怎麼升級 |
-|---|---|---|
-| `desktop` | 裝 .deb，從應用選單開視窗（20.04 先把 `stack/` 放進 /usr/local） | 程式內「發現新版本」→ Tauri updater 下載 .deb 安裝（需系統密碼，pkexec） |
-| `systemd`／`supervisor` | 執行檔放安裝帳號家目錄下的 `cix3752iSorter/`，以 `--headless` 拉起 | 網頁後台「立即更新」→ 後端下載 headless tar.gz、校驗 SHA-256、換檔、交給 systemd／supervisor 重啟；沒外網可上傳 tar.gz |
-
-設定檔 `config.toml` 首次啟動自動建立（桌面模式在使用者的應用資料夾，headless 在 `--config` 指定處），資料在 `data/`。
-自動更新兩條路讀同一份 `latest.json`，`platforms` 的鍵帶 distro（`linux-x86_64-ubuntu-20.04`、`…-headless`），程式照 `/etc/os-release` 挑自己那筆。
+設定檔 `config.toml` 與資料在使用者的應用資料夾（`~/.local/share/com.weiminet.cix3752i.sorter/`），首次啟動自動建立。
+`latest.json` 的 `platforms` 鍵帶 distro（`linux-x86_64-ubuntu-20.04`），程式照 `/etc/os-release` 挑自己那筆。
 
 發版（與 cix3752iLabelPrint 同一套）：改 `src-tauri/Cargo.toml` 與 `src-tauri/tauri.conf.json` 版本（兩處要一致，GHA 會擋） → 在 `CHANGELOG.md` 新增 `## vX.Y.Z` 段落（Release 說明與程式內更新提示都從這裡抽） → `git tag -a vX.Y.Z -m "vX.Y.Z"` → push tag → GHA 建置並上傳到 draft Release → 到 Releases 頁公開。已公開後才發現說明漏寫：`gh release edit vX.Y.Z --notes-file <(bash scripts/build-release-notes.sh vX.Y.Z)`，不要靠重跑 workflow。
 GitHub repo 的 secrets 要有 `TAURI_SIGNING_PRIVATE_KEY`／`TAURI_SIGNING_PRIVATE_KEY_PASSWORD`（對應 `~/.tauri/cix3752iSorter.key`），沒設 build 會直接失敗。

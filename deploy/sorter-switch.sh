@@ -5,7 +5,7 @@
 #   sorter-switch to-old    停新程式 → 拿掉自動啟動 → 舊程式設定改回來並啟動 → 等舊後台回來
 #   sorter-switch status    現在誰在跑
 #
-# 用登入的那個帳號跑（不要整支 sudo）：桌面版要用你的桌面把視窗開出來，需要 root 的步驟會自己 sudo。
+# 用登入的那個帳號跑（不要整支 sudo）：要用你的桌面把視窗開出來，需要 root 的步驟會自己 sudo。
 # 新舊程式搶同一台相機、同一台分揀機與印表機，所以一定是先停一邊再起另一邊，中間會確認埠位真的放掉才往下走。
 set -euo pipefail
 
@@ -14,8 +14,6 @@ OLD_INI_DIR="/etc/supervisor/conf.d"
 NEW_PORT="${SORTER_PORT:-18090}"
 OLD_PORT=8080
 CAMERA_PORT=8051
-# 服務版才有這個檔；有就用 supervisor 起停新程式，沒有就當桌面版
-NEW_SUPERVISOR_INI="${OLD_INI_DIR}/cix3752i-sorter.ini"
 
 say()  { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m!!\033[0m %s\n' "$*"; }
@@ -24,12 +22,11 @@ die()  { printf '\033[1;31m✗\033[0m %s\n' "$*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || die "缺少指令 $1"; }
 need supervisorctl; need curl; need ss; need pgrep
 
-new_is_service() { [ -f "$NEW_SUPERVISOR_INI" ]; }
 # 自動啟動的 .desktop 檔名是程式顯示名稱（中文），用內容的 Exec 行找比較穩
 autostart_files() { grep -ls 'sorter' "$HOME"/.config/autostart/*.desktop 2>/dev/null || true; }
 # 管線後面不用 grep -q：它讀到就關管線，前面的指令會吃 SIGPIPE，pipefail 下整個判斷變成假的
 old_running()    { sudo supervisorctl status 2>/dev/null | grep -E "^(main_proj|twfilter) +RUNNING" >/dev/null; }
-new_running()    { if new_is_service; then sudo supervisorctl status cix3752i-sorter 2>/dev/null | grep RUNNING >/dev/null; else pgrep -x sorter >/dev/null; fi; }
+new_running()    { pgrep -x sorter >/dev/null; }
 port_listening() { ss -ltn "( sport = :$1 )" 2>/dev/null | tail -n +2 | grep . >/dev/null; }
 device_conns()   { ss -tn 2>/dev/null | grep -cE ':10006 ' || true; }
 
@@ -48,7 +45,7 @@ wait_for() {
 
 show_status() {
   say "舊程式（supervisor）"
-  sudo supervisorctl status 2>/dev/null | grep -E "main_proj|twfilter|cix3752i-sorter" || echo "   （supervisor 沒有登記任何一支）"
+  sudo supervisorctl status 2>/dev/null | grep -E "main_proj|twfilter" || echo "   （supervisor 沒有登記舊程式）"
   say "新程式"
   if new_running; then echo "   執行中"; else echo "   沒在跑"; fi
   say "埠位"
@@ -62,21 +59,13 @@ show_status() {
 }
 
 start_new() {
-  if new_is_service; then
-    sudo supervisorctl start cix3752i-sorter >/dev/null
-  else
-    command -v sorter >/dev/null || die "找不到 sorter，先跑 install.sh desktop"
-    # 從使用者的桌面工作階段開，關掉這個終端機也不會跟著關
-    setsid nohup sorter >/dev/null 2>&1 < /dev/null &
-  fi
+  command -v sorter >/dev/null || die "找不到 sorter，先跑 sudo bash install.sh"
+  # 從使用者的桌面工作階段開，關掉這個終端機也不會跟著關
+  setsid nohup sorter >/dev/null 2>&1 < /dev/null &
 }
 
 stop_new() {
-  if new_is_service; then
-    sudo supervisorctl stop cix3752i-sorter >/dev/null
-  else
-    pkill -TERM -x sorter 2>/dev/null || true
-  fi
+  pkill -TERM -x sorter 2>/dev/null || true
 }
 
 to_new() {

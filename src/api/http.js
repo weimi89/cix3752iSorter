@@ -70,12 +70,4 @@ export const api = {
 
   logs: params => request('GET', `/api/logs?${qs(params)}`),
 
-  updateStatus: () => request('GET', '/api/update/status'),
-  updateCheck: () => request('POST', '/api/update/check'),
-  updateInstall: () => request('POST', '/api/update/install', undefined),
-  updateUpload: async file => {
-    const res = await fetch(apiBase() + '/api/update/upload', { method: 'POST', headers: { 'Content-Type': 'application/gzip' }, body: file })
-    if (!res.ok) { let m = `伺服器回應 ${res.status}`; try { m = (await res.json()).error || m } catch {} const e = new Error(m); e.status = res.status; throw e }
-    return res.json()
-  },
 }

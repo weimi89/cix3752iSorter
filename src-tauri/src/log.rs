@@ -1,6 +1,6 @@
 //! 全域 tracing 初始化：預設 info，可由 `RUST_LOG` 覆寫。
 //!
-//! 一開始只有 stdout（headless 交給 supervisor／journald 收）；資料目錄確定後再 `attach_file`
+//! 一開始只有 stdout（開發時看終端機）；資料目錄確定後再 `attach_file`
 //! 加上逐日輪替的檔案輸出——桌面模式從應用選單啟動時 stdout 直接被丟掉，沒有這個檔就等於沒有日誌。
 
 use std::io::IsTerminal;
@@ -34,7 +34,7 @@ pub fn init() {
     let (file_layer, handle) = reload::Layer::new(None::<FileLayer>);
     let _ = FILE_HANDLE.set(handle);
     let stdout = fmt::layer()
-        // 跑在 supervisor / systemd 底下時 stdout 不是終端機，色碼只會弄髒日誌檔
+        // stdout 不是終端機時（重導到檔案）色碼只會弄髒日誌
         .with_ansi(std::io::stdout().is_terminal())
         .with_target(true)
         .with_thread_ids(false)

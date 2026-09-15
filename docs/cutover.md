@@ -7,8 +7,8 @@
 
 | 項目 | 舊程式 | 新程式 |
 |---|---|---|
-| 誰拉起來 | supervisor：`main_proj`（Go `ecs1000`）、`twfilter`（Node `server.js`） | 桌面版：使用者登入後自動啟動（`~/.config/autostart/`）；服務版才會登記進 supervisor |
-| 設定檔 | `/etc/supervisor/conf.d/main_proj.ini`、`twfilter.ini`（**只認 `.ini`**，`supervisord.conf` 的 include 是 `conf.d/*.ini`） | `~/.local/share/com.weiminet.cix3752i.sorter/config.toml`（桌面版）；服務版在 `~/cix3752iSorter/config.toml` |
+| 誰拉起來 | supervisor：`main_proj`（Go `ecs1000`）、`twfilter`（Node `server.js`） | 使用者登入後自動啟動（`~/.config/autostart/`） |
+| 設定檔 | `/etc/supervisor/conf.d/main_proj.ini`、`twfilter.ini`（**只認 `.ini`**，`supervisord.conf` 的 include 是 `conf.d/*.ini`） | `~/.local/share/com.weiminet.cix3752i.sorter/config.toml` |
 | 執行身分 | root | 登入的那個帳號（安裝時會加進 `lp` 群組才能寫印表機；**加了群組要重新登入才生效**） |
 | 網頁後台 | `:8080` | `:18090` |
 | 收相機 | Node `:8051`（Go `:8050` 收 Node 轉來的碼） | 直接 `:8051` |
@@ -21,22 +21,21 @@
 
 ## 1. 切換前一天（不影響現場）
 
-現場工控機有螢幕、有人操作，裝**桌面版**：程式從應用選單開視窗，關視窗＝程式結束；登入後會自動啟動。
+程式是桌面視窗（現場要在視窗上啟停皮帶），關視窗＝程式結束；登入後會自動啟動。
 
 ```bash
 # 1-1 把安裝包放到工控機並解開（版本號換成實際的）
 cd ~ && tar -xzf cix3752iSorter-0.1.0-ubuntu-20.04.tar.gz && cd cix3752iSorter-0.1.0-ubuntu-20.04
 
 # 1-2 安裝（只裝、不會啟動；會問 sudo 密碼）
-sudo bash install.sh desktop
+sudo bash install.sh
 
 # 1-3 確認裝進去了，但先不要開它
 which sorter && sorter --version
 ```
 
-預期：印出 `/usr/bin/sorter` 與 `0.1.0`。**今天到此為止，不要從應用選單開「智配通 分揀控制」**——一開就會去搶相機與分揀機。
-
-> 改裝服務版（無畫面、由 supervisor 管）：`sudo bash install.sh supervisor` 後 `sudo supervisorctl stop cix3752i-sorter` 先停著；第 2、3 節的「起新／停新」改用 `supervisorctl start|stop cix3752i-sorter`。**一台只選一種。**
+預期：印出 `/usr/bin/sorter` 與版本號。接著**登出再登入一次**（安裝把帳號加進印表機群組 `lp`，重新登入才生效）。
+**今天到此為止，不要從應用選單開「智配通 分揀控制」**——一開就會去搶相機與分揀機。
 
 ## 2. 切換（線上沒有包裹時做，約 3 分鐘）
 

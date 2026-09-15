@@ -25,28 +25,9 @@ pub struct AppConfig {
     pub middleware: MiddlewareConfig,
     pub ng: NgConfig,
     pub print: PrintConfig,
-    pub update: UpdateConfig,
     pub emergency_buttons: Vec<EmergencyButton>,
 }
 
-/// 自動更新（GitHub Release 的 latest.json）
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(default)]
-pub struct UpdateConfig {
-    pub enabled: bool,
-    pub endpoint: String,
-    pub check_interval_min: u64,
-}
-
-impl Default for UpdateConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            endpoint: "https://github.com/weimi89/cix3752iSorter/releases/latest/download/latest.json".into(),
-            check_interval_min: 60,
-        }
-    }
-}
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
@@ -217,7 +198,6 @@ impl Default for AppConfig {
             middleware: MiddlewareConfig::default(),
             ng: NgConfig::default(),
             print: PrintConfig::default(),
-            update: UpdateConfig::default(),
             emergency_buttons: Vec::new(),
         }
     }

@@ -78,10 +78,6 @@ pub(super) fn api_router() -> Router<ServerState> {
         .route("/logs/files", get(log_files))
         .route("/logs/files/{name}", get(log_file_download))
         .route("/lan-ips", get(lan_ips))
-        .route("/update/status", get(update_status))
-        .route("/update/check", post(update_check))
-        .route("/update/install", post(update_install))
-        .route("/update/upload", post(update_upload))
 }
 
 async fn health() -> Json<serde_json::Value> {
@@ -857,36 +853,6 @@ async fn logs(State(state): State<ServerState>, Query(q): Query<LogsQuery>) -> A
     .fetch_all(&state.app.db)
     .await?;
     Ok(Json(serde_json::json!({ "total": total, "list": rows })))
-}
-
-// ---------- 自動更新 ----------
-
-async fn update_status(State(state): State<ServerState>) -> ApiResult<serde_json::Value> {
-    let up = state.app.updater.get().ok_or_else(|| unavailable("更新服務"))?;
-    Ok(Json(serde_json::json!({ "current": crate::updater::CURRENT_VERSION, "busy": up.is_busy(), "last": up.last_check() })))
-}
-
-async fn update_check(State(state): State<ServerState>) -> ApiResult<crate::updater::UpdateInfo> {
-    let up = state.app.updater.get().ok_or_else(|| unavailable("更新服務"))?;
-    let info = up.check().await.map_err(|e| ApiError(StatusCode::BAD_GATEWAY, format!("檢查更新失敗：{e}")))?;
-    Ok(Json(info))
-}
-
-/// 下載並安裝：需設定密碼；成功後行程會在 1 秒後結束，交給 supervisor／systemd 重啟
-async fn update_install(State(state): State<ServerState>) -> ApiResult<serde_json::Value> {
-    let up = state.app.updater.get().ok_or_else(|| unavailable("更新服務"))?.clone();
-    up.download_and_install().await?;
-    Ok(Json(serde_json::json!({ "ok": true, "restarting": true })))
-}
-
-/// 沒有外網時：網頁直接上傳發版的 tar.gz
-async fn update_upload(State(state): State<ServerState>, body: axum::body::Bytes) -> ApiResult<serde_json::Value> {
-    if body.len() < 1024 {
-        return Err(bad("檔案太小，不是發版的 tar.gz"));
-    }
-    let up = state.app.updater.get().ok_or_else(|| unavailable("更新服務"))?.clone();
-    up.install_uploaded(&body).await?;
-    Ok(Json(serde_json::json!({ "ok": true, "restarting": true })))
 }
 
 // ---------- 日誌檔（data/logs）----------

@@ -13,10 +13,10 @@
 
 | 決策 | 選擇 | 理由 |
 |---|---|---|
-| 程式形態 | **Tauri 2 桌面程式**（2026-09-14 改，原本是純 headless 執行檔）：預設開視窗，`--headless` 只跑服務給 supervisor／systemd；兩種模式共用同一份啟動流程與前端 | 對齊 LabelPrint 的形態，現場工控機有畫面時直接當桌面程式用，沒畫面照舊當服務 |
-| 相容目標 | Ubuntu **20.04 / 22.04 / 24.04** x86_64 各建一份 .deb 與 headless 執行檔 | 20.04 沒有 webkit2gtk-4.1，要自編 glib 2.78 + libsoup3 + webkit 整套（沿用 LabelPrint `build-focal-stack` action）；連的棧不同，產物不能跨 distro 互換 |
+| 程式形態 | **Tauri 2 桌面程式**（2026-09-14 改，原本是純 headless 執行檔）：開視窗、登入後自動啟動；`--headless` 只給開發機接模擬器用（2026-09-15 拆掉服務版部署：現場要在視窗上啟停皮帶，沒畫面的服務版用不到） | 對齊 LabelPrint 的形態，現場工控機有畫面時直接當桌面程式用，沒畫面照舊當服務 |
+| 相容目標 | 工控機 Ubuntu **20.04** x86_64（22.04／24.04 矩陣留註解，升級再開） | 20.04 沒有 webkit2gtk-4.1，要自編 glib 2.78 + libsoup3 + webkit 整套（沿用 LabelPrint `build-focal-stack` action）；連的棧不同，產物不能跨 distro 互換 |
 | 建置方式 | 只走 GitHub Actions `release.yml`（三個 distro 各在自己的 container 建） | Tauri 要連目標平台的 gtk／webkit 開發套件，macOS 無法交叉編譯 Linux 版；本機只能建 macOS 版做開發驗證 |
-| 自動更新 | 同一份 `latest.json`，`platforms` 鍵帶 distro：桌面走 Tauri updater 裝 .deb（`linux-x86_64-ubuntu-20.04`），headless 走後端換檔 tar.gz（`…-headless`） | 程式照 `/etc/os-release` 選自己那筆；.deb 安裝需 root，桌面更新會跳系統密碼（pkexec），headless 換檔不需要 |
+| 自動更新 | Tauri updater 讀 `latest.json`，`platforms` 鍵帶 distro（`linux-x86_64-ubuntu-20.04`）裝 .deb | 程式照 `/etc/os-release` 選自己那筆；.deb 安裝需 root，桌面更新會跳系統密碼（pkexec），headless 換檔不需要 |
 | 行程模型 | 每個裝置一個 tokio task 擁有自己的連線；`tracker` 單一 task 擁有全部包裹狀態；task 之間只用 channel | 消滅舊版共享鎖／nil 解參考／重複控制器三類病 |
 | 相機接法 | 本程式直接開 `:8051` 收相機原始資料（挑碼邏輯移植 `checkcode1`），**不再有 8050／3000 中轉** | 相機設定不用改；少一次 HTTP 來回 |
 | 格口查詢 | 條碼一到就非同步問中介機；`~O` 到時「有答案用答案、逾時走預設口」，皮帶迴圈永不阻塞 | `~P→~O` 實測預算 ≈1.1s，中介機 p99 898ms |

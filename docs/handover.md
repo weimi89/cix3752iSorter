@@ -173,8 +173,12 @@
 - 第一版出了三 distro × 5 種檔共 19 個，主人打回：要像 LabelPrint 只出現場用的。改成**只建 20.04、Release 只放 4 個檔**（離線安裝包、.deb、headless tar.gz、latest.json；簽章與 SHA-256 只寫在 latest.json 裡）；22.04／24.04 矩陣項目留註解，升級時再開。
 - **待主人**：到 Releases 頁把 v0.1.0 由 draft 改為公開（自動更新才讀得到 `latest.json`），再把 `cix3752iSorter-0.1.0-ubuntu-20.04.tar.gz` 帶去正式機照 `docs/cutover.md` 做。
 
+### 拆掉服務版 — 完成
+
+主人決定：現場要在視窗上啟停皮帶，程式只會以桌面版跑，服務版（supervisor／systemd、`--headless` 部署、後端自更新、網頁「立即更新」與上傳）全部多餘。拆掉：`deploy/` 只剩 `install.sh`（無模式參數）、`sorter-switch.sh`；`updater/mod.rs` 只留 `platform_tag`；`/api/update/*` 四個端點、`UpdateConfig`、前端瀏覽器更新路徑與上傳、`flate2`／`tar`／`sha2` 相依全移除；`release.yml` 不再出 headless tar.gz，Release 剩 3 個檔。`--headless` 旗標保留給開發機接模擬器用。上面幾節提到服務版的地方是當時的狀態，以本節為準。
+
 ### 下一步：M6 現場切換
 
-1. 主人在正式機實裝 GHA 產出的 `cix3752iSorter-0.1.0-ubuntu-20.04.tar.gz`（`sudo bash install.sh desktop` 或 `systemd`），預設埠 18090 已避開舊系統的 8080
+1. 主人在正式機實裝 GHA 產出的 `cix3752iSorter-<ver>-ubuntu-20.04.tar.gz`（`sudo bash install.sh`），預設埠 18090 已避開舊系統的 8080
 2. ~~設定轉換腳本~~ 不需要：`config/mod.rs` 的預設值與 `migrations/0001_init.sql` 的格口初值就是現場 `conf.json`／`gkconfig.json`／舊 `chute` 表的值，首次啟動自動產生的設定即可用（網頁埠預設 18090，不會撞到舊系統的 8080）
 3. ~~IR 光電檢查頁~~、~~supervisor 切換與回退步驟~~（都完成，見 `docs/cutover.md`）；剩：推 GitHub 跑發版、正式機實裝、實印一張對比、`p1` 格式確認

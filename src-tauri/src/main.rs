@@ -17,7 +17,7 @@ struct Cli {
     /// 資料目錄（SQLite、面單點陣檔）
     #[arg(long)]
     data_dir: Option<PathBuf>,
-    /// 不開視窗，只跑服務（supervisor／systemd 用；沒有桌面環境的工控機也走這個）。
+    /// 不開視窗只跑服務：開發機接模擬器、或 CI 跑整合測試用；現場一律裝桌面版。
     /// 環境變數 `CIX_HEADLESS=1`（或 true／yes／on）同效；clap 預設只認 true／false，`=1` 會被當非法值拒絕
     #[arg(long, env = "CIX_HEADLESS", value_parser = clap::builder::FalseyValueParser::new())]
     headless: bool,

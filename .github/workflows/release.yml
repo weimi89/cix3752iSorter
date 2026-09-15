@@ -1,10 +1,10 @@
-# 打 tag（v*）發版：現場用的 distro（目前只有 Ubuntu 20.04）各建一份 Tauri .deb 與 headless 執行檔，
-# 打包成離線安裝包上傳 Release，最後合併出一份 latest.json 給程式內建的自動更新用。
+# 打 tag（v*）發版：現場用的 distro（目前只有 Ubuntu 20.04）各建一份 Tauri .deb，
+# 打包成離線安裝包上傳 Release，最後合併出一份 latest.json 給程式內建的自動更新（Tauri updater）用。
 #
 # 三個 distro 為什麼要各建一份：20.04（focal）沒有 webkit2gtk-4.1，要自編 glib 2.78 + libsoup3 +
 # webkit2gtk-4.1 整套（./.github/actions/build-focal-stack，1 小時 13 分，成果進 Actions 快取，
 # 由 warm-focal-cache.yml 定期刷新）；22.04+ 直接連系統套件。兩邊的 .deb 與執行檔連的棧不同，不能互換，
-# 所以 latest.json 的 platforms 用 `linux-x86_64-<distro>`（桌面 .deb）與 `…-headless`（換檔 tar.gz）分開列，
+# 所以 latest.json 的 platforms 鍵帶 distro（`linux-x86_64-<distro>`），
 # 程式端照 /etc/os-release 選自己那筆（src-tauri/src/updater/mod.rs `platform_tag`）。
 #
 # 本機（macOS）沒辦法建 Linux 版：Tauri 要連目標平台的 gtk／webkit 開發套件，不能交叉編譯。Linux 產物只走這裡。
@@ -244,23 +244,6 @@ jobs:
           [ -s "${DEB}.sig" ] || { echo "::error::.deb 簽章沒有產出"; exit 1; }
           ls -l /tmp/out
 
-      # headless 換檔用：只含執行檔的小包。程式內建更新只換這個檔，不動 webkit 棧與設定
-      - name: Package headless tarball
-        shell: bash
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: |
-          set -euo pipefail
-          BIN=src-tauri/target/release/sorter
-          "$BIN" --version
-          TARBALL="/tmp/out/cix3752i-sorter_${VERSION}_${DISTRO}_headless.tar.gz"
-          tar -czf "$TARBALL" -C "$(dirname "$BIN")" sorter
-          sha256sum "$TARBALL" | cut -d' ' -f1 > "${TARBALL}.sha256"
-          # latest.json 每筆都要有 signature（Tauri updater 解析時的必填欄位），順手也對這包簽
-          yarn -s tauri signer sign "$TARBALL"
-          ls -l /tmp/out
-
       # 離線安裝包：20.04 連自編棧一起帶；22.04+ 只帶 .deb，install.sh 走 apt 解依賴
       - name: Package install tarball
         shell: bash
@@ -303,29 +286,24 @@ jobs:
           fi
 
           cp "/tmp/out/cix3752i-sorter_${VERSION}_${DISTRO}_amd64.deb" "$STAGE/"
-          cp deploy/install.sh deploy/sorter-switch.sh deploy/sorter.service deploy/supervisor-sorter.ini deploy/README.txt "$STAGE/"
+          cp deploy/install.sh deploy/sorter-switch.sh deploy/README.txt "$STAGE/"
           chmod +x "$STAGE/install.sh"
 
           tar -C /tmp -czf "/tmp/out/${STAGE_NAME}.tar.gz" "${STAGE_NAME}"
           ls -lh /tmp/out
 
-      # latest.json 的兩筆（桌面 .deb／headless tar.gz），先存成片段，publish-manifest 再合併三個 distro
+      # latest.json 的一筆（桌面 .deb，Tauri updater 用），先存成片段，publish-manifest 再合併各 distro
       - name: Write manifest fragment
         shell: bash
         run: |
           set -euo pipefail
           BASE="https://github.com/${{ github.repository }}/releases/download/${TAG_NAME}"
           DEB="cix3752i-sorter_${VERSION}_${DISTRO}_amd64.deb"
-          HL="cix3752i-sorter_${VERSION}_${DISTRO}_headless.tar.gz"
           jq -n \
             --arg k_deb "linux-x86_64-${DISTRO}" \
-            --arg k_hl "linux-x86_64-${DISTRO}-headless" \
             --arg u_deb "${BASE}/${DEB}" \
-            --arg u_hl "${BASE}/${HL}" \
             --arg s_deb "$(cat "/tmp/out/${DEB}.sig")" \
-            --arg s_hl "$(cat "/tmp/out/${HL}.sig")" \
-            --arg sha_hl "$(cat "/tmp/out/${HL}.sha256")" \
-            '{($k_deb): {url: $u_deb, signature: $s_deb}, ($k_hl): {url: $u_hl, signature: $s_hl, sha256: $sha_hl}}' \
+            '{($k_deb): {url: $u_deb, signature: $s_deb}}' \
             > "/tmp/out/manifest-${DISTRO}.json"
           cat "/tmp/out/manifest-${DISTRO}.json"
 
@@ -348,9 +326,8 @@ jobs:
           curl -sS -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" \
             "${API_BASE}/releases/${RELEASE_ID}/assets?per_page=100" -o /tmp/existing-assets.json
 
-          # 只上傳三種：離線安裝包（人工裝）、.deb（桌面自動更新）、headless tar.gz（服務版自動更新）。
-          # 簽章與 SHA-256 已寫進 latest.json，不另外上傳，Release 頁才不會一堆檔
-          for f in /tmp/out/*.deb /tmp/out/*_headless.tar.gz /tmp/out/cix3752iSorter-*.tar.gz; do
+          # 只上傳兩種：離線安裝包（人工裝）、.deb（程式內自動更新）。簽章已寫進 latest.json，不另外上傳
+          for f in /tmp/out/*.deb /tmp/out/cix3752iSorter-*.tar.gz; do
             NAME=$(basename "$f")
             # 同名 asset 已存在（重跑補傳）要先刪，upload API 對同名直接回 422
             EXISTING=$(jq -r --arg n "$NAME" 'first(.[] | select(.name == $n) | .id) // empty' /tmp/existing-assets.json)
@@ -435,7 +412,6 @@ jobs:
           for d in $(echo "$DISTROS" | jq -r '.[]'); do
             {
               echo "cix3752i-sorter_${VERSION}_${d}_amd64.deb"
-              echo "cix3752i-sorter_${VERSION}_${d}_headless.tar.gz"
               echo "cix3752iSorter-${VERSION}-${d}.tar.gz"
             } >> /tmp/expected.txt
           done

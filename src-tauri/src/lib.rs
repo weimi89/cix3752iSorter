@@ -36,5 +36,4 @@ pub struct AppState {
     pub tracker: std::sync::Arc<std::sync::OnceLock<tracker::TrackerHandle>>,
     pub resolver: std::sync::Arc<std::sync::OnceLock<chute::ChuteResolver>>,
     pub printer: std::sync::Arc<std::sync::OnceLock<label::PrintService>>,
-    pub updater: std::sync::Arc<std::sync::OnceLock<updater::Updater>>,
 }
