@@ -280,13 +280,15 @@ jobs:
             done
             # webkit 執行期還要這些 .so（focal 系統版本太舊或沒有），連 GCC 11 的 libstdc++ 一起從建置容器帶走
             mkdir -p "$STAGE/stack/usr/local/lib/x86_64-linux-gnu"
+            # awk 不能提前 exit：上游還在寫就會吃 SIGPIPE，pipefail 下整步以 141 失敗（v0.1.0 第一次發版就死在這）
+            LDCACHE="$(ldconfig -p 2>/dev/null || true)"
             for soname in \
                 libxslt.so.1 libwoff2dec.so.1.0.2 libwoff2common.so.1.0.2 \
                 libharfbuzz-icu.so.0 libopenjp2.so.7 libwebpdemux.so.2 \
                 libenchant-2.so.2 libsecret-1.so.0 libhyphen.so.0 \
                 libgbm.so.1 libdrm.so.2 libnghttp2.so.14 libatomic.so.1 \
                 libwayland-server.so.0 libstdc++.so.6; do
-              real=$(ldconfig -p 2>/dev/null | awk -v s="$soname" '$1==s{print $NF; exit}')
+              real=$(printf '%s\n' "$LDCACHE" | awk -v s="$soname" '$1==s && !f{print $NF; f=1}')
               if [ -n "$real" ] && [ -e "$real" ]; then
                 actual=$(readlink -f "$real")
                 cp "$actual" "$STAGE/stack/usr/local/lib/x86_64-linux-gnu/"
@@ -408,7 +410,7 @@ jobs:
         run: |
           set -euo pipefail
           # --paginate 每頁各吐一行，只取第一個非空的
-          EXISTING=$(gh api --paginate "repos/${{ github.repository }}/releases/${RELEASE_ID}/assets" --jq 'first(.[] | select(.name == "latest.json") | .id) // empty' | awk 'NF{print; exit}')
+          EXISTING=$(gh api --paginate "repos/${{ github.repository }}/releases/${RELEASE_ID}/assets" --jq 'first(.[] | select(.name == "latest.json") | .id) // empty' | awk 'NF && !f{print; f=1}')
           if [ -n "$EXISTING" ]; then
             gh api -X DELETE "repos/${{ github.repository }}/releases/assets/${EXISTING}"
           fi
