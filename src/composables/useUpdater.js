@@ -13,7 +13,6 @@ import { ref } from 'vue'
 import { api } from '@/api/http'
 import { listen } from '@/api/events'
 import { isTauriRuntime } from '@/api/runtime'
-import { useSettingsPassword } from '@/composables/useSettingsPassword'
 
 const updateAvailable = ref(false)
 const updateInfo = ref(null) // { version, currentVersion, notes, date }
@@ -104,9 +103,7 @@ const installTauri = async () => {
 
 export const downloadAndInstall = async () => {
   if (isDownloading.value) return
-  const pw = useSettingsPassword()
-  if (!(await pw.ensure())) return
-  isDownloading.value = true
+    isDownloading.value = true
   downloadProgress.value = 0
   stage.value = 'downloading'
   lastError.value = null
@@ -118,7 +115,6 @@ export const downloadAndInstall = async () => {
       await waitForRestart()
     }
   } catch (e) {
-    if (e.status === 403) pw.forget()
     lastError.value = e?.message || String(e)
     isDownloading.value = false
     stage.value = ''
@@ -128,9 +124,7 @@ export const downloadAndInstall = async () => {
 /** 沒外網時：上傳發版的 tar.gz（只有 headless 服務支援；桌面 App 走系統安裝包） */
 export const uploadAndInstall = async file => {
   if (isDownloading.value || !file || isTauriRuntime) return
-  const pw = useSettingsPassword()
-  if (!(await pw.ensure())) return
-  isDownloading.value = true
+    isDownloading.value = true
   downloadProgress.value = 0
   stage.value = 'installing'
   lastError.value = null
@@ -138,7 +132,6 @@ export const uploadAndInstall = async file => {
     await api.updateUpload(file)
     await waitForRestart()
   } catch (e) {
-    if (e.status === 403) pw.forget()
     lastError.value = e.message
     isDownloading.value = false
     stage.value = ''

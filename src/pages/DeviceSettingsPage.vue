@@ -10,13 +10,11 @@ import { useI18n } from 'vue-i18n'
 import { onBeforeRouteLeave } from 'vue-router'
 import { api } from '@/api/http'
 import { useStatusStore } from '@/stores/status'
-import { useSettingsPassword } from '@/composables/useSettingsPassword'
 import AppHeader from '@/components/AppHeader.vue'
 import PageActions from '@/components/PageActions.vue'
 import { toast } from 'vue3-toastify'
 
 const { t } = useI18n()
-const pw = useSettingsPassword()
 const status = useStatusStore()
 const cfg = ref(null)
 const saved = ref('')
@@ -24,7 +22,6 @@ const loading = ref(false)
 const saving = ref(false)
 const errorMsg = ref('')
 const resetDialog = ref(false)
-const showPassword = ref(false)
 const testing = ref('')
 const testResult = reactive({})
 
@@ -80,14 +77,12 @@ const errors = computed(() => {
 
 const save = async () => {
   if (errors.value.length) { toast(errors.value[0], { type: 'error' }); return }
-  if (!(await pw.ensure())) return
   saving.value = true
   try {
     await api.saveConfig(cfg.value)
     saved.value = JSON.stringify(cfg.value)
     toast(t('common.saved'), { type: 'success' })
   } catch (e) {
-    if (e.status === 403) pw.forget()
     toast(e.message, { type: 'error' })
   } finally { saving.value = false }
 }
@@ -103,8 +98,7 @@ const testConn = async (target, addr) => {
 
 const confirmReset = async () => {
   resetDialog.value = false
-  if (!(await pw.ensure())) return
-  try { await api.sorterReset(); toast(t('page.settings.resetSorterSent'), { type: 'success' }) } catch (e) { if (e.status === 403) pw.forget(); toast(e.message, { type: 'error' }) }
+  try { await api.sorterReset(); toast(t('page.settings.resetSorterSent'), { type: 'success' }) } catch (e) { toast(e.message, { type: 'error' }) }
 }
 
 // ---- 列印 profile ----
@@ -169,7 +163,6 @@ onBeforeUnmount(() => window.removeEventListener('beforeunload', beforeUnload))
             <VCol cols="6" md="2"><VLabel class="mb-1 text-body-medium">{{ $t('page.settings.general.machine') }}</VLabel><VTextField v-model="cfg.general.machine" /></VCol>
             <VCol cols="6" md="2"><VLabel class="mb-1 text-body-medium">{{ $t('page.settings.general.retention') }}</VLabel><VNumberInput v-model="cfg.general.retention_days" :min="0" :max="365" /></VCol>
             <VCol cols="6" md="2"><VLabel class="mb-1 text-body-medium">{{ $t('page.settings.general.defaultChute') }}</VLabel><VTextField v-model="cfg.general.default_chute" :error-messages="cfg.general.default_chute?.trim() ? '' : $t('page.settings.v.defaultChute')" /></VCol>
-            <VCol cols="6" md="2"><VLabel class="mb-1 text-body-medium">{{ $t('page.settings.general.password') }}</VLabel><VTextField v-model="cfg.server.settings_password" :type="showPassword ? 'text' : 'password'" :append-inner-icon="showPassword ? 'tabler-eye-off' : 'tabler-eye'" @click:append-inner="showPassword = !showPassword" /></VCol>
           </VRow>
           <VDivider class="my-4" />
           <VRow density="compact" align="end">

@@ -157,6 +157,10 @@
 
 **待正式機確認**：`p1` 回覆的實際行格式（`protocol-spec` §10），目前解析比照舊程式（去 `_`、`=` 後取整數）；API 回應帶 `raw` 原文，現場可對照。
 
+### 取消設定密碼 — 完成
+
+主人決定：程式已由自己維護，不再需要舊系統的操作密碼。整套機制拆掉：後端 `require_password`／`/api/auth/check`／`server.settings_password` 移除（舊 `config.toml` 裡的欄位會被忽略），前端密碼對話框、composable、設定頁密碼欄、`X-Settings-Password` 標頭一併移除；設定、格口表、重置分揀機、光電屏蔽、更新安裝現在直接執行。
+
 ### 下一步：M6 現場切換
 
 1. 主人在正式機實裝 GHA 產出的 `cix3752iSorter-0.1.0-ubuntu-20.04.tar.gz`（`sudo bash install.sh desktop` 或 `systemd`），先改 `server.bind` 避開舊系統的 8080

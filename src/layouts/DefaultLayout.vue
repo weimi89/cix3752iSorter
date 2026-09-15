@@ -6,8 +6,6 @@ import { useLayoutConfigStore } from '@layouts/stores/config'
 import { useSkins } from '@core/composable/useSkins'
 import AppNavbar from '@/components/AppNavbar.vue'
 import AppLogo from '@/components/AppLogo.vue'
-import SettingsPasswordDialog from '@/components/SettingsPasswordDialog.vue'
-import { useSettingsPassword } from '@/composables/useSettingsPassword'
 import { navItems } from '@/config/navConfig'
 import { useStatusStore } from '@/stores/status'
 import { listen } from '@/api/events'
@@ -18,7 +16,6 @@ const { layoutAttrs } = useSkins()
 const configStore = useLayoutConfigStore()
 const status = useStatusStore()
 const { t } = useI18n()
-const pw = useSettingsPassword()
 
 let unlistenAlert = null
 let unlistenMsg = null
@@ -61,8 +58,6 @@ onBeforeUnmount(() => {
 
     <slot />
 
-    <!-- 全站唯一的設定密碼對話框（見 useSettingsPassword） -->
-    <SettingsPasswordDialog :ctl="pw" />
   </VerticalNavLayout>
 </template>
 

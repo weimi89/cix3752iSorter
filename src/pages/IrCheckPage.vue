@@ -5,13 +5,11 @@
  */
 import { useI18n } from 'vue-i18n'
 import { api } from '@/api/http'
-import { useSettingsPassword } from '@/composables/useSettingsPassword'
 import AppHeader from '@/components/AppHeader.vue'
 import PageActions from '@/components/PageActions.vue'
 import { toast } from 'vue3-toastify'
 
 const { t } = useI18n()
-const pw = useSettingsPassword()
 
 const devices = ref([]) // [{ m2, status }]
 const checking = ref(false)
@@ -80,13 +78,11 @@ const cellState = idx => {
 
 const blocking = ref(false)
 const setBlock = async block => {
-  if (!(await pw.ensure())) return
   blocking.value = true
   try {
     await api.irBlock(detail.value.m2, block)
     toast(t(block ? 'page.ir.blocked' : 'page.ir.unblocked'), { type: 'success' })
   } catch (e) {
-    if (e.status === 403) pw.forget()
     toast(e.message, { type: 'error' })
   } finally {
     blocking.value = false

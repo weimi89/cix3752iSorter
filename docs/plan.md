@@ -23,7 +23,7 @@
 | 持久化 | 包裹 `~P` 時即寫入，之後只更新；每個訊號寫 `parcel_events`；列印任務落 `print_jobs`；SQLite WAL | 重啟不丟在途件與列印任務；詳情用事件表而非 JSON blob |
 | 前後端通道 | axum REST `/api/*` + SSE `/events/stream` + rust-embed 內嵌 `dist`；桌面視窗只多一個 `backend_base_url` command 問到本機伺服器位址，其餘一律走 REST／SSE | 同一份前端在瀏覽器與 Tauri 視窗都能跑，不需要 `/rpc/{cmd}` 分派層；SSE 用戶端沿用 LabelPrint `src/api/events.js` |
 | 設定 | `config.toml`（裝置位址、指令字串、NG 規則、燈號、印表機 USB 埠、列印 profile）+ DB `chutes` 表（代號 ↔ CID ↔ 印表機） | 對應舊 `conf.json` + `gkconfig.json` + `chute` 表；設定頁改完即熱套用，連線類參數改動觸發該裝置 task 重連 |
-| 存取控制 | 內網免登入；「設定／裝置控制／清資料」類操作需設定密碼（對應舊 `setPwd`）；不做外網開放 | 現場 LAN 工具；LabelPrint 的 `server/auth.rs` 外網模型這裡用不到 |
+| 存取控制 | 內網免登入、**不設操作密碼**（2026-09-15 決定：程式已由自己維護，舊 `setPwd` 不再需要）；不做外網開放 | 現場 LAN 工具；LabelPrint 的 `server/auth.rs` 外網模型這裡用不到 |
 
 ## 專案結構
 
@@ -51,7 +51,7 @@ cix3752iSorter/
 │   │   ├── tspl.rs               512 零前導 + SIZE/cmd/CLS/BITMAP/PRINT
 │   │   ├── usb.rs                /sys/class/usbmisc 對 bus-port → /dev/usb/lpN
 │   │   └── queue.rs              print_jobs 表；每台印表機一個 worker（spawn_blocking 寫裝置）、重試／告警／延遲 (格口號-1)*400ms
-│   ├── server/                   axum：routes.rs（REST）、events.rs（SSE，照 LabelPrint）、assets.rs（照 LabelPrint）、auth.rs（設定密碼）
+│   ├── server/                   axum：routes.rs（REST）、events.rs（SSE，照 LabelPrint）、assets.rs（照 LabelPrint）
 │   └── sim/                      replay 模擬器：當皮帶+分揀機 TCP server 回放 cmd.log、假相機、假中介機
 ├── frontend/                     Vue 3 + Vuetify + Pinia + vue-router（從 LabelPrint 的 @core/@layouts/plugins 起樣板）
 └── docs/                         legacy-analysis / protocol-spec / plan / handover
@@ -75,8 +75,8 @@ cix3752iSorter/
 
 - `GET /api/status`：裝置連線狀態、皮帶運行、今日件數、在途件、當前件、最近系統訊息
 - `GET /api/parcels?…`、`GET /api/parcels/{id}/events`、`GET /api/parcels/export.xlsx`
-- `GET/PUT /api/config`（PUT 需密碼）、`GET/PUT /api/chutes`
-- `POST /api/belt/{start|auto|stop}`、`POST /api/led`、`POST /api/sorter/reset`（需密碼）
+- `GET/PUT /api/config`、`GET/PUT /api/chutes`
+- `POST /api/belt/{start|auto|stop}`、`POST /api/led`、`POST /api/sorter/reset`
 - `GET /api/print-jobs`、`POST /api/print-jobs/{id}/retry`、`POST /api/printers/{port}/test`
 - `GET /api/ir/status`（`Kd[`）、`POST /api/ir/{block|unblock}`（M6）
 - `GET /api/logs?…`（event_log）

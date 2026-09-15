@@ -1,12 +1,11 @@
 //! REST 端點。回應一律 JSON，錯誤回 `{ "error": "..." }`。
 //!
-//! 會改變現場行為的操作（設定、格口表、重置分揀機）要帶 `X-Settings-Password`；
-//! 皮帶啟停與重送任務不用（現場人員的日常操作）。
+//! 內網工具、程式由自己維護，不設操作密碼：所有端點免認證。
 
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
-    http::{HeaderMap, StatusCode, header},
+    http::{StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
@@ -48,22 +47,11 @@ fn unavailable(what: &str) -> ApiError {
     ApiError(StatusCode::SERVICE_UNAVAILABLE, format!("{what}尚未啟動"))
 }
 
-/// 需要設定密碼的操作
-fn require_password(state: &ServerState, headers: &HeaderMap) -> Result<(), ApiError> {
-    let expected = state.app.config.current().server.settings_password;
-    let given = headers.get("x-settings-password").and_then(|v| v.to_str().ok()).unwrap_or("");
-    if expected.is_empty() || given == expected {
-        Ok(())
-    } else {
-        Err(ApiError(StatusCode::FORBIDDEN, "設定密碼錯誤".into()))
-    }
-}
 
 pub(super) fn api_router() -> Router<ServerState> {
     Router::new()
         .route("/health", get(health))
         .route("/status", get(status))
-        .route("/auth/check", post(auth_check))
         .route("/parcels", get(parcels_list))
         .route("/parcels/export.xlsx", get(parcels_export))
         .route("/parcels/{id}", get(parcel_detail))
@@ -130,16 +118,6 @@ async fn status(State(state): State<ServerState>) -> ApiResult<serde_json::Value
         "print": { "pending": print_pending, "failed": print_failed },
         "report": { "pending": report_pending, "failed": report_failed },
     })))
-}
-
-#[derive(Deserialize)]
-struct AuthBody {
-    password: String,
-}
-
-async fn auth_check(State(state): State<ServerState>, Json(b): Json<AuthBody>) -> ApiResult<serde_json::Value> {
-    let ok = state.app.config.current().server.settings_password == b.password;
-    Ok(Json(serde_json::json!({ "ok": ok })))
 }
 
 // ---------- 包裹 ----------
@@ -444,8 +422,7 @@ async fn config_get(State(state): State<ServerState>) -> ApiResult<AppConfig> {
     Ok(Json(state.app.config.current()))
 }
 
-async fn config_put(State(state): State<ServerState>, headers: HeaderMap, Json(cfg): Json<AppConfig>) -> ApiResult<serde_json::Value> {
-    require_password(&state, &headers)?;
+async fn config_put(State(state): State<ServerState>, Json(cfg): Json<AppConfig>) -> ApiResult<serde_json::Value> {
     for b in &cfg.emergency_buttons {
         if b.bit > 7 {
             return Err(bad(format!("按鈕「{}」的位元必須在 0–7", b.describe)));
@@ -474,8 +451,7 @@ async fn chutes_get(State(state): State<ServerState>) -> ApiResult<Vec<ChuteApi>
     Ok(Json(rows))
 }
 
-async fn chutes_put(State(state): State<ServerState>, headers: HeaderMap, Json(list): Json<Vec<ChuteApi>>) -> ApiResult<serde_json::Value> {
-    require_password(&state, &headers)?;
+async fn chutes_put(State(state): State<ServerState>, Json(list): Json<Vec<ChuteApi>>) -> ApiResult<serde_json::Value> {
     let default_code = state.app.config.current().general.default_chute;
     if !list.iter().any(|c| c.code == default_code) {
         return Err(bad(format!("格口表必須包含預設格口 {default_code}")));
@@ -526,8 +502,7 @@ async fn belt_stop(State(state): State<ServerState>) -> ApiResult<serde_json::Va
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
-async fn sorter_reset(State(state): State<ServerState>, headers: HeaderMap) -> ApiResult<serde_json::Value> {
-    require_password(&state, &headers)?;
+async fn sorter_reset(State(state): State<ServerState>) -> ApiResult<serde_json::Value> {
     state.app.tracker.get().ok_or_else(|| unavailable("狀態機"))?.sorter_reset().await;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
@@ -538,8 +513,7 @@ struct CommandBody {
 }
 
 /// 只允許查詢與燈控類指令直送，避免網頁誤下分揀指令
-async fn sorter_command(State(state): State<ServerState>, headers: HeaderMap, Json(b): Json<CommandBody>) -> ApiResult<serde_json::Value> {
-    require_password(&state, &headers)?;
+async fn sorter_command(State(state): State<ServerState>, Json(b): Json<CommandBody>) -> ApiResult<serde_json::Value> {
     let cmd = b.command.trim().to_string();
     let allowed = cmd.starts_with("KL ") || cmd.starts_with("Kd") || cmd.starts_with("p1 ") || cmd.starts_with("KY");
     if !allowed || cmd.contains('\n') {
@@ -902,16 +876,14 @@ async fn update_check(State(state): State<ServerState>) -> ApiResult<crate::upda
 }
 
 /// 下載並安裝：需設定密碼；成功後行程會在 1 秒後結束，交給 supervisor／systemd 重啟
-async fn update_install(State(state): State<ServerState>, headers: HeaderMap) -> ApiResult<serde_json::Value> {
-    require_password(&state, &headers)?;
+async fn update_install(State(state): State<ServerState>) -> ApiResult<serde_json::Value> {
     let up = state.app.updater.get().ok_or_else(|| unavailable("更新服務"))?.clone();
     up.download_and_install().await?;
     Ok(Json(serde_json::json!({ "ok": true, "restarting": true })))
 }
 
 /// 沒有外網時：網頁直接上傳發版的 tar.gz
-async fn update_upload(State(state): State<ServerState>, headers: HeaderMap, body: axum::body::Bytes) -> ApiResult<serde_json::Value> {
-    require_password(&state, &headers)?;
+async fn update_upload(State(state): State<ServerState>, body: axum::body::Bytes) -> ApiResult<serde_json::Value> {
     if body.len() < 1024 {
         return Err(bad("檔案太小，不是發版的 tar.gz"));
     }
@@ -1042,8 +1014,7 @@ struct IrBlockBody {
 }
 
 /// 屏蔽／解除屏蔽整台光電；會改變分揀機行為，要設定密碼
-async fn ir_block(State(state): State<ServerState>, headers: HeaderMap, Json(b): Json<IrBlockBody>) -> ApiResult<serde_json::Value> {
-    require_password(&state, &headers)?;
+async fn ir_block(State(state): State<ServerState>, Json(b): Json<IrBlockBody>) -> ApiResult<serde_json::Value> {
     let cfg = state.app.config.current();
     if b.m2 >= cfg.sorter.number.max(1) {
         return Err(bad("分揀機編號超出台數"));

@@ -61,10 +61,6 @@
     "sorter": "分揀機",
     "camera": "讀碼站"
   },
-  "password": {
-    "title": "設定密碼",
-    "label": "請輸入設定密碼"
-  },
   "status": {
     "init": "初始化",
     "received": "收件",
@@ -315,7 +311,6 @@
         "machine": "機台編號",
         "retention": "資料保留天數",
         "defaultChute": "預設格口",
-        "password": "設定密碼",
         "bind": "網頁監聽位址",
         "bindHint": "改了要重啟程式才生效；其餘設定存檔即生效"
       },

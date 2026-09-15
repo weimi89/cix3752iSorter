@@ -53,8 +53,6 @@ impl Default for UpdateConfig {
 pub struct ServerConfig {
     /// 網頁後台監聽位址
     pub bind: String,
-    /// 設定頁、裝置控制、清資料的操作密碼（對應舊 `base.setPwd`）
-    pub settings_password: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -231,7 +229,6 @@ impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             bind: "0.0.0.0:8080".into(),
-            settings_password: "123456".into(),
         }
     }
 }

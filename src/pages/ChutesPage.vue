@@ -1,14 +1,12 @@
 <script setup>
-/** 格口對照：左右兩欄卡片（對齊 cix3752iLabelPrint「分揀通道」頁），其餘特殊口另成一區。存檔要設定密碼。 */
+/** 格口對照：左右兩欄卡片（對齊 cix3752iLabelPrint「分揀通道」頁），其餘特殊口另成一區。 */
 import { useI18n } from 'vue-i18n'
 import { api } from '@/api/http'
-import { useSettingsPassword } from '@/composables/useSettingsPassword'
 import AppHeader from '@/components/AppHeader.vue'
 import PageActions from '@/components/PageActions.vue'
 import { toast } from 'vue3-toastify'
 
 const { t } = useI18n()
-const pw = useSettingsPassword()
 const list = ref([])
 const printers = ref([])
 const loading = ref(false)
@@ -46,14 +44,12 @@ const remove = c => { list.value.splice(list.value.indexOf(c), 1); dirty.value =
 const mark = () => { dirty.value = true }
 
 const save = async () => {
-  if (!(await pw.ensure())) return
   saving.value = true
   try {
     await api.saveChutes(list.value.map(c => ({ ...c, cid: Number(c.cid), sort_order: Number(c.sort_order) })))
     toast(t('common.saved'), { type: 'success' })
     load()
   } catch (e) {
-    if (e.status === 403) pw.forget()
     toast(e.message, { type: 'error' })
   } finally { saving.value = false }
 }

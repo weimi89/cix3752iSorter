@@ -2,18 +2,15 @@
  * 後端資料通道：所有頁面經這裡打 REST。
  *
  * - 非 2xx 一律 throw，訊息取後端的 `error` 欄位，頁面用 try/catch + toast 呈現
- * - 需要設定密碼的操作（設定、格口表、重置分揀機）自動帶 `X-Settings-Password`
  */
-import { getSettingsPassword } from '@/composables/useSettingsPassword'
 import { apiBase } from '@/api/runtime'
 
 /** 空字串／null 的查詢參數不送，後端一律當「不篩選」 */
 const qs = params => new URLSearchParams(Object.entries(params || {}).filter(([, v]) => v !== '' && v != null && v !== undefined))
 
-async function request(method, path, body, { password = false, raw = false } = {}) {
+async function request(method, path, body, { raw = false } = {}) {
   const headers = {}
   if (body !== undefined) headers['Content-Type'] = 'application/json'
-  if (password) headers['X-Settings-Password'] = getSettingsPassword()
   let res
   try {
     res = await fetch(apiBase() + path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) })
@@ -38,7 +35,6 @@ async function request(method, path, body, { password = false, raw = false } = {
 export const api = {
   status: () => request('GET', '/api/status'),
   health: () => request('GET', '/api/health'),
-  authCheck: password => request('POST', '/api/auth/check', { password }),
 
   parcels: params => request('GET', `/api/parcels?${qs(params)}`),
   parcel: id => request('GET', `/api/parcels/${id}`),
@@ -49,19 +45,19 @@ export const api = {
   lanIps: () => request('GET', '/api/lan-ips'),
   irStatus: () => request('GET', '/api/ir/status'),
   irDetail: m2 => request('POST', '/api/ir/detail', { m2 }),
-  irBlock: (m2, block) => request('POST', '/api/ir/block', { m2, block }, { password: true }),
+  irBlock: (m2, block) => request('POST', '/api/ir/block', { m2, block }),
   dailyStats: (days = 30) => request('GET', `/api/stats/daily?days=${days}`),
   hourlyStats: (hours = 12) => request('GET', `/api/stats/hourly?hours=${hours}`),
 
   config: () => request('GET', '/api/config'),
-  saveConfig: cfg => request('PUT', '/api/config', cfg, { password: true }),
+  saveConfig: cfg => request('PUT', '/api/config', cfg),
   chutes: () => request('GET', '/api/chutes'),
-  saveChutes: list => request('PUT', '/api/chutes', list, { password: true }),
+  saveChutes: list => request('PUT', '/api/chutes', list),
 
   beltStart: () => request('POST', '/api/belt/start'),
   beltStop: () => request('POST', '/api/belt/stop'),
-  sorterReset: () => request('POST', '/api/sorter/reset', undefined, { password: true }),
-  sorterCommand: command => request('POST', '/api/sorter/command', { command }, { password: true }),
+  sorterReset: () => request('POST', '/api/sorter/reset', undefined),
+  sorterCommand: command => request('POST', '/api/sorter/command', { command }),
   deviceTest: (target, addr) => request('POST', '/api/devices/test', { target, addr }),
 
   printJobs: params => request('GET', `/api/print-jobs?${qs(params)}`),
@@ -76,9 +72,9 @@ export const api = {
 
   updateStatus: () => request('GET', '/api/update/status'),
   updateCheck: () => request('POST', '/api/update/check'),
-  updateInstall: () => request('POST', '/api/update/install', undefined, { password: true }),
+  updateInstall: () => request('POST', '/api/update/install', undefined),
   updateUpload: async file => {
-    const res = await fetch(apiBase() + '/api/update/upload', { method: 'POST', headers: { 'X-Settings-Password': getSettingsPassword(), 'Content-Type': 'application/gzip' }, body: file })
+    const res = await fetch(apiBase() + '/api/update/upload', { method: 'POST', headers: { 'Content-Type': 'application/gzip' }, body: file })
     if (!res.ok) { let m = `伺服器回應 ${res.status}`; try { m = (await res.json()).error || m } catch {} const e = new Error(m); e.status = res.status; throw e }
     return res.json()
   },
