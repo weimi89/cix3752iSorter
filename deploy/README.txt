@@ -5,7 +5,7 @@
   - cix3752i-sorter_<版本>_<distro>_amd64.deb   主程式（桌面視窗 + 內建網頁後台；同一個檔也能 --headless 跑）
   - stack/usr/local/                            只有 Ubuntu 20.04 的包有：自編的 glib 2.78 + libsoup3 + webkit2gtk-4.1
                                                 （20.04 套件源沒有 webkit2gtk-4.1，桌面視窗與執行檔都要靠它）
-  - install.sh、sorter.service、supervisor-sorter.conf
+  - install.sh、sorter.service、supervisor-sorter.ini
 
 安裝（一台機器只選一種）：
   sudo bash install.sh desktop      桌面模式：從應用選單開「智配通 分揀控制」；新版由程式內建更新安裝（會要系統密碼）

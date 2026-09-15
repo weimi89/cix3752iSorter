@@ -16,6 +16,7 @@
 | [`docs/legacy-analysis.md`](docs/legacy-analysis.md) | 舊系統組成、已驗證根因、結構性缺陷與對策 |
 | [`docs/protocol-spec.md`](docs/protocol-spec.md) | 皮帶／分揀機／相機／印表機協定與實測時序（由 71 萬行現場日誌逆推） |
 | [`docs/plan.md`](docs/plan.md) | 架構決策、模組切分、資料表、API、里程碑 |
+| [`docs/cutover.md`](docs/cutover.md) | 現場切換與回退步驟（停舊 → 起新、驗證清單、2 分鐘回退） |
 | [`docs/handover.md`](docs/handover.md) | 進度與交接 |
 | `cix3752iLabelPrint/docs/local-http-api.md` | 中介機 API 契約（`/api/parcel`、`/api/report`、`/api/device-alert`） |
 

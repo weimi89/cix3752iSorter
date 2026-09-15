@@ -161,8 +161,14 @@
 
 主人決定：程式已由自己維護，不再需要舊系統的操作密碼。整套機制拆掉：後端 `require_password`／`/api/auth/check`／`server.settings_password` 移除（舊 `config.toml` 裡的欄位會被忽略），前端密碼對話框、composable、設定頁密碼欄、`X-Settings-Password` 標頭一併移除；設定、格口表、重置分揀機、光電屏蔽、更新安裝現在直接執行。
 
+### 切換／回退文件 — 完成；supervisor 設定檔名修正
+
+- `docs/cutover.md`：依正式機抓回來的 `main_proj/supervisor/`（程式名 `main_proj`＝Go、`twfilter`＝Node，皆 root；`sort_box` 已停用）寫成可直接貼的指令：前一天裝好不起 → 停舊（先 Node 放掉 8051，再 Go）→ 確認埠位釋放 → 改副檔名讓舊的不再自啟 → 起新 → 7 項驗證；回退反向、2 分鐘內舊程式恢復。
+- **修了一個會讓 supervisor 模式裝不進去的錯**：現場 `supervisord.conf` 只 include `conf.d/*.ini`，`install.sh` 原本裝成 `.conf` 會被無視。已改成 `cix3752i-sorter.ini`（`deploy/supervisor-sorter.ini`）。
+- 舊後台日誌（`main_proj.log*`）裡所有請求都來自 `127.0.0.1`、沒有 `/c4/qs`，**確認沒有外部系統在打快速分揀 API**，不移植。
+
 ### 下一步：M6 現場切換
 
 1. 主人在正式機實裝 GHA 產出的 `cix3752iSorter-0.1.0-ubuntu-20.04.tar.gz`（`sudo bash install.sh desktop` 或 `systemd`），預設埠 18090 已避開舊系統的 8080
 2. ~~設定轉換腳本~~ 不需要：`config/mod.rs` 的預設值與 `migrations/0001_init.sql` 的格口初值就是現場 `conf.json`／`gkconfig.json`／舊 `chute` 表的值，首次啟動自動產生的設定即可用（網頁埠預設 18090，不會撞到舊系統的 8080）
-3. ~~IR 光電檢查頁~~（已完成）、supervisor 切換與回退步驟
+3. ~~IR 光電檢查頁~~、~~supervisor 切換與回退步驟~~（都完成，見 `docs/cutover.md`）；剩：推 GitHub 跑發版、正式機實裝、實印一張對比、`p1` 格式確認

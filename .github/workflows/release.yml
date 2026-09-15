@@ -301,7 +301,7 @@ jobs:
           fi
 
           cp "/tmp/out/cix3752i-sorter_${VERSION}_${DISTRO}_amd64.deb" "$STAGE/"
-          cp deploy/install.sh deploy/sorter.service deploy/supervisor-sorter.conf deploy/README.txt "$STAGE/"
+          cp deploy/install.sh deploy/sorter.service deploy/supervisor-sorter.ini deploy/README.txt "$STAGE/"
           chmod +x "$STAGE/install.sh"
 
           tar -C /tmp -czf "/tmp/out/${STAGE_NAME}.tar.gz" "${STAGE_NAME}"

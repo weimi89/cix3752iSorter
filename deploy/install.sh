@@ -91,7 +91,8 @@ case "${MODE}" in
     ;;
   supervisor)
     echo "3/3 登記 supervisor 程式"
-    install -m 644 "${HERE}/supervisor-sorter.conf" /etc/supervisor/conf.d/cix3752i-sorter.conf
+    # 現場的 supervisord.conf 只 include conf.d/*.ini（廠商裝的），檔名用 .conf 會被無視、程式永遠登記不進去
+    install -m 644 "${HERE}/supervisor-sorter.ini" /etc/supervisor/conf.d/cix3752i-sorter.ini
     supervisorctl reread
     supervisorctl update
     supervisorctl restart cix3752i-sorter
