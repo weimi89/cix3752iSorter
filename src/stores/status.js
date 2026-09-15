@@ -8,8 +8,6 @@ import { listen, onConnection } from '@/api/events'
 export const useStatusStore = defineStore('status', {
   state: () => ({
     version: '',
-    title: '',
-    machine: '',
     devices: { belt: { connected: false }, sorter: { connected: false }, camera: { connected: false } },
     tracker: null,
     print: { pending: 0, failed: 0 },
@@ -29,8 +27,6 @@ export const useStatusStore = defineStore('status', {
       try {
         const d = await api.status()
         this.version = d.version
-        this.title = d.title
-        this.machine = d.machine
         this.devices = d.devices
         this.tracker = d.tracker
         this.print = d.print

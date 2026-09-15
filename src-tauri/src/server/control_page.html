@@ -149,7 +149,6 @@
       const d = await r.json();
       for (const k of ['belt', 'sorter', 'camera']) state.devices[k] = !!(d.devices && d.devices[k] && d.devices[k].connected);
       state.tracker = d.tracker;
-      if (d.title) { $('title').textContent = d.title + '・遙控'; document.title = d.title + ' 遙控'; }
       $('conn').classList.add('on');
     } catch (e) {
       $('conn').classList.remove('on');

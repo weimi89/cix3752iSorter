@@ -159,10 +159,8 @@ onBeforeUnmount(() => window.removeEventListener('beforeunload', beforeUnload))
         <VDivider />
         <VCardText class="pt-4">
           <VRow density="compact">
-            <VCol cols="12" md="4"><VLabel class="mb-1 text-body-medium">{{ $t('page.settings.general.title') }}</VLabel><VTextField v-model="cfg.general.title" /></VCol>
-            <VCol cols="6" md="2"><VLabel class="mb-1 text-body-medium">{{ $t('page.settings.general.machine') }}</VLabel><VTextField v-model="cfg.general.machine" /></VCol>
-            <VCol cols="6" md="2"><VLabel class="mb-1 text-body-medium">{{ $t('page.settings.general.retention') }}</VLabel><VNumberInput v-model="cfg.general.retention_days" :min="0" :max="365" /></VCol>
-            <VCol cols="6" md="2"><VLabel class="mb-1 text-body-medium">{{ $t('page.settings.general.defaultChute') }}</VLabel><VTextField v-model="cfg.general.default_chute" :error-messages="cfg.general.default_chute?.trim() ? '' : $t('page.settings.v.defaultChute')" /></VCol>
+            <VCol cols="6" md="3"><VLabel class="mb-1 text-body-medium">{{ $t('page.settings.general.retention') }}</VLabel><VNumberInput v-model="cfg.general.retention_days" :min="0" :max="365" /></VCol>
+            <VCol cols="6" md="3"><VLabel class="mb-1 text-body-medium">{{ $t('page.settings.general.defaultChute') }}</VLabel><VTextField v-model="cfg.general.default_chute" :error-messages="cfg.general.default_chute?.trim() ? '' : $t('page.settings.v.defaultChute')" /></VCol>
           </VRow>
           <VDivider class="my-4" />
           <VRow density="compact" align="end">

@@ -307,8 +307,6 @@
         "buttons": "急停按鈕"
       },
       "general": {
-        "title": "站名",
-        "machine": "機台編號",
         "retention": "資料保留天數",
         "defaultChute": "預設格口",
         "bind": "網頁監聽位址",

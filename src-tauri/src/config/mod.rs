@@ -58,8 +58,6 @@ pub struct ServerConfig {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct GeneralConfig {
-    pub title: String,
-    pub machine: String,
     /// 包裹與事件保留天數；0 = 不清理
     pub retention_days: u32,
     /// 拿不到格口時的預設格口代號（查 `chutes` 表）
@@ -236,8 +234,6 @@ impl Default for ServerConfig {
 impl Default for GeneralConfig {
     fn default() -> Self {
         Self {
-            title: "物流貓智能分揀系統".into(),
-            machine: "001".into(),
             retention_days: 15,
             default_chute: "RS".into(),
         }

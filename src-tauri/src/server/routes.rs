@@ -109,8 +109,6 @@ async fn status(State(state): State<ServerState>) -> ApiResult<serde_json::Value
     .unwrap_or((0, 0));
     Ok(Json(serde_json::json!({
         "version": env!("CARGO_PKG_VERSION"),
-        "title": cfg.general.title,
-        "machine": cfg.general.machine,
         "uptime_secs": state.app.started_at.elapsed().as_secs(),
         "devices": { "belt": rt.belt, "sorter": rt.sorter, "camera": rt.camera },
         "tracker": tracker,
