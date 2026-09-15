@@ -105,6 +105,29 @@
 **要主人做的事（GitHub UI）**：建 repo `weimi89/cix3752iSorter`（或改兩處 endpoint）→ Settings → Secrets 加 `TAURI_SIGNING_PRIVATE_KEY`（`~/.tauri/cix3752iSorter.key` 內容）與 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`（建金鑰時設的密碼，沒設就留空字串）→ 手動跑一次 `warm-focal-cache.yml`（在 main 上）把 20.04 的 webkit 棧先編好進快取 → 打 `v0.1.0` tag 觸發 `release.yml`。
 **已知風險**：Tauri updater 在 Linux 裝 .deb 走 `pkexec dpkg -i`，桌面模式按「立即更新」會跳系統密碼；現場若不想每次輸入，改用 headless 模式（換檔不需 root）。`dist-bin/` 內的舊 tar.gz 是 Tauri 化之前建的，不要再拿去工控機。
 
+## 2026-09-15
+
+### 舊系統移植缺口稽核 — 已修 7 項，2 項未做
+
+逐條對照 `main_proj/logic/*.go` 與 `twfilter/app/server.js` 後找到的缺口（主流程本身一致，漏的是流程邊上的規則）：
+
+| # | 缺口 | 修法 | 驗證 |
+|---|---|---|---|
+| 1 | 皮帶連線後沒有先停止＋重置（舊版「避免傷人」） | `device/belt.rs` 連上依序送 `belt.cmd.stop`、`belt.cmd.reset`；初始化指令改成 watch，設定改了下次連線生效 | 模擬器：連上即收到 `KM998 1`、`KM999` |
+| 2 | 格口回覆太晚仍印面單（包裹已走預設口） | 面單改由**狀態機接受決定後**才送列印（`Outputs::print_label`），解析器不再自己丟列印工作 | 單元測試 `格口被接受才印面單_回覆太晚不印` |
+| 3 | 面單抓不到，包裹仍分到正常格口並回報 | 解析器**先抓面單**才回結果（對齊舊 Node）；抓不到 → 走預設口、不回報、不印（`chute/mod.rs resolve`） | 模擬器 `--mw-img-fail-every 4`：失敗件走 RS、`report_queue` 無該件 |
+| 4 | NoRead 沒呼叫中介機（契約要它拍照存證＋計數） | NoRead 本機立刻決定預設口，同時送 `notify_only` 請求打 `/api/parcel/NoRead`，回覆不改決定 | 假中介機印出 `NoRead 通知 #n` |
+| 5 | 裝置原始訊號沒留檔（舊 `cmd.log` 是逆推協定的唯一依據） | `device/signal_log.rs`：`data/logs/signals-YYYY-MM-DD.log`，收送每行、連線狀態、相機幀與挑出的碼；`~k-1` 每裝置 60 秒一次 | 模擬器跑完看檔 |
+| 6 | 桌面模式完全沒有日誌（stdout 被丟掉） | `log.rs` 加 `attach_file`：`data/logs/sorter.YYYY-MM-DD.log` 逐日輪替（tracing-appender），headless 與桌面都有 | headless 啟動看檔 |
+| 7 | `retention_days` 有設定沒實作 | `db/retention.rs`：啟動＋每小時清 `parcels`（級聯 events）、`print_jobs`（連點陣檔）、已完成的 `report_queue`、`event_log`；以**上線時間**為準，不重蹈舊版拿結束時間 0 誤刪的覆轍 | 單元測試 `只清超過天數的資料_未送出的回報保留` |
+| 8 | 急停按鈕互鎖（舊版「急停恢復」要等按鍵放開） | **未做**：現場 `emergencyButton: []` 沒接 | — |
+| 9 | 快速分揀 API `/c4/qs`、`/live/control/detail` | **未做**：要先確認現場有沒有外部系統在打 | — |
+
+**副作用要知道**：#3 之後「有面單的件」要 API＋面單都在 `~O` 前到齊才走正確格口，否則走預設口（舊 Node 同樣是 1200ms 總預算）；`middleware.parcel_timeout_ms` 與 `label_timeout_ms` 各自獨立，真正的截止線仍是 `~O`。**目標格口沒接印表機（L5／R5／LS）的件不抓面單**，圖片服務故障不會把它們拖去異常口（這點比舊 Node 寬鬆，舊版一律 RS）。
+**兩層覆檢後順手修的**：`retention` 只清已結束（done／failed）的列印任務，還在等印表機的不動；狀態機佇列滿時格口結果丟棄會記 error；面單圖超過 8MB 拒收；網頁啟停皮帶會立刻更新運轉狀態（皮帶運轉中沒有心跳，單顆啟停鈕靠這個切換，`~k-1` 會糾正）；headless 也處理 SIGTERM（supervisor／systemd 停服務用的），結束前 `log::flush()` 把日誌尾段落檔。
+**已知但沒改**：`retention_days` 改了之後，`signals-*.log`／`sorter.*.log` 的保留天數要**重啟才生效**（DB 清理是每小時讀最新設定）；`alarm_on_start` 紅燈在燈所在那條線**每次連上**都亮（含斷線重連），與舊系統一致。
+**開發機注意**：舊 session 留下的測試行程（`scratchpad/run/bin/sorter` 占 8051／18090、`replay` 占 17100／17198／18081）還在跑，模擬時要換埠或先殺掉。
+
 ### 下一步：M6 現場切換
 
 1. 主人在正式機實裝 GHA 產出的 `cix3752iSorter-0.1.0-ubuntu-20.04.tar.gz`（`sudo bash install.sh desktop` 或 `systemd`），先改 `server.bind` 避開舊系統的 8080

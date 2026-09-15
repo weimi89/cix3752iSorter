@@ -14,7 +14,7 @@ pub fn spawn(
     cancel: CancellationToken,
 ) -> LineClient {
     let addr_rx = super::derive_addr(cfg_rx, |c| c.sorter.addr.clone(), cancel.clone());
-    let opts = LineOpts { on_connect: vec![command::reset_sorter().to_string()], ..Default::default() };
+    let opts = LineOpts { on_connect: line_client::fixed_on_connect(vec![command::reset_sorter().to_string()]), ..Default::default() };
     let (client, mut events) = line_client::spawn("sorter", addr_rx, opts, cancel.clone());
 
     tokio::spawn(async move {

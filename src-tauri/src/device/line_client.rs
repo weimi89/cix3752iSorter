@@ -16,6 +16,7 @@ use tokio::net::TcpStream;
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
+use super::signal_log::{self, Dir};
 use crate::protocol::command::frame;
 
 #[derive(Clone, Debug)]
@@ -32,8 +33,8 @@ pub struct LineOpts {
     pub idle_timeout: Option<Duration>,
     pub keepalive_time: Duration,
     pub keepalive_interval: Duration,
-    /// 連上後立即送出的指令（如分揀機的 `Kx999;Kk2`）
-    pub on_connect: Vec<String>,
+    /// 連上後立即送出的指令（分揀機 `Kx999;Kk2`、皮帶先停止再重置）；用 watch 讓設定改了下次連線就生效
+    pub on_connect: watch::Receiver<Vec<String>>,
     pub reconnect_min: Duration,
     pub reconnect_max: Duration,
 }
@@ -45,11 +46,17 @@ impl Default for LineOpts {
             idle_timeout: Some(Duration::from_secs(300)),
             keepalive_time: Duration::from_secs(10),
             keepalive_interval: Duration::from_secs(5),
-            on_connect: Vec::new(),
+            on_connect: fixed_on_connect(Vec::new()),
             reconnect_min: Duration::from_secs(1),
             reconnect_max: Duration::from_secs(5),
         }
     }
+}
+
+/// 固定不變的初始化指令清單（測試或不吃設定的裝置用）
+pub fn fixed_on_connect(cmds: Vec<String>) -> watch::Receiver<Vec<String>> {
+    // sender 丟掉後 receiver 仍 borrow 得到初值；這裡從不 await changed()
+    watch::channel(cmds).1
 }
 
 /// 對外的指令入口。`send` 在未連線時直接回 false，呼叫端自行決定要記錄或告警。
@@ -159,6 +166,7 @@ async fn run(
             tracing::warn!(device = name, "設定 keepalive 失敗（繼續使用）: {e}");
         }
         tracing::info!(device = name, %addr, "連線成功");
+        signal_log::record(name, Dir::Info, &format!("connected {addr}"));
         backoff = opts.reconnect_min;
         last_fail_log = std::time::Instant::now() - Duration::from_secs(3600);
         let _ = conn_tx.send(true);
@@ -173,6 +181,7 @@ async fn run(
             dropped += 1;
         }
         tracing::warn!(device = name, %addr, dropped, "連線結束: {reason}");
+        signal_log::record(name, Dir::Info, &format!("disconnected {addr}: {reason}"));
         let _ = ev_tx.send(LineEvent::Disconnected { addr: addr.clone(), reason }).await;
 
         if cancel.is_cancelled() {
@@ -214,8 +223,10 @@ async fn serve_connection(
     // 抵達的 ~c 會整行遺失，接著就是一連串誤判的「收不到 ~c」停線與取消。
     let mut lines = BufReader::new(rd).lines();
 
-    for cmd in &opts.on_connect {
+    let init_cmds = opts.on_connect.borrow().clone();
+    for cmd in &init_cmds {
         tracing::info!(device = name, %cmd, "連線初始化指令");
+        signal_log::record(name, Dir::Out, cmd);
         if let Err(e) = wr.write_all(frame(cmd).as_bytes()).await {
             return format!("初始化指令寫入失敗: {e}");
         }
@@ -234,6 +245,7 @@ async fn serve_connection(
                     let text = line.trim_end_matches(['\n', '\r']).to_string();
                     if !text.trim().is_empty() {
                         tracing::trace!(device = name, %text, "收到");
+                        signal_log::record(name, Dir::In, &text);
                         if ev_tx.send(LineEvent::Line { text, ts_ms }).await.is_err() {
                             return "事件接收端已關閉".into();
                         }
@@ -244,6 +256,7 @@ async fn serve_connection(
             cmd = cmd_rx.recv() => match cmd {
                 Some(cmd) => {
                     tracing::debug!(device = name, %cmd, "送出");
+                    signal_log::record(name, Dir::Out, &cmd);
                     if let Err(e) = wr.write_all(frame(&cmd).as_bytes()).await {
                         return format!("寫入失敗: {e}");
                     }
@@ -273,7 +286,7 @@ mod tests {
         let (addr_tx, addr_rx) = watch::channel(addr.clone());
         let cancel = CancellationToken::new();
         let opts = LineOpts {
-            on_connect: vec!["Kx999;Kk2".into()],
+            on_connect: fixed_on_connect(vec!["Kx999;Kk2".into()]),
             reconnect_min: Duration::from_millis(50),
             reconnect_max: Duration::from_millis(100),
             ..Default::default()

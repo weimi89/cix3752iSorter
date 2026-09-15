@@ -20,7 +20,9 @@ use crate::event_log::{self, Level};
 use crate::protocol::Cid;
 
 pub use machine::{ChuteRow, Input, Machine};
-pub use parcel::{ChuteSource, Parcel, Status};
+pub use parcel::{ChuteSource, LabelPayload, Parcel, Status};
+
+use crate::label::LabelJob;
 
 pub struct Devices {
     pub belt: LineClient,
@@ -33,6 +35,8 @@ pub struct ChuteRequest {
     pub key: u64,
     pub ulid: String,
     pub barcode: String,
+    /// NoRead：只是讓中介機拍照存證與計數，本機已決定預設口，回覆不必送回狀態機
+    pub notify_only: bool,
 }
 
 /// 給網頁層／其他模組的控制入口
@@ -68,8 +72,11 @@ impl TrackerHandle {
     pub async fn sorter_raw(&self, cmd: String) {
         let _ = self.tx.send(Input::SorterRaw(cmd)).await;
     }
-    pub fn chute_result(&self, key: u64, code: String, cid: Cid, source: ChuteSource, response_id: Option<i64>) {
-        let _ = self.tx.try_send(Input::Chute { key, code, cid, source, response_id });
+    pub fn chute_result(&self, key: u64, code: String, cid: Cid, source: ChuteSource, response_id: Option<i64>, label: Option<LabelPayload>) {
+        // 送不進去只會讓那件在 ~O 時走預設口，但要留下痕跡，現場才查得到「面單其實抓到了」
+        if self.tx.try_send(Input::Chute { key, code: code.clone(), cid, source, response_id, label }).is_err() {
+            tracing::error!(key, %code, "狀態機佇列滿，格口結果丟棄（該件將走預設口）");
+        }
     }
     pub async fn snapshot(&self) -> Option<TrackerSnapshot> {
         let (tx, rx) = oneshot::channel();
@@ -105,6 +112,7 @@ struct LiveOutputs {
     store: store::Store,
     report_queue: crate::middleware::report_queue::ReportQueue,
     chute_tx: mpsc::Sender<ChuteRequest>,
+    label_tx: mpsc::Sender<LabelJob>,
     led_via_sorter: bool,
     jam_last: HashMap<i32, i64>,
     jam_throttle_ms: i64,
@@ -137,9 +145,18 @@ impl machine::Outputs for LiveOutputs {
         self.store.send(store::StoreOp::Daily(p.clone()));
     }
     fn request_chute(&mut self, p: &Parcel) {
-        let req = ChuteRequest { key: p.key, ulid: p.ulid.clone(), barcode: p.barcode_or_noread().to_string() };
+        let barcode = p.barcode_or_noread().to_string();
+        let notify_only = barcode == crate::device::camera::NO_READ;
+        let req = ChuteRequest { key: p.key, ulid: p.ulid.clone(), barcode, notify_only };
         if self.chute_tx.try_send(req).is_err() {
             tracing::error!("格口解析佇列滿，條碼 {} 將走預設口", p.barcode_or_noread());
+        }
+    }
+    fn print_label(&mut self, p: &Parcel, printer_port: Option<String>, label: LabelPayload) {
+        let Some(chute) = p.chute.as_ref() else { return };
+        let job = LabelJob { parcel_ulid: p.ulid.clone(), barcode: p.barcode_or_noread().to_string(), chute_code: chute.code.clone(), printer_port, label };
+        if self.label_tx.try_send(job).is_err() {
+            event_log::log(&self.app.db, Level::Error, "printer", "label", format!("{} 條碼 {} 列印佇列滿，面單丟棄", chute.code, p.barcode_or_noread()));
         }
     }
     fn parcel_changed(&mut self, p: &Parcel) {
@@ -185,6 +202,7 @@ pub async fn spawn(
     app: AppState,
     devices: Devices,
     mut rx: mpsc::Receiver<DeviceEvent>,
+    label_tx: mpsc::Sender<LabelJob>,
     cancel: CancellationToken,
 ) -> anyhow::Result<(TrackerHandle, TrackerPorts)> {
     let closed = store::close_orphans(&app.db).await?;
@@ -207,6 +225,7 @@ pub async fn spawn(
         store: store::Store::spawn(app.db.clone()),
         report_queue: crate::middleware::report_queue::ReportQueue::new(app.db.clone()),
         chute_tx,
+        label_tx,
         led_via_sorter: cfg.sysled.via != "belt",
         jam_last: HashMap::new(),
         jam_throttle_ms: cfg.middleware.jam_alert_throttle_ms as i64,

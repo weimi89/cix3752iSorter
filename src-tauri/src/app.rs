@@ -17,8 +17,13 @@ pub struct Started {
 
 pub async fn bootstrap(config_path: &Path, data_dir: &Path, cancel: CancellationToken) -> anyhow::Result<Started> {
     let cfg = config::AppConfig::load_or_create(config_path).await?;
+    // 日誌與裝置訊號留檔都放 data/logs，保留天數跟包裹資料一致
+    let logs_dir = data_dir.join("logs");
+    crate::log::attach_file(&logs_dir, cfg.general.retention_days);
+    device::signal_log::init(logs_dir, cfg.general.retention_days);
     let config = config::ConfigHandle::new(config_path.to_path_buf(), cfg.clone());
     let db = db::init(data_dir).await?;
+    db::retention::start(db.clone(), config.subscribe(), cancel.clone());
 
     let app = AppState {
         config: config.clone(),
@@ -39,14 +44,16 @@ pub async fn bootstrap(config_path: &Path, data_dir: &Path, cancel: Cancellation
     let sorter = device::sorter::spawn(config.subscribe(), dev_tx.clone(), cancel.clone());
     device::camera::spawn(config.subscribe(), dev_tx.clone(), cancel.clone());
     drop(dev_tx);
-    let (handle, ports) = tracker::spawn(app.clone(), tracker::Devices { belt, sorter }, dev_rx, cancel.clone()).await?;
+    // 面單通道：狀態機接受格口決定後才把面單丟進來，列印端另一頭收
+    let (label_tx, label_rx) = tokio::sync::mpsc::channel::<label::LabelJob>(256);
+    let (handle, ports) = tracker::spawn(app.clone(), tracker::Devices { belt, sorter }, dev_rx, label_tx, cancel.clone()).await?;
     let _ = app.tracker.set(handle.clone());
 
     // 中介機：格口解析、回報佇列、設備異常廣播
     let mw = middleware::Middleware::new(config.subscribe());
     middleware::report_queue::ReportQueue::new(db.clone()).start_worker(mw.clone(), cancel.clone());
     let chutes = tracker::load_chutes(&db).await?;
-    let (resolver, label_rx) = chute::ChuteResolver::spawn(app.clone(), mw.clone(), handle.clone(), chutes, ports.chute_rx, cancel.clone());
+    let resolver = chute::ChuteResolver::spawn(app.clone(), mw.clone(), handle.clone(), chutes, ports.chute_rx, cancel.clone());
     let _ = app.resolver.set(resolver.clone());
     {
         let db = db.clone();
@@ -60,10 +67,10 @@ pub async fn bootstrap(config_path: &Path, data_dir: &Path, cancel: Cancellation
         });
     }
 
-    // 列印：面單下載 → 點陣 → 每台印表機各自的佇列 worker
+    // 列印：已下載的面單 → 點陣 → 每台印表機各自的佇列 worker
     let printer = label::PrintService::new(db.clone(), config.subscribe(), mw.clone(), data_dir, cancel.clone());
     let _ = app.printer.set(printer.clone());
-    label::spawn_pipeline(app.clone(), mw.clone(), printer, label_rx, cancel.clone());
+    label::spawn_pipeline(app.clone(), printer, label_rx, cancel.clone());
 
     // 自動更新（headless 用：定期查 latest.json，由網頁觸發換檔；桌面模式由 Tauri updater 接手）
     let up = updater::Updater::new(db.clone(), config.subscribe(), data_dir);

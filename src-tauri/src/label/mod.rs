@@ -1,4 +1,5 @@
-//! 面單列印流程：格口決定後 → 取圖（HTTP 或本機路徑）→ 點陣 → TSPL → 列印佇列。
+//! 面單列印流程：狀態機接受格口決定後把已下載的面單交過來 → 點陣 → TSPL → 列印佇列。
+//! 面單在格口解析階段就抓好了（抓不到的件不會走到這裡），這裡不再碰網路。
 
 pub mod queue;
 pub mod raster;
@@ -9,11 +10,20 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::AppState;
-use crate::chute::LabelJob;
 use crate::event_log::{self, Level};
-use crate::middleware::Middleware;
+use crate::tracker::LabelPayload;
 
 pub use queue::PrintService;
+
+/// 一件要印的面單
+#[derive(Clone, Debug)]
+pub struct LabelJob {
+    pub parcel_ulid: String,
+    pub barcode: String,
+    pub chute_code: String,
+    pub printer_port: Option<String>,
+    pub label: LabelPayload,
+}
 
 /// 格口代號裡的數字（L3 → 3），送印延遲用；沒有數字視為 1
 pub fn chute_number(code: &str) -> u32 {
@@ -21,7 +31,7 @@ pub fn chute_number(code: &str) -> u32 {
     digits.parse().unwrap_or(1).max(1)
 }
 
-pub fn spawn_pipeline(app: AppState, mw: Middleware, printer: PrintService, mut rx: mpsc::Receiver<LabelJob>, cancel: CancellationToken) {
+pub fn spawn_pipeline(app: AppState, printer: PrintService, mut rx: mpsc::Receiver<LabelJob>, cancel: CancellationToken) {
     tokio::spawn(async move {
         loop {
             let job = tokio::select! {
@@ -29,10 +39,9 @@ pub fn spawn_pipeline(app: AppState, mw: Middleware, printer: PrintService, mut 
                 r = rx.recv() => match r { Some(j) => j, None => break },
             };
             let app = app.clone();
-            let mw = mw.clone();
             let printer = printer.clone();
             tokio::spawn(async move {
-                if let Err(e) = handle(&app, &mw, &printer, &job).await {
+                if let Err(e) = handle(&app, &printer, &job).await {
                     event_log::log(&app.db, Level::Error, "printer", "label", format!("{} 條碼 {} 面單處理失敗: {e}", job.chute_code, job.barcode));
                 }
             });
@@ -40,21 +49,17 @@ pub fn spawn_pipeline(app: AppState, mw: Middleware, printer: PrintService, mut 
     });
 }
 
-async fn handle(app: &AppState, mw: &Middleware, printer: &PrintService, job: &LabelJob) -> anyhow::Result<()> {
+async fn handle(app: &AppState, printer: &PrintService, job: &LabelJob) -> anyhow::Result<()> {
     let Some(port) = job.printer_port.as_deref() else {
         tracing::info!(chute = %job.chute_code, barcode = %job.barcode, "格口未設印表機，不列印");
         return Ok(());
     };
     let started = std::time::Instant::now();
-    let bytes = if job.label.label_path.starts_with("http://") || job.label.label_path.starts_with("https://") {
-        mw.fetch_label(&job.label.label_path).await.map_err(|e| anyhow::anyhow!("下載面單失敗: {e}"))?
-    } else {
-        tokio::fs::read(&job.label.label_path).await.map_err(|e| anyhow::anyhow!("讀取面單 {} 失敗: {e}", job.label.label_path))?
-    };
     let cfg = app.config.current();
     let profile_name = job.label.print_profile.clone();
     let profile = profile_name.as_deref().and_then(|n| cfg.print.profiles.get(n)).cloned().unwrap_or_default();
     let pn = profile_name.clone();
+    let bytes = job.label.bytes.clone();
     let tspl = tokio::task::spawn_blocking(move || -> anyhow::Result<(Vec<u8>, u32, u32)> {
         let r = raster::render(&bytes, pn.as_deref())?;
         Ok((tspl::build(&r, &profile), r.width, r.height))
@@ -63,7 +68,7 @@ async fn handle(app: &AppState, mw: &Middleware, printer: &PrintService, job: &L
     let delay_ms = (chute_number(&job.chute_code) as i64 - 1) * cfg.print.per_chute_delay_ms as i64;
     let id = printer
         .enqueue(queue::NewJob {
-            parcel_ulid: job.parcel_ulid.as_deref(),
+            parcel_ulid: Some(&job.parcel_ulid),
             barcode: &job.barcode,
             chute_code: &job.chute_code,
             printer_port: port,

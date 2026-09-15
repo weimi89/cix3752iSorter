@@ -12,6 +12,7 @@ use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
 use super::events::{Device, DeviceEvent};
+use super::signal_log::{self, Dir};
 use crate::config::AppConfig;
 
 pub const NO_READ: &str = "NoRead";
@@ -158,6 +159,7 @@ async fn run(
                     Ok((stream, peer)) => {
                         let peer = peer.to_string();
                         tracing::info!(%peer, "相機連線");
+                        signal_log::record("camera", Dir::Info, &format!("connected {peer}"));
                         let _ = out.send(DeviceEvent::State { device: Device::Camera, connected: true, detail: peer.clone(), ts_ms: crate::db::now_ms() }).await;
                         tokio::spawn(serve_camera(stream, peer, cfg_rx.clone(), out.clone(), conn_cancel.clone()));
                     }
@@ -195,6 +197,7 @@ async fn serve_camera(
                         let frame = String::from_utf8_lossy(&frame_bytes).into_owned();
                         let ts_ms = crate::db::now_ms();
                         let code = pick_barcode(parse_frame(&frame));
+                        signal_log::record("camera", Dir::In, &format!("{} => {code}", frame.trim()));
                         dedup.window_ms = cfg_rx.borrow().camera.dedup_ms as i64;
                         if !dedup.accept(&code, ts_ms) {
                             tracing::debug!(%code, "相機重複條碼，略過");
@@ -214,6 +217,7 @@ async fn serve_camera(
         }
     }
     tracing::warn!(%peer, "相機連線結束: {reason}");
+    signal_log::record("camera", Dir::Info, &format!("disconnected {peer}: {reason}"));
     let _ = out
         .send(DeviceEvent::State { device: Device::Camera, connected: false, detail: format!("{peer}: {reason}"), ts_ms: crate::db::now_ms() })
         .await;

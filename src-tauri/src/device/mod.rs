@@ -4,6 +4,7 @@ pub mod belt;
 pub mod camera;
 pub mod events;
 pub mod line_client;
+pub mod signal_log;
 pub mod sorter;
 
 pub use events::{Device, DeviceEvent};
@@ -14,13 +15,13 @@ use tokio_util::sync::CancellationToken;
 
 use crate::config::AppConfig;
 
-/// 從整份設定的 watch 衍生出「只有某個位址」的 watch：位址沒變就不通知，
-/// 裝置 task 才不會因為使用者改了無關設定而重連。
-pub fn derive_addr(
+/// 從整份設定的 watch 衍生出「只有某一小塊」的 watch：那一塊沒變就不通知，
+/// 裝置 task 才不會因為使用者改了無關設定而重連或重送初始化指令。
+pub fn derive<T: Clone + PartialEq + Send + Sync + 'static>(
     mut cfg_rx: watch::Receiver<AppConfig>,
-    pick: impl Fn(&AppConfig) -> String + Send + 'static,
+    pick: impl Fn(&AppConfig) -> T + Send + 'static,
     cancel: CancellationToken,
-) -> watch::Receiver<String> {
+) -> watch::Receiver<T> {
     let initial = pick(&cfg_rx.borrow());
     let (tx, rx) = watch::channel(initial);
     tokio::spawn(async move {
@@ -38,4 +39,13 @@ pub fn derive_addr(
         }
     });
     rx
+}
+
+/// 只挑位址的 `derive`
+pub fn derive_addr(
+    cfg_rx: watch::Receiver<AppConfig>,
+    pick: impl Fn(&AppConfig) -> String + Send + 'static,
+    cancel: CancellationToken,
+) -> watch::Receiver<String> {
+    derive(cfg_rx, pick, cancel)
 }

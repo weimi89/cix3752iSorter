@@ -13,6 +13,9 @@ use tokio::sync::watch;
 
 use crate::config::AppConfig;
 
+/// 面單圖大小上限：現場面單 PNG 幾百 KB，超過這個一定不是面單，不讓它塞爆狀態機佇列
+const LABEL_MAX_BYTES: u64 = 8 * 1024 * 1024;
+
 #[derive(Clone, Debug, Default, Deserialize, serde::Serialize, PartialEq)]
 pub struct ParcelResp {
     pub channel_code: Option<String>,
@@ -105,7 +108,14 @@ impl Middleware {
         if !status.is_success() {
             return Err(MwError::Status(status.as_u16(), String::new()));
         }
-        resp.bytes().await.map(|b| b.to_vec()).map_err(|e| MwError::Parse(e.to_string()))
+        if resp.content_length().is_some_and(|n| n > LABEL_MAX_BYTES) {
+            return Err(MwError::Parse(format!("面單超過 {} MB", LABEL_MAX_BYTES / 1_048_576)));
+        }
+        let bytes = resp.bytes().await.map_err(|e| MwError::Parse(e.to_string()))?;
+        if bytes.len() as u64 > LABEL_MAX_BYTES {
+            return Err(MwError::Parse(format!("面單超過 {} MB", LABEL_MAX_BYTES / 1_048_576)));
+        }
+        Ok(bytes.to_vec())
     }
 
     pub async fn report(&self, response_id: i64) -> Result<(), MwError> {

@@ -11,7 +11,7 @@ use crate::device::{Device, DeviceEvent};
 use crate::device::camera::NO_READ;
 use crate::protocol::{BeltSignal, Cid, SorterSignal, command};
 
-use super::parcel::{ChuteDecision, ChuteSource, Parcel, Status};
+use super::parcel::{ChuteDecision, ChuteSource, LabelPayload, Parcel, Status};
 
 /// 終態後再留多久才落最終資料並釋放（讓晚到的訊號還能記到事件表）
 const FINALIZE_GRACE_MS: i64 = 300;
@@ -41,7 +41,10 @@ pub trait Outputs {
     fn store_event(&mut self, p: &Parcel, ts_ms: i64, source: &'static str, kind: &str, raw: Option<&str>);
     fn store_forget(&mut self, p: &Parcel);
     fn store_daily(&mut self, p: &Parcel);
+    /// 向中介機查格口；NoRead 也要送（中介機要拍照存證、計入讀碼失敗統計），但本機已先決定預設口
     fn request_chute(&mut self, p: &Parcel);
+    /// 格口決定被接受、且中介機有給面單 → 交給列印
+    fn print_label(&mut self, p: &Parcel, printer_port: Option<String>, label: LabelPayload);
     fn parcel_changed(&mut self, p: &Parcel);
     fn log(&mut self, level: crate::event_log::Level, category: &'static str, action: &'static str, msg: String);
     fn jam_alert(&mut self, pos: i32);
@@ -60,8 +63,8 @@ pub struct ChuteRow {
 #[derive(Clone, Debug)]
 pub enum Input {
     Device(DeviceEvent),
-    /// 格口解析結果
-    Chute { key: u64, code: String, cid: Cid, source: ChuteSource, response_id: Option<i64> },
+    /// 格口解析結果（面單已下載好才算結果；下載失敗的解析器會改回預設口）
+    Chute { key: u64, code: String, cid: Cid, source: ChuteSource, response_id: Option<i64>, label: Option<LabelPayload> },
     Tick { now_ms: i64 },
     /// 網頁手動控制皮帶
     BeltStart,
@@ -164,7 +167,7 @@ impl Machine {
     pub fn handle<O: Outputs>(&mut self, input: Input, out: &mut O) {
         match input {
             Input::Device(ev) => self.on_device(ev, out),
-            Input::Chute { key, code, cid, source, response_id } => self.on_chute(key, code, cid, source, response_id, out),
+            Input::Chute { key, code, cid, source, response_id, label } => self.on_chute(key, code, cid, source, response_id, label, out),
             Input::Tick { now_ms } => self.on_tick(now_ms, out),
             Input::BeltStart => self.belt_start(out, "網頁啟動"),
             Input::BeltStop => self.belt_stop(out, "網頁停止"),
@@ -187,9 +190,11 @@ impl Machine {
                 if device == Device::Sorter && connected {
                     // 分揀機重連時已被重置（Kx999;Kk2）：頭部與小車對應全部作廢
                     self.reset_sorter_side(ts_ms, out);
-                    if self.cfg.sysled.alarm_on_start {
-                        self.set_led(Led::Red, ts_ms, out);
-                    }
+                }
+                // 開機警示燈：燈接在哪條線上，就在那條線連上時亮（舊系統同樣做法）
+                let led_line = if self.cfg.sysled.via == "belt" { Device::Belt } else { Device::Sorter };
+                if device == led_line && connected && self.cfg.sysled.alarm_on_start {
+                    self.set_led(Led::Red, ts_ms, out);
                 }
                 if device == Device::Belt && !connected {
                     self.belt_running = false;
@@ -522,13 +527,14 @@ impl Machine {
         }
         if noread {
             let (dcode, dcid) = self.default_chute();
-            self.on_chute(key, dcode, dcid, ChuteSource::NoRead, None, out);
-        } else if let Some(p) = self.parcels.get(&key) {
+            self.on_chute(key, dcode, dcid, ChuteSource::NoRead, None, None, out);
+        }
+        if let Some(p) = self.parcels.get(&key) {
             out.request_chute(p);
         }
     }
 
-    fn on_chute<O: Outputs>(&mut self, key: u64, code: String, cid: Cid, source: ChuteSource, response_id: Option<i64>, out: &mut O) {
+    fn on_chute<O: Outputs>(&mut self, key: u64, code: String, cid: Cid, source: ChuteSource, response_id: Option<i64>, label: Option<LabelPayload>, out: &mut O) {
         let ts = self.now_ms;
         let Some(p) = self.parcels.get_mut(&key) else { return };
         if p.kn_ms.is_some() {
@@ -543,13 +549,19 @@ impl Machine {
             return;
         }
         if p.chute.as_ref().is_some_and(|c| c.source != ChuteSource::Pending) && source != ChuteSource::Manual {
+            // 已決定（重複回覆）：不改決定也不印
             return;
         }
         p.chute = Some(ChuteDecision { code: code.clone(), cid, source, response_id, decided_ms: ts });
-        out.store_event(p, ts, "api", "chute", Some(&format!("{code} {cid} {source:?} rid={response_id:?}")));
+        out.store_event(p, ts, "api", "chute", Some(&format!("{code} {cid} {source:?} rid={response_id:?} label={}", label.is_some())));
         out.store_update(p);
         out.parcel_changed(p);
         out.chute_decided(p);
+        if let Some(label) = label {
+            let port = self.chutes.get(&code).and_then(|r| r.printer_port.clone());
+            let p = &self.parcels[&key];
+            out.print_label(p, port, label);
+        }
     }
 
     fn default_chute(&self) -> (String, Cid) {
@@ -647,8 +659,11 @@ impl Machine {
 
     // ---------- 皮帶 / 燈 ----------
 
+    // 皮帶運轉中沒有心跳訊號（只有停止時週期送 `~k-1`），所以送出啟停指令時先樂觀更新
+    // `belt_running`，畫面上的單顆啟停鈕才會立刻切換；之後 `~k-1`／`~P` 會把它糾正回實況
     fn belt_stop<O: Outputs>(&mut self, out: &mut O, reason: &str) {
         out.belt_cmd(&self.cfg.belt.cmd.stop.clone());
+        self.belt_running = false;
         out.log(crate::event_log::Level::Warn, "belt", "stop", format!("停線：{reason}"));
     }
 
@@ -659,6 +674,7 @@ impl Machine {
         if !self.cfg.belt.default_run && auto != run {
             out.belt_cmd(&auto);
         }
+        self.belt_running = true;
         out.log(crate::event_log::Level::Info, "belt", "start", format!("啟動：{reason}"));
     }
 

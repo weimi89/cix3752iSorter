@@ -44,11 +44,15 @@ const control = async fn => {
   try { await fn() } catch (e) { toast(e.message, { type: 'error' }) } finally { busy.value = false }
 }
 
-// 皮帶啟停放頁首右上角：現場最常按的兩顆鈕，和其他頁的動作列同一個位置
-const actions = computed(() => [
-  { key: 'beltStart', label: t('page.dashboard.beltStart'), icon: 'tabler-player-play', color: 'success', variant: 'flat', disabled: busy.value || !status.devices.belt.connected, onClick: () => control(api.beltStart) },
-  { key: 'beltStop', label: t('page.dashboard.beltStop'), icon: 'tabler-player-stop', color: 'error', variant: 'flat', disabled: busy.value || !status.devices.belt.connected, onClick: () => control(api.beltStop) },
-])
+// 皮帶啟停放頁首右上角，一顆鈕依目前狀態反向：運轉中顯示「停止」、停著顯示「啟動」
+const actions = computed(() => {
+  const running = !!tracker.value?.belt_running
+  return [
+    running
+      ? { key: 'beltStop', label: t('page.dashboard.beltStop'), icon: 'tabler-player-stop', color: 'error', variant: 'flat', disabled: busy.value || !status.devices.belt.connected, onClick: () => control(api.beltStop) }
+      : { key: 'beltStart', label: t('page.dashboard.beltStart'), icon: 'tabler-player-play', color: 'success', variant: 'flat', disabled: busy.value || !status.devices.belt.connected, onClick: () => control(api.beltStart) },
+  ]
+})
 
 const loadHourly = async () => {
   try { hourly.value = await api.hourlyStats(12) } catch (e) { console.warn(e) }

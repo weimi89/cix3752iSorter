@@ -1,5 +1,7 @@
 //! SQLite 連線池與 migration。
 
+pub mod retention;
+
 use std::path::Path;
 
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};

@@ -2,6 +2,9 @@
 //!
 //! 每個請求獨立 task，慢回應不會卡住其他件；狀態機在 `~O` 時若還沒答案就走預設口，
 //! 之後才到的答案只留紀錄（見 `machine.rs on_chute`）。
+//!
+//! 有面單的件要**先把面單抓下來**才算有答案（舊 Node 版同樣做法）：抓不到就整件改走預設口、
+//! 不回報、不印——寧可到異常口由人工處理，也不要包裹到了正常格口卻沒有面單可貼。
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -14,26 +17,14 @@ use crate::event_bus;
 use crate::event_log::{self, Level};
 use crate::middleware::{Middleware, ParcelResp};
 use crate::protocol::Cid;
-use crate::tracker::{ChuteRequest, ChuteRow, ChuteSource, TrackerHandle};
+use crate::tracker::{ChuteRequest, ChuteRow, ChuteSource, LabelPayload, TrackerHandle};
 
-/// 決定後附帶給列印流程的資料
+/// 中介機給的面單來源，決定後才去抓
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct LabelInfo {
     pub label_path: String,
     pub print_profile: Option<String>,
     pub is_error_label: bool,
-}
-
-/// 交給列印流程的一件工作
-#[derive(Clone, Debug)]
-pub struct LabelJob {
-    pub key: u64,
-    pub parcel_ulid: Option<String>,
-    pub barcode: String,
-    pub response_id: Option<i64>,
-    pub chute_code: String,
-    pub printer_port: Option<String>,
-    pub label: LabelInfo,
 }
 
 #[derive(Clone)]
@@ -42,8 +33,6 @@ pub struct ChuteResolver {
     mw: Middleware,
     tracker: TrackerHandle,
     chutes: Arc<RwLock<HashMap<String, ChuteRow>>>,
-    /// 決定後要列印的面單工作
-    pub labels: mpsc::Sender<LabelJob>,
 }
 
 pub struct Decision {
@@ -113,9 +102,8 @@ impl ChuteResolver {
         chutes: HashMap<String, ChuteRow>,
         mut rx: mpsc::Receiver<ChuteRequest>,
         cancel: CancellationToken,
-    ) -> (Self, mpsc::Receiver<LabelJob>) {
-        let (label_tx, label_rx) = mpsc::channel(256);
-        let me = Self { app, mw, tracker, chutes: Arc::new(RwLock::new(chutes)), labels: label_tx };
+    ) -> Self {
+        let me = Self { app, mw, tracker, chutes: Arc::new(RwLock::new(chutes)) };
         let this = me.clone();
         tokio::spawn(async move {
             loop {
@@ -127,7 +115,7 @@ impl ChuteResolver {
                 tokio::spawn(async move { r.resolve(req).await });
             }
         });
-        (me, label_rx)
+        me
     }
 
     pub fn set_chutes(&self, chutes: HashMap<String, ChuteRow>) {
@@ -135,45 +123,62 @@ impl ChuteResolver {
     }
 
     async fn resolve(&self, req: ChuteRequest) {
-        let ChuteRequest { key, ulid, barcode } = req;
+        let ChuteRequest { key, ulid: _, barcode, notify_only } = req;
         let started = std::time::Instant::now();
         let default_code = self.app.config.current().general.default_chute;
         let result = self.mw.query_parcel(&barcode).await;
         let elapsed = started.elapsed().as_millis() as i64;
-        let decision = match &result {
+        if notify_only {
+            // NoRead：中介機拍照存證與計數；本機已走預設口，回什麼都不改
+            match result {
+                Ok(_) => tracing::info!(%barcode, elapsed, "已通知中介機讀碼失敗"),
+                Err(e) => event_log::log(&self.app.db, Level::Warn, "chute", "noread_notify", format!("通知中介機讀碼失敗未成功（{elapsed}ms）：{e}")),
+            }
+            return;
+        }
+        let mut decision = match &result {
             Ok(resp) => {
                 let chutes = self.chutes.read().unwrap();
                 decide(resp, &chutes, &default_code)
             }
-            Err(e) => {
-                let chutes = self.chutes.read().unwrap();
-                let cid = chutes.get(&default_code).map(|r| r.cid).unwrap_or(Cid(1007301));
-                Decision { code: default_code.clone(), cid, source: ChuteSource::Default, response_id: None, label: None, note: Some(e.to_string()) }
-            }
+            Err(e) => self.fallback(&default_code, e.to_string()),
         };
+        // 面單先抓下來才算決定；抓不到就改走預設口、不回報、不印（對齊舊版）。
+        // 目標格口沒接印表機（L5／R5／直通口）就不需要面單，不抓、也不因圖片服務故障被拖去異常口
+        let mut payload = None;
+        let has_printer = self.chutes.read().unwrap().get(&decision.code).is_some_and(|r| r.printer_port.is_some());
+        if !has_printer {
+            decision.label = None;
+        }
+        if let Some(info) = decision.label.take() {
+            match self.fetch(&info.label_path).await {
+                Ok(bytes) => payload = Some(LabelPayload { bytes, print_profile: info.print_profile, is_error_label: info.is_error_label }),
+                Err(e) => decision = self.fallback(&default_code, format!("面單下載失敗（{}ms）：{e}", started.elapsed().as_millis())),
+            }
+        }
+        let elapsed = started.elapsed().as_millis() as i64;
         if let Some(note) = &decision.note {
             event_log::log(&self.app.db, Level::Warn, "chute", "resolve", format!("條碼 {barcode} → {}（{elapsed}ms）：{note}", decision.code));
         } else {
-            tracing::info!(%barcode, chute = %decision.code, elapsed, "格口");
+            tracing::info!(%barcode, chute = %decision.code, elapsed, label = payload.is_some(), "格口");
         }
         event_bus::emit("chute-resolved", serde_json::json!({ "key": key, "barcode": barcode, "chute": decision.code, "source": decision.source, "elapsed_ms": elapsed, "note": decision.note }));
+        self.tracker.chute_result(key, decision.code, decision.cid, decision.source, decision.response_id, payload);
+    }
 
-        let printer_port = self.chutes.read().unwrap().get(&decision.code).and_then(|r| r.printer_port.clone());
-        self.tracker.chute_result(key, decision.code.clone(), decision.cid, decision.source, decision.response_id);
-        if let Some(label) = decision.label {
-            // 走預設口的件（找不到格口／停用）也印：面單跟著包裹走，人工才對得上
-            let _ = self
-                .labels
-                .send(LabelJob {
-                    key,
-                    parcel_ulid: Some(ulid),
-                    barcode: barcode.clone(),
-                    response_id: decision.response_id,
-                    chute_code: decision.code,
-                    printer_port,
-                    label,
-                })
-                .await;
+    /// 走預設口、不回報、不印
+    fn fallback(&self, default_code: &str, note: String) -> Decision {
+        let chutes = self.chutes.read().unwrap();
+        let cid = chutes.get(default_code).map(|r| r.cid).unwrap_or(Cid(1007301));
+        Decision { code: default_code.to_string(), cid, source: ChuteSource::Default, response_id: None, label: None, note: Some(note) }
+    }
+
+    /// 面單來源：`http(s)://` 向中介機抓，其餘當本機路徑（同一台機器上的 `direct_print` 模式）
+    async fn fetch(&self, path: &str) -> anyhow::Result<Vec<u8>> {
+        if path.starts_with("http://") || path.starts_with("https://") {
+            Ok(self.mw.fetch_label(path).await?)
+        } else {
+            Ok(tokio::fs::read(path).await.map_err(|e| anyhow::anyhow!("讀取 {path} 失敗: {e}"))?)
         }
     }
 }

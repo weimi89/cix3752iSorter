@@ -20,6 +20,7 @@ struct Fake {
     jams: Vec<i32>,
     decided: Vec<(String, String)>,
     forgotten: Vec<String>,
+    printed: Vec<(String, String, Option<String>)>,
 }
 
 impl Outputs for Fake {
@@ -57,12 +58,15 @@ impl Outputs for Fake {
         let c = p.chute.as_ref().unwrap();
         self.decided.push((p.barcode_or_noread().to_string(), c.code.clone()));
     }
+    fn print_label(&mut self, p: &super::parcel::Parcel, printer_port: Option<String>, _label: super::parcel::LabelPayload) {
+        self.printed.push((p.barcode_or_noread().to_string(), p.chute.as_ref().unwrap().code.clone(), printer_port));
+    }
 }
 
 fn chutes() -> HashMap<String, ChuteRow> {
     let mut m = HashMap::new();
-    for (code, cid) in [("L1", 1000323), ("R3", 1003324), ("RS", 1007301), ("LS", 1007323)] {
-        m.insert(code.to_string(), ChuteRow { code: code.into(), cid: Cid(cid), printer_port: None, enabled: true });
+    for (code, cid, port) in [("L1", 1000323, Some("1-8.1")), ("R3", 1003324, None), ("RS", 1007301, None), ("LS", 1007323, None)] {
+        m.insert(code.to_string(), ChuteRow { code: code.into(), cid: Cid(cid), printer_port: port.map(String::from), enabled: true });
     }
     m
 }
@@ -104,7 +108,15 @@ impl Sim {
 
     fn chute(&mut self, key: u64, code: &str) -> &mut Self {
         let cid = chutes()[code].cid;
-        self.m.handle(Input::Chute { key, code: code.into(), cid, source: ChuteSource::Api, response_id: Some(99) }, &mut self.out);
+        self.m.handle(Input::Chute { key, code: code.into(), cid, source: ChuteSource::Api, response_id: Some(99), label: None }, &mut self.out);
+        self
+    }
+
+    /// 帶面單的格口結果
+    fn chute_with_label(&mut self, key: u64, code: &str) -> &mut Self {
+        let cid = chutes()[code].cid;
+        let label = super::parcel::LabelPayload { bytes: vec![1, 2, 3], print_profile: Some("PAPER-01#100*150".into()), is_error_label: false };
+        self.m.handle(Input::Chute { key, code: code.into(), cid, source: ChuteSource::Api, response_id: Some(99), label: Some(label) }, &mut self.out);
         self
     }
 
@@ -170,12 +182,31 @@ fn 格口回覆太晚_走預設口_回覆只記錄() {
 }
 
 #[test]
-fn noread_直接走預設口不問中介機() {
+fn noread_本機立刻走預設口_仍通知中介機存證() {
     let mut s = Sim::new();
     s.belt("~P5 1").at(226).barcode("NoRead");
-    assert!(s.out.chute_requests.is_empty());
+    // 中介機要拍照與計數，所以照樣送請求
+    assert_eq!(s.out.chute_requests, vec![(1, "NoRead".to_string())]);
     let c = s.parcel(1).chute.as_ref().unwrap();
     assert_eq!((c.code.as_str(), c.source), ("RS", ChuteSource::NoRead));
+    // 中介機就算回了東西（含面單）也不改決定、不印
+    s.chute_with_label(1, "L1");
+    assert_eq!(s.parcel(1).chute.as_ref().unwrap().code, "RS");
+    assert!(s.out.printed.is_empty());
+}
+
+#[test]
+fn 格口被接受才印面單_回覆太晚不印() {
+    let mut s = Sim::new();
+    s.belt("~P5 1").at(226).barcode("A1").chute_with_label(1, "L1");
+    assert_eq!(s.out.printed, vec![("A1".to_string(), "L1".to_string(), Some("1-8.1".to_string()))]);
+
+    // 第二件：~O 前沒答案 → 預設口下 Kn，之後面單才到 → 不印
+    s.belt("~P6 1").at(226).barcode("A2").at(1300).belt("~O6 1");
+    assert!(s.parcel(2).kn_ms.is_some());
+    s.chute_with_label(2, "L1");
+    assert_eq!(s.out.printed.len(), 1);
+    assert_eq!(s.parcel(2).chute.as_ref().unwrap().code, "RS");
 }
 
 #[test]
@@ -338,4 +369,20 @@ fn 燈號_作業綠_閒置十秒轉閒置燈() {
     assert_eq!(s.out.led, vec!["KL 0 2 3010"]);
     s.at(10_100);
     assert_eq!(s.out.led, vec!["KL 0 2 3010", "KL 0 2 3001"]);
+}
+
+#[test]
+fn 網頁啟停皮帶_立即反映運轉狀態() {
+    let mut s = Sim::new();
+    assert!(!s.m.belt_running);
+    s.m.handle(Input::BeltStart, &mut s.out);
+    assert!(s.m.belt_running, "啟動後畫面要能立刻切成「停止」鈕");
+    assert_eq!(s.out.belt.last().map(String::as_str), Some("KM998 3"));
+    s.m.handle(Input::BeltStop, &mut s.out);
+    assert!(!s.m.belt_running);
+    assert_eq!(s.out.belt.last().map(String::as_str), Some("KM998 1"));
+    // 皮帶回報停止中（~k-1）一樣會把狀態拉回 false
+    s.m.handle(Input::BeltStart, &mut s.out);
+    s.belt("~k-1 -1");
+    assert!(!s.m.belt_running);
 }

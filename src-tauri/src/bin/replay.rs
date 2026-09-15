@@ -58,6 +58,12 @@ struct Cli {
     /// 假中介機每 N 件回一次「查無訂單」業務錯誤（0 = 不回）
     #[arg(long, default_value_t = 0u64)]
     mw_error_every: u64,
+    /// 假中介機每 N 張面單圖回 500（0 = 不失敗）：驗「面單抓不到 → 走預設口、不回報、不印」
+    #[arg(long, default_value_t = 0u64)]
+    mw_img_fail_every: u64,
+    /// 假中介機面單圖回應延遲（毫秒）：拉長可驗「面單太晚 → 走預設口」
+    #[arg(long, default_value_t = 0u64)]
+    mw_img_delay_ms: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -196,13 +202,15 @@ async fn camera_client(addr: String, mut rx: mpsc::Receiver<String>) {
 }
 
 /// 假中介機：照 `cix3752iLabelPrint/docs/local-http-api.md` 的形狀回應
-async fn fake_middleware(bind: String, delay_ms: u64, error_every: u64) -> anyhow::Result<()> {
+async fn fake_middleware(bind: String, delay_ms: u64, error_every: u64, img_fail_every: u64, img_delay_ms: u64) -> anyhow::Result<()> {
     use axum::{Router, extract::Path, routing::{get, post}, Json};
     use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 
     static NEXT_ID: AtomicI64 = AtomicI64::new(1);
     static SEEN: AtomicU64 = AtomicU64::new(0);
     static REPORTS: AtomicU64 = AtomicU64::new(0);
+    static NOREADS: AtomicU64 = AtomicU64::new(0);
+    static IMAGES: AtomicU64 = AtomicU64::new(0);
 
     let label_png: Arc<Vec<u8>> = Arc::new({
         // 800x1200 白底、黑框、幾條黑線，當作面單
@@ -224,6 +232,8 @@ async fn fake_middleware(bind: String, delay_ms: u64, error_every: u64) -> anyho
                 let jitter = 0.6 + (SEEN.fetch_add(1, Ordering::Relaxed) % 11) as f64 / 10.0; // 0.6–1.6
                 tokio::time::sleep(Duration::from_millis((delay_ms as f64 * jitter) as u64)).await;
                 if code.eq_ignore_ascii_case("noread") {
+                    let n = NOREADS.fetch_add(1, Ordering::Relaxed) + 1;
+                    eprintln!("[mw] NoRead 通知 #{n}");
                     return Json(serde_json::json!({ "data": { "channel_code": null, "print_profile": null, "response_id": null, "error_code": "NOREAD", "message": "讀碼失敗,未提交雲端" } }));
                 }
                 let n = SEEN.load(Ordering::Relaxed);
@@ -241,9 +251,19 @@ async fn fake_middleware(bind: String, delay_ms: u64, error_every: u64) -> anyho
                 Json(serde_json::json!({ "data": data }))
             }
         }))
-        .route("/images/{name}", get(move |Path(_name): Path<String>| {
+        .route("/images/{name}", get(move |Path(name): Path<String>| {
             let png = label_png.clone();
-            async move { ([(axum::http::header::CONTENT_TYPE, "image/png")], png.as_ref().clone()) }
+            async move {
+                if img_delay_ms > 0 {
+                    tokio::time::sleep(Duration::from_millis(img_delay_ms)).await;
+                }
+                let n = IMAGES.fetch_add(1, Ordering::Relaxed) + 1;
+                if img_fail_every > 0 && n % img_fail_every == 0 {
+                    eprintln!("[mw] 面單圖 {name} 故意回 500（第 {n} 張）");
+                    return Err(axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+                }
+                Ok(([(axum::http::header::CONTENT_TYPE, "image/png")], png.as_ref().clone()))
+            }
         }))
         .route("/api/report", post(|Json(body): Json<serde_json::Value>| async move {
             let n = REPORTS.fetch_add(1, Ordering::Relaxed) + 1;
@@ -267,9 +287,9 @@ async fn fake_middleware(bind: String, delay_ms: u64, error_every: u64) -> anyho
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     {
-        let (bind, d, e) = (cli.middleware.clone(), cli.mw_delay_ms, cli.mw_error_every);
+        let (bind, d, e, f, g) = (cli.middleware.clone(), cli.mw_delay_ms, cli.mw_error_every, cli.mw_img_fail_every, cli.mw_img_delay_ms);
         tokio::spawn(async move {
-            if let Err(e) = fake_middleware(bind, d, e).await {
+            if let Err(e) = fake_middleware(bind, d, e, f, g).await {
                 eprintln!("[mw] 假中介機啟動失敗: {e}");
             }
         });

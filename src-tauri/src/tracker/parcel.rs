@@ -66,6 +66,21 @@ pub enum ChuteSource {
     Manual,
 }
 
+/// 已下載好的面單，跟著格口決定一起送進狀態機；狀態機接受決定後才交給列印，
+/// 決定被拒（回覆太晚、包裹已走預設口）就一起丟掉，不會印出沒有包裹可貼的面單
+#[derive(Clone)]
+pub struct LabelPayload {
+    pub bytes: Vec<u8>,
+    pub print_profile: Option<String>,
+    pub is_error_label: bool,
+}
+
+impl std::fmt::Debug for LabelPayload {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LabelPayload").field("bytes", &self.bytes.len()).field("print_profile", &self.print_profile).field("is_error_label", &self.is_error_label).finish()
+    }
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct ChuteDecision {
     pub code: String,
