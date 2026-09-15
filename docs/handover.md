@@ -170,7 +170,7 @@
 ### v0.1.0 發版 — GHA 三 distro 全部成功（draft，待公開）
 
 - 2026-09-15 推上 `weimi89/cix3752iSorter`，`warm-focal-cache.yml` 首次自編 20.04 webkit 棧約 1 小時 55 分；`release.yml` 打 `v0.1.0` 跑了三次才過，兩個問題都在 20.04「帶走自編 .so」那段：① `ldconfig -p | awk '…exit'` 讓上游吃 SIGPIPE、`pipefail` 下整步 141；② `/usr/lib` 與 `/lib` 合併時 `ln` 連到自己。已修。
-- draft Release 內容：三 distro 各有 `.deb`＋`.sig`、headless `tar.gz`＋`.sig`＋`.sha256`、離線安裝包 `cix3752iSorter-0.1.0-<distro>.tar.gz`（20.04 那份 90MB 含 webkit 棧），`latest.json` 六個平台鍵齊全。
+- 第一版出了三 distro × 5 種檔共 19 個，主人打回：要像 LabelPrint 只出現場用的。改成**只建 20.04、Release 只放 4 個檔**（離線安裝包、.deb、headless tar.gz、latest.json；簽章與 SHA-256 只寫在 latest.json 裡）；22.04／24.04 矩陣項目留註解，升級時再開。
 - **待主人**：到 Releases 頁把 v0.1.0 由 draft 改為公開（自動更新才讀得到 `latest.json`），再把 `cix3752iSorter-0.1.0-ubuntu-20.04.tar.gz` 帶去正式機照 `docs/cutover.md` 做。
 
 ### 下一步：M6 現場切換

@@ -1,4 +1,4 @@
-# 打 tag（v*）發版：Ubuntu 20.04 / 22.04 / 24.04 各建一份 Tauri .deb 與 headless 執行檔，
+# 打 tag（v*）發版：現場用的 distro（目前只有 Ubuntu 20.04）各建一份 Tauri .deb 與 headless 執行檔，
 # 打包成離線安裝包上傳 Release，最後合併出一份 latest.json 給程式內建的自動更新用。
 #
 # 三個 distro 為什麼要各建一份：20.04（focal）沒有 webkit2gtk-4.1，要自編 glib 2.78 + libsoup3 +
@@ -48,10 +48,12 @@ jobs:
           set -euo pipefail
           # source_build：要不要走自編 focal 棧；deb_depends：改寫進 .deb control 的 Depends
           #（Tauri 預設會列 libwebkit2gtk-4.1-0，focal 沒這個套件，20.04 只能列系統本來就有的）
+          # 【暫停 22.04 / 24.04】現場工控機只有 20.04（對齊 cix3752iLabelPrint 只出現場用的平台）；
+          # 工控機升級時把這兩筆加回清單（前一筆補逗號），驗收清單會自動跟上：
+          #   {"distro":"ubuntu-22.04","image":"ubuntu:22.04","source_build":false,"deb_depends":"libwebkit2gtk-4.1-0, libgtk-3-0"}
+          #   {"distro":"ubuntu-24.04","image":"ubuntu:24.04","source_build":false,"deb_depends":"libwebkit2gtk-4.1-0, libgtk-3-0"}
           MATRIX='[
-            {"distro":"ubuntu-20.04","image":"ubuntu:20.04","source_build":true, "deb_depends":"libgtk-3-0"},
-            {"distro":"ubuntu-22.04","image":"ubuntu:22.04","source_build":false,"deb_depends":"libwebkit2gtk-4.1-0, libgtk-3-0"},
-            {"distro":"ubuntu-24.04","image":"ubuntu:24.04","source_build":false,"deb_depends":"libwebkit2gtk-4.1-0, libgtk-3-0"}
+            {"distro":"ubuntu-20.04","image":"ubuntu:20.04","source_build":true, "deb_depends":"libgtk-3-0"}
           ]'
           echo "matrix=$(echo "$MATRIX" | jq -c '{include: .}')" >> "$GITHUB_OUTPUT"
           echo "distros=$(echo "$MATRIX" | jq -c '[.[].distro]')" >> "$GITHUB_OUTPUT"
@@ -346,7 +348,9 @@ jobs:
           curl -sS -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" \
             "${API_BASE}/releases/${RELEASE_ID}/assets?per_page=100" -o /tmp/existing-assets.json
 
-          for f in /tmp/out/*.deb /tmp/out/*.deb.sig /tmp/out/*_headless.tar.gz /tmp/out/*_headless.tar.gz.sig /tmp/out/*_headless.tar.gz.sha256 /tmp/out/cix3752iSorter-*.tar.gz; do
+          # 只上傳三種：離線安裝包（人工裝）、.deb（桌面自動更新）、headless tar.gz（服務版自動更新）。
+          # 簽章與 SHA-256 已寫進 latest.json，不另外上傳，Release 頁才不會一堆檔
+          for f in /tmp/out/*.deb /tmp/out/*_headless.tar.gz /tmp/out/cix3752iSorter-*.tar.gz; do
             NAME=$(basename "$f")
             # 同名 asset 已存在（重跑補傳）要先刪，upload API 對同名直接回 422
             EXISTING=$(jq -r --arg n "$NAME" 'first(.[] | select(.name == $n) | .id) // empty' /tmp/existing-assets.json)
@@ -364,7 +368,7 @@ jobs:
             echo "上傳 $NAME（HTTP $STATUS）"
           done
 
-  # 三個 distro 都到齊才合併出 latest.json 並上傳。少一個就紅燈、不上傳：
+  # 清單上的 distro 都到齊才合併出 latest.json 並上傳。少一個就紅燈、不上傳：
   # 工控機讀 releases/latest/download/latest.json，缺 distro 的 manifest 一旦上去，那個 distro 的機器會永遠找不到自己的更新。
   publish-manifest:
     needs: [setup, create-release, release-linux]
@@ -431,10 +435,7 @@ jobs:
           for d in $(echo "$DISTROS" | jq -r '.[]'); do
             {
               echo "cix3752i-sorter_${VERSION}_${d}_amd64.deb"
-              echo "cix3752i-sorter_${VERSION}_${d}_amd64.deb.sig"
               echo "cix3752i-sorter_${VERSION}_${d}_headless.tar.gz"
-              echo "cix3752i-sorter_${VERSION}_${d}_headless.tar.gz.sig"
-              echo "cix3752i-sorter_${VERSION}_${d}_headless.tar.gz.sha256"
               echo "cix3752iSorter-${VERSION}-${d}.tar.gz"
             } >> /tmp/expected.txt
           done

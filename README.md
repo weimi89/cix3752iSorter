@@ -7,7 +7,7 @@
 - Rust：Tauri 2（桌面視窗）、tokio、axum、sqlx（SQLite）、reqwest、`image`
 - 前端：Vue 3 + Vuetify + Pinia，`vite build` 後內嵌進二進位（作法對齊 `cix3752iLabelPrint/src-tauri/src/server/assets.rs`）；同一份前端在 Tauri 視窗與瀏覽器都能跑
 - 兩種執行模式：預設開桌面視窗；`--headless`（或環境變數 `CIX_HEADLESS=1`）只跑服務，給 supervisor／systemd 用
-- 目標平台：Ubuntu 20.04 / 22.04 / 24.04 x86_64，三個 distro 各出一份 .deb 與 headless 執行檔（20.04 沒有 webkit2gtk-4.1，發版時自編整套棧一起打包）
+- 目標平台：工控機 Ubuntu 20.04 x86_64（20.04 沒有 webkit2gtk-4.1，發版時自編整套棧一起打包）；22.04／24.04 的建置矩陣保留，升級時再開
 
 ## 文件
 
@@ -31,10 +31,10 @@ yarn tauri build                              # 本機打 macOS 版；Linux 版�
 ```
 
 **Linux 版只走 GitHub Actions**：Tauri 要連目標平台的 gtk／webkit 開發套件，macOS 交叉編譯不出來。
-`release.yml` 在 ubuntu:20.04／22.04／24.04 三個 container 各建一份，每個 distro 上傳：
-`cix3752iSorter-<ver>-<distro>.tar.gz`（離線安裝包：.deb + `install.sh` + 服務範本；20.04 另含自編 webkit 棧 `stack/`）、
-`cix3752i-sorter_<ver>_<distro>_amd64.deb`（+ `.sig`）、`cix3752i-sorter_<ver>_<distro>_headless.tar.gz`（+ `.sig`／`.sha256`），最後合併出一份 `latest.json`。
-20.04 那份第一次要自編 webkit（約 1 小時 13 分，之後走 Actions 快取；`warm-focal-cache.yml` 每週兩次刷新快取避免過期）。
+`release.yml` 只建現場用的 distro（目前 Ubuntu 20.04；22.04／24.04 的矩陣項目留在註解，工控機升級再開），Release 只放 4 個檔：
+`cix3752iSorter-<ver>-<distro>.tar.gz`（離線安裝包：.deb + `install.sh` + 服務範本 + 自編 webkit 棧 `stack/`）、
+`cix3752i-sorter_<ver>_<distro>_amd64.deb`（桌面自動更新用）、`cix3752i-sorter_<ver>_<distro>_headless.tar.gz`（服務版自動更新用）、`latest.json`（簽章與 SHA-256 都在裡面）。
+20.04 那份第一次要自編 webkit（約 1 小時 55 分，之後走 Actions 快取；`warm-focal-cache.yml` 每週兩次刷新快取避免過期）。
 
 工控機上：`tar -xzf cix3752iSorter-<ver>-<distro>.tar.gz && cd cix3752iSorter-<ver>-<distro> && sudo bash install.sh <模式>`，一台只選一種：
 
