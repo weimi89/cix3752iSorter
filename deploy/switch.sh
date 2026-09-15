@@ -50,7 +50,8 @@ show_status() {
   if new_running; then echo "   執行中"; else echo "   沒在跑"; fi
   say "埠位"
   for p in $CAMERA_PORT 8050 $OLD_PORT "$NEW_PORT"; do
-    if port_listening "$p"; then echo "   :$p 有人在聽（$(ss -ltnp "( sport = :$p )" 2>/dev/null | tail -n +2 | grep -o 'users:(("[^"]*"' | head -1 | cut -d'"' -f2)）"; else echo "   :$p 空"; fi
+    # 舊程式以 root 跑，程序名要 sudo 才看得到
+    if port_listening "$p"; then echo "   :$p 有人在聽（$(sudo ss -ltnp "( sport = :$p )" 2>/dev/null | tail -n +2 | grep -o 'users:(("[^"]*"' | head -1 | cut -d'"' -f2)）"; else echo "   :$p 空"; fi
   done
   say "與皮帶／分揀機（10006）的連線數：$(device_conns)"
   if [ -n "$(autostart_files)" ]; then say "登入後自動啟動：已登記"; else say "登入後自動啟動：沒有"; fi
