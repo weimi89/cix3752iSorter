@@ -292,7 +292,8 @@ jobs:
               if [ -n "$real" ] && [ -e "$real" ]; then
                 actual=$(readlink -f "$real")
                 cp "$actual" "$STAGE/stack/usr/local/lib/x86_64-linux-gnu/"
-                if [ "$actual" != "$real" ]; then
+                # 只有實體檔名與要的 soname 不同時才補連結（/usr/lib 與 /lib 合併時路徑不同但檔名相同，連自己會報錯）
+                if [ "$(basename "$actual")" != "$soname" ]; then
                   (cd "$STAGE/stack/usr/local/lib/x86_64-linux-gnu/" && ln -sf "$(basename "$actual")" "$soname")
                 fi
               else
