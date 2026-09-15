@@ -89,7 +89,6 @@ async fn health() -> Json<serde_json::Value> {
 }
 
 async fn status(State(state): State<ServerState>) -> ApiResult<serde_json::Value> {
-    let cfg = state.app.config.current();
     let rt = state.app.runtime.snapshot();
     let tracker = match state.app.tracker.get() {
         Some(h) => h.snapshot().await,

@@ -1,7 +1,7 @@
 {
   "name": "cix3752i-sorter",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "智配通 分揀控制（Tauri 桌面程式；前端 Vue 3 + Vuetify，後端 Rust）",
   "type": "module",
   "scripts": {

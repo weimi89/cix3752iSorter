@@ -72,6 +72,16 @@ pub fn run(config: Option<PathBuf>, data_dir: Option<PathBuf>) {
             let desktop = Arc::new(Desktop { app: started.app.clone(), bind: started.bind.clone() });
             handle.manage(desktop);
 
+            // 工控機重開機、使用者登入後自動把程式帶起來（舊系統靠 supervisor 做這件事，桌面版靠這個）；
+            // 每次啟動都登記一次，失敗只記錄——沒有它現場要記得自己去點圖示
+            {
+                use tauri_plugin_autostart::ManagerExt;
+                match handle.autolaunch().enable() {
+                    Ok(()) => tracing::info!("已登記登入後自動啟動"),
+                    Err(e) => tracing::warn!("登入後自動啟動登記失敗: {e}"),
+                }
+            }
+
             // 網頁伺服器：埠位被舊版服務占住時每 3 秒重試，視窗照開、畫面會顯示連不上，
             // 而不是整個程式直接崩潰
             let app_state = started.app.clone();
