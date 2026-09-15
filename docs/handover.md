@@ -98,7 +98,7 @@
 | 自動更新雙路徑（`src/composables/useUpdater.js`）：桌面走 Tauri updater、瀏覽器走後端 `/api/update/*` | ✅ 瀏覽器路徑本機驗過；Tauri 路徑要等真的有 Release 才驗得到 | — |
 | `latest.json` 平台鍵帶 distro（`updater::platform_tag`：`linux-x86_64-ubuntu-20.04`、`…-headless`）；桌面 updater 在 Linux 設同樣的 target | ✅ 單元測試（os-release 解析、混合 manifest 解析） | `cargo test` 71 綠 |
 | 模擬器執行檔改名 `sorter-replay`（Tauri 會把所有 bin 一起打進 .deb 的 /usr/bin，避免撞名） | ✅ | `cargo metadata` 目標清單 |
-| `release.yml`：setup（distro 清單單一來源）→ create-release（版本一致性檢查、draft 幂等）→ release-linux（矩陣三 distro，20.04 走 `build-focal-stack` 自編棧）→ publish-manifest（三份齊才合併上傳 `latest.json`、驗 asset 到齊） | ⏳ **未在 GHA 跑過** | YAML 已解析；要推到 GitHub 打 tag 看一次 |
+| `release.yml`：setup（distro 清單單一來源）→ create-release（版本一致性檢查、draft 幂等）→ release-linux（矩陣三 distro，20.04 走 `build-focal-stack` 自編棧）→ publish-manifest（三份齊才合併上傳 `latest.json`、驗 asset 到齊） | ✅ 2026-09-15 v0.1.0 三 distro 全過 | 見下方「v0.1.0 發版」 |
 | `deploy/install.sh` 改為安裝包腳本：`desktop`（裝 .deb）／`systemd`／`supervisor`（從 .deb 取執行檔放 APP_DIR，服務帶 `--headless`）；20.04 先鋪 `stack/` 到 /usr/local | ⏳ 未實機 | `bash -n` 過；要在工控機跑 |
 | `scripts/build-linux.sh`（zig 交叉編譯）已搬到 `backups/`：Tauri 版無法從 macOS 交叉編譯 Linux | — | — |
 
@@ -166,6 +166,12 @@
 - `docs/cutover.md`：依正式機抓回來的 `main_proj/supervisor/`（程式名 `main_proj`＝Go、`twfilter`＝Node，皆 root；`sort_box` 已停用）寫成可直接貼的指令：前一天裝好不起 → 停舊（先 Node 放掉 8051，再 Go）→ 確認埠位釋放 → 改副檔名讓舊的不再自啟 → 起新 → 7 項驗證；回退反向、2 分鐘內舊程式恢復。
 - **修了一個會讓 supervisor 模式裝不進去的錯**：現場 `supervisord.conf` 只 include `conf.d/*.ini`，`install.sh` 原本裝成 `.conf` 會被無視。已改成 `cix3752i-sorter.ini`（`deploy/supervisor-sorter.ini`）。
 - 舊後台日誌（`main_proj.log*`）裡所有請求都來自 `127.0.0.1`、沒有 `/c4/qs`，**確認沒有外部系統在打快速分揀 API**，不移植。
+
+### v0.1.0 發版 — GHA 三 distro 全部成功（draft，待公開）
+
+- 2026-09-15 推上 `weimi89/cix3752iSorter`，`warm-focal-cache.yml` 首次自編 20.04 webkit 棧約 1 小時 55 分；`release.yml` 打 `v0.1.0` 跑了三次才過，兩個問題都在 20.04「帶走自編 .so」那段：① `ldconfig -p | awk '…exit'` 讓上游吃 SIGPIPE、`pipefail` 下整步 141；② `/usr/lib` 與 `/lib` 合併時 `ln` 連到自己。已修。
+- draft Release 內容：三 distro 各有 `.deb`＋`.sig`、headless `tar.gz`＋`.sig`＋`.sha256`、離線安裝包 `cix3752iSorter-0.1.0-<distro>.tar.gz`（20.04 那份 90MB 含 webkit 棧），`latest.json` 六個平台鍵齊全。
+- **待主人**：到 Releases 頁把 v0.1.0 由 draft 改為公開（自動更新才讀得到 `latest.json`），再把 `cix3752iSorter-0.1.0-ubuntu-20.04.tar.gz` 帶去正式機照 `docs/cutover.md` 做。
 
 ### 下一步：M6 現場切換
 
