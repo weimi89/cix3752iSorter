@@ -13,4 +13,5 @@ export const navItems = [
   { title: 'nav.chutes', icon: { icon: 'tabler-route' }, to: { name: 'chutes' } },
   { title: 'nav.printers', icon: { icon: 'tabler-usb' }, to: { name: 'printers' } },
   { title: 'nav.devices', icon: { icon: 'tabler-settings' }, to: { name: 'devices' } },
+  { title: 'nav.ir', icon: { icon: 'tabler-viewfinder' }, to: { name: 'ir' } },
 ]

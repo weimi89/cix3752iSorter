@@ -139,13 +139,38 @@ impl DeviceServer {
                 *c2.lock().await = Some(wr);
                 let mut lines = tokio::io::BufReader::new(rd).lines();
                 let s3 = s2.clone();
+                let c3 = c2.clone();
                 while let Ok(Some(l)) = lines.next_line().await {
                     s3.lock().await.1 += 1;
-                    if l.trim_start().starts_with("Kn ") {
+                    let cmd = l.trim().trim_end_matches(';');
+                    if cmd.starts_with("Kn ") {
                         *k2.lock().await += 1;
                     }
                     if echo {
-                        eprintln!("[{name}] <- {}", l.trim());
+                        eprintln!("[{name}] <- {cmd}");
+                    }
+                    // 光電檢查的回覆（日誌裡沒有，這裡照協定造一份）：第 3 台有一顆被遮蔽；
+                    // p1 每台回 38 個讀值，第 5、17 顆 < 1000 表示被遮蔽
+                    let reply: Option<Vec<String>> = if name == "sorter" && cmd == "Kd[" {
+                        Some(vec!["~[00000000 00000000 00000010 00000000 00000000 00000000 00000000 00000000]".into()])
+                    } else if name == "sorter" && cmd.contains(" p1") {
+                        let mut v = vec!["<<< p1".to_string()];
+                        for i in 1..=38 {
+                            let val = if i == 5 || i == 17 { 120 } else { 3000 + i };
+                            v.push(format!("_ = {val}"));
+                        }
+                        v.push("FFFFFFFF".into());
+                        Some(v)
+                    } else {
+                        None
+                    };
+                    if let Some(lines) = reply {
+                        let mut g = c3.lock().await;
+                        if let Some(wr) = g.as_mut() {
+                            for r in lines {
+                                let _ = wr.write_all(format!("{r}\n").as_bytes()).await;
+                            }
+                        }
                     }
                 }
                 eprintln!("[{name}] 主程式斷線 {peer}");

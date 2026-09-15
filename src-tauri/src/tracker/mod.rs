@@ -8,6 +8,7 @@ pub mod store;
 mod machine_tests;
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::{mpsc, oneshot};
@@ -44,7 +45,53 @@ pub struct ChuteRequest {
 pub struct TrackerHandle {
     tx: mpsc::Sender<Input>,
     query_tx: mpsc::Sender<oneshot::Sender<TrackerSnapshot>>,
+    sorter: LineClient,
+    ir: Arc<IrChannel>,
 }
+
+/// 光電檢查的「問一句、等一句」：網頁送 `Kd[`／`p1` 後在這裡等分揀機回覆；
+/// 一次只做一件（`op` 鎖），回覆由狀態機 task 攔下來送進 `pending`
+pub struct IrChannel {
+    op: tokio::sync::Mutex<()>,
+    pending: std::sync::Mutex<IrPending>,
+}
+
+#[derive(Default)]
+struct IrPending {
+    kd: Option<oneshot::Sender<String>>,
+    p1: Option<(oneshot::Sender<Vec<String>>, Vec<String>)>,
+}
+
+impl IrChannel {
+    /// 分揀機的行進來時呼叫：是不是光電查詢的回覆
+    fn on_sorter_signal(&self, sig: &crate::protocol::SorterSignal) {
+        use crate::protocol::SorterSignal;
+        let mut p = self.pending.lock().unwrap();
+        match sig {
+            SorterSignal::IrStatus(body) => {
+                if let Some(tx) = p.kd.take() {
+                    let _ = tx.send(body.clone());
+                }
+            }
+            SorterSignal::P1Line(line) => {
+                if let Some((_, lines)) = p.p1.as_mut() {
+                    lines.push(line.clone());
+                    if line.contains("FFFFFFFF") {
+                        if let Some((tx, lines)) = p.p1.take() {
+                            let _ = tx.send(lines);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// 光電查詢等分揀機回覆的上限；舊程式是 300ms × 4 次
+const IR_REPLY_TIMEOUT: Duration = Duration::from_millis(1500);
+/// 進維修模式後要停一下再下指令（舊程式 sleep 100ms）
+const IR_SETTLE: Duration = Duration::from_millis(100);
 
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct TrackerSnapshot {
@@ -82,6 +129,60 @@ impl TrackerHandle {
         let (tx, rx) = oneshot::channel();
         self.query_tx.send(tx).await.ok()?;
         rx.await.ok()
+    }
+
+    fn ensure_sorter(&self) -> Result<(), String> {
+        if self.sorter.is_connected() { Ok(()) } else { Err("分揀機未連線".into()) }
+    }
+
+    /// `Kd[`：每台分揀機的光電總狀態（`~[…]` 原文）
+    pub async fn ir_status(&self) -> Result<String, String> {
+        let _op = self.ir.op.lock().await;
+        self.ensure_sorter()?;
+        let (tx, rx) = oneshot::channel();
+        self.ir.pending.lock().unwrap().kd = Some(tx);
+        self.sorter.send("Kd[");
+        match tokio::time::timeout(IR_REPLY_TIMEOUT, rx).await {
+            Ok(Ok(body)) => Ok(body),
+            _ => {
+                self.ir.pending.lock().unwrap().kd = None;
+                Err("分揀機沒有回覆光電狀態".into())
+            }
+        }
+    }
+
+    /// 單台每顆光電讀值（進維修模式 → `p1` → 離開維修模式）
+    pub async fn ir_detail(&self, m2: u32) -> Result<Vec<String>, String> {
+        use crate::protocol::ir;
+        let _op = self.ir.op.lock().await;
+        self.ensure_sorter()?;
+        self.sorter.send(ir::enter_maintenance());
+        tokio::time::sleep(IR_SETTLE).await;
+        let (tx, rx) = oneshot::channel();
+        self.ir.pending.lock().unwrap().p1 = Some((tx, Vec::new()));
+        self.sorter.send(ir::query_p1(m2));
+        let r = match tokio::time::timeout(IR_REPLY_TIMEOUT, rx).await {
+            Ok(Ok(lines)) => Ok(lines),
+            _ => {
+                self.ir.pending.lock().unwrap().p1 = None;
+                Err("分揀機沒有回覆光電讀值".into())
+            }
+        };
+        self.sorter.send(ir::leave_maintenance());
+        r
+    }
+
+    /// 屏蔽／解除屏蔽整台的光電（光電壞了先屏蔽讓線能跑，修好再解除）
+    pub async fn ir_block(&self, m2: u32, block: bool) -> Result<(), String> {
+        use crate::protocol::ir;
+        let _op = self.ir.op.lock().await;
+        self.ensure_sorter()?;
+        self.sorter.send(ir::enter_maintenance());
+        tokio::time::sleep(IR_SETTLE).await;
+        self.sorter.send(ir::block(m2, block));
+        tokio::time::sleep(IR_SETTLE).await;
+        self.sorter.send(ir::leave_maintenance());
+        Ok(())
     }
 }
 
@@ -244,7 +345,8 @@ pub async fn spawn(
     let (query_tx, mut query_rx) = mpsc::channel::<oneshot::Sender<TrackerSnapshot>>(16);
     let (chute_tx, chute_rx) = mpsc::channel::<ChuteRequest>(256);
     let (jam_tx, jam_rx) = mpsc::channel::<i32>(64);
-    let handle = TrackerHandle { tx, query_tx };
+    let ir = Arc::new(IrChannel { op: tokio::sync::Mutex::new(()), pending: std::sync::Mutex::new(IrPending::default()) });
+    let handle = TrackerHandle { tx, query_tx, sorter: devices.sorter.clone(), ir: ir.clone() };
 
     let mut out = LiveOutputs {
         app: app.clone(),
@@ -269,6 +371,9 @@ pub async fn spawn(
                 _ = cancel.cancelled() => break,
                 ev = rx.recv() => match ev {
                     Some(ev) => {
+                        if let DeviceEvent::Sorter { sig, .. } = &ev {
+                            ir.on_sorter_signal(sig);
+                        }
                         if let DeviceEvent::State { device, connected, detail, ts_ms } = &ev {
                             app.runtime.set_device(*device, *connected, detail.clone(), *ts_ms);
                             let cat = match device { Device::Belt => "belt", Device::Sorter => "sorter", Device::Camera => "camera" };

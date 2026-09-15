@@ -47,6 +47,9 @@ export const api = {
   logFiles: () => request('GET', '/api/logs/files'),
   logFileUrl: name => `${apiBase()}/api/logs/files/${encodeURIComponent(name)}`,
   lanIps: () => request('GET', '/api/lan-ips'),
+  irStatus: () => request('GET', '/api/ir/status'),
+  irDetail: m2 => request('POST', '/api/ir/detail', { m2 }),
+  irBlock: (m2, block) => request('POST', '/api/ir/block', { m2, block }, { password: true }),
   dailyStats: (days = 30) => request('GET', `/api/stats/daily?days=${days}`),
   hourlyStats: (hours = 12) => request('GET', `/api/stats/hourly?hours=${hours}`),
 

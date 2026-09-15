@@ -10,6 +10,7 @@ const routes = [
   { path: '/chutes', name: 'chutes', component: () => import('@/pages/ChutesPage.vue'), meta: { title: 'nav.chutes' } },
   { path: '/printers', name: 'printers', component: () => import('@/pages/PrinterSettingsPage.vue'), meta: { title: 'nav.printers' } },
   { path: '/devices', name: 'devices', component: () => import('@/pages/DeviceSettingsPage.vue'), meta: { title: 'nav.devices' } },
+  { path: '/ir', name: 'ir', component: () => import('@/pages/IrCheckPage.vue'), meta: { title: 'nav.ir' } },
   { path: '/switch-demo', name: 'switch-demo', component: () => import('@/pages/SwitchDemoPage.vue') },
   { path: '/:pathMatch(.*)*', redirect: '/' },
 ]

@@ -75,6 +75,9 @@ pub(super) fn api_router() -> Router<ServerState> {
         .route("/belt/stop", post(belt_stop))
         .route("/sorter/reset", post(sorter_reset))
         .route("/sorter/command", post(sorter_command))
+        .route("/ir/status", get(ir_status))
+        .route("/ir/detail", post(ir_detail))
+        .route("/ir/block", post(ir_block))
         .route("/devices/test", post(device_test))
         .route("/print-jobs", get(print_jobs))
         .route("/print-jobs/{id}/retry", post(print_job_retry))
@@ -984,6 +987,71 @@ async fn lan_ips(State(state): State<ServerState>) -> ApiResult<serde_json::Valu
         }
     }
     Ok(Json(serde_json::json!({ "ips": ips, "port": port })))
+}
+
+// ---------- 光電檢查（IR） ----------
+
+#[derive(serde::Serialize)]
+struct IrDevice {
+    /// 該台在集群內的編號 0–7（舊頁面顯示的 1000+m2）
+    m2: u32,
+    /// 0 沒回覆／未連線、1 正常、2 有光電被遮蔽
+    status: u8,
+}
+
+/// `Kd[`：每台分揀機的光電總狀態；同時間只跑一個查詢
+async fn ir_status(State(state): State<ServerState>) -> ApiResult<serde_json::Value> {
+    let cfg = state.app.config.current();
+    let tracker = state.app.tracker.get().ok_or_else(|| unavailable("狀態機"))?;
+    let number = cfg.sorter.number.max(1) as usize;
+    match tracker.ir_status().await {
+        Ok(body) => {
+            let statuses = crate::protocol::ir::parse_kd(&body, number);
+            let devices: Vec<IrDevice> = statuses.into_iter().enumerate().map(|(i, s)| IrDevice { m2: i as u32, status: s }).collect();
+            Ok(Json(serde_json::json!({ "devices": devices, "raw": body })))
+        }
+        Err(e) => Err(ApiError(StatusCode::SERVICE_UNAVAILABLE, e)),
+    }
+}
+
+#[derive(Deserialize)]
+struct IrDetailBody {
+    m2: u32,
+}
+
+/// 單台每顆光電：`triggered[i]` = 第 i+1 顆此刻被遮蔽（讀值 < 1000）；`null` = 沒讀到
+async fn ir_detail(State(state): State<ServerState>, Json(b): Json<IrDetailBody>) -> ApiResult<serde_json::Value> {
+    let cfg = state.app.config.current();
+    if b.m2 >= cfg.sorter.number.max(1) {
+        return Err(bad("分揀機編號超出台數"));
+    }
+    let tracker = state.app.tracker.get().ok_or_else(|| unavailable("狀態機"))?;
+    match tracker.ir_detail(b.m2).await {
+        Ok(lines) => {
+            let triggered = crate::protocol::ir::parse_p1(&lines, cfg.sorter.ir_num as usize);
+            Ok(Json(serde_json::json!({ "m2": b.m2, "ir_num": cfg.sorter.ir_num, "triggered": triggered, "raw": lines })))
+        }
+        Err(e) => Err(ApiError(StatusCode::SERVICE_UNAVAILABLE, e)),
+    }
+}
+
+#[derive(Deserialize)]
+struct IrBlockBody {
+    m2: u32,
+    block: bool,
+}
+
+/// 屏蔽／解除屏蔽整台光電；會改變分揀機行為，要設定密碼
+async fn ir_block(State(state): State<ServerState>, headers: HeaderMap, Json(b): Json<IrBlockBody>) -> ApiResult<serde_json::Value> {
+    require_password(&state, &headers)?;
+    let cfg = state.app.config.current();
+    if b.m2 >= cfg.sorter.number.max(1) {
+        return Err(bad("分揀機編號超出台數"));
+    }
+    let tracker = state.app.tracker.get().ok_or_else(|| unavailable("狀態機"))?;
+    tracker.ir_block(b.m2, b.block).await.map_err(|e| ApiError(StatusCode::SERVICE_UNAVAILABLE, e))?;
+    event_log::log(&state.app.db, Level::Warn, "sorter", if b.block { "ir_block" } else { "ir_unblock" }, format!("分揀機 #{} 光電{}", b.m2 + 1, if b.block { "已屏蔽" } else { "已解除屏蔽" }));
+    Ok(Json(serde_json::json!({ "ok": true })))
 }
 
 #[cfg(test)]

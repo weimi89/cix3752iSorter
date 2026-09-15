@@ -40,6 +40,8 @@ const separator = n => new Intl.NumberFormat('en-US').format(n || 0)
         <div class="pager-select">
           <VSelect
             density="compact"
+            variant="outlined"
+            hide-details
             :items="pageOptions"
             :model-value="page"
             @update:model-value="setPage"
@@ -71,6 +73,8 @@ const separator = n => new Intl.NumberFormat('en-US').format(n || 0)
           <div class="pager-select">
             <VSelect
               density="compact"
+              variant="outlined"
+              hide-details
               :items="pageSizes.map(String)"
               :model-value="String(perPage)"
               @update:model-value="v => emit('update:perPage', Number(v))"
@@ -91,7 +95,29 @@ const separator = n => new Intl.NumberFormat('en-US').format(n || 0)
 // 下拉選單本身沒有固有寬度,擺在被壓縮的列裡會縮到只剩箭頭、看不見頁碼;給固定的最小寬度並禁止被壓縮
 .pager-select {
   flex: 0 0 auto;
-  min-inline-size: 4.75rem;
+  min-inline-size: 4.25rem;
+
+  // 分頁列的選單只是配角，壓到跟文字同一個量級，不要撐成一個大方框
+  :deep(.v-field) {
+    --v-field-input-padding-top: 0;
+    --v-field-input-padding-bottom: 0;
+    --v-input-control-height: 30px;
+    font-size: 0.875rem;
+  }
+
+  :deep(.v-field__input) {
+    min-block-size: 30px;
+    padding-inline: 10px 0;
+  }
+
+  :deep(.v-field__append-inner) {
+    padding-block-start: 0;
+    align-items: center;
+  }
+
+  :deep(.v-field__append-inner .v-icon) {
+    font-size: 18px;
+  }
 }
 
 // 手機:頁首、頁尾各只留一塊(見 template 註解)

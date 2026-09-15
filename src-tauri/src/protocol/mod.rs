@@ -2,6 +2,7 @@
 
 pub mod belt;
 pub mod cid;
+pub mod ir;
 pub mod command;
 pub mod sorter;
 
