@@ -43,6 +43,10 @@ export const api = {
   parcels: params => request('GET', `/api/parcels?${qs(params)}`),
   parcel: id => request('GET', `/api/parcels/${id}`),
   parcelsExportUrl: params => `${apiBase()}/api/parcels/export.xlsx?${qs(params)}`,
+  printJobPreviewUrl: id => `${apiBase()}/api/print-jobs/${id}/preview.png?t=${Date.now()}`,
+  logFiles: () => request('GET', '/api/logs/files'),
+  logFileUrl: name => `${apiBase()}/api/logs/files/${encodeURIComponent(name)}`,
+  lanIps: () => request('GET', '/api/lan-ips'),
   dailyStats: (days = 30) => request('GET', `/api/stats/daily?days=${days}`),
   hourlyStats: (hours = 12) => request('GET', `/api/stats/hourly?hours=${hours}`),
 

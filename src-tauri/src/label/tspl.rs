@@ -18,6 +18,24 @@ pub fn build(r: &Raster, profile: &PrintProfile) -> Vec<u8> {
     out
 }
 
+/// 從 `build` 產出的 TSPL 位元組還原點陣（列印任務頁預覽用）；找不到 `BITMAP` 標頭回 None
+pub fn parse_bitmap(data: &[u8]) -> Option<Raster> {
+    let key = b"\r\nBITMAP ";
+    let start = data.windows(key.len()).position(|w| w == key)? + key.len();
+    // 標頭：x,y,widthBytes,height,mode,
+    let mut fields = Vec::with_capacity(5);
+    let mut pos = start;
+    while fields.len() < 5 {
+        let end = data[pos..].iter().position(|&b| b == b',')? + pos;
+        fields.push(std::str::from_utf8(&data[pos..end]).ok()?.trim().parse::<u32>().ok()?);
+        pos = end + 1;
+    }
+    let (width_bytes, height) = (fields[2], fields[3]);
+    let len = (width_bytes * height) as usize;
+    let bits = data.get(pos..pos + len)?.to_vec();
+    Some(Raster { width: width_bytes * 8, height, width_bytes, bits })
+}
+
 /// 測試頁：純文字，確認該台印表機活著
 pub fn test_page(text: &str) -> Vec<u8> {
     let safe: String = text.chars().filter(|c| c.is_ascii_alphanumeric() || *c == ' ' || *c == '-').collect();
@@ -39,6 +57,16 @@ mod tests {
         let data_start = 512 + "\r\nSIZE 2 mm,0 mm\r\nDIRECTION 1\r\nSPEED 6\r\nDENSITY 11\r\nCLS\r\nBITMAP 0,0,2,2,0,".len();
         assert_eq!(&out[data_start..data_start + 4], &[0xff, 0x00, 0xaa, 0x55]);
         assert!(out.ends_with(b"\r\nPRINT 1,1\r\n"));
+    }
+
+    #[test]
+    fn 從指令還原點陣() {
+        let r = Raster { width: 16, height: 2, width_bytes: 2, bits: vec![0xff, 0x00, 0xaa, 0x55] };
+        let out = build(&r, &PrintProfile::default());
+        let back = parse_bitmap(&out).unwrap();
+        assert_eq!((back.width, back.height, back.width_bytes), (16, 2, 2));
+        assert_eq!(back.bits, r.bits);
+        assert!(parse_bitmap(b"CLS\r\nPRINT 1\r\n").is_none());
     }
 
     #[test]

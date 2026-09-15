@@ -14,6 +14,7 @@ export const useStatusStore = defineStore('status', {
     tracker: null,
     print: { pending: 0, failed: 0 },
     report: { pending: 0, failed: 0 },
+    chuteLatency: null,
     sseConnected: false,
     lastRefreshAt: null,
     _unlisten: [],
@@ -34,6 +35,7 @@ export const useStatusStore = defineStore('status', {
         this.tracker = d.tracker
         this.print = d.print
         this.report = d.report
+        this.chuteLatency = d.chute_latency ?? null
         this.lastRefreshAt = Date.now()
       } catch (e) {
         console.warn('狀態載入失敗', e)

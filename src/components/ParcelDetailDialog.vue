@@ -3,10 +3,12 @@
 import { api } from '@/api/http'
 import { fmtMs, fmtDuration, statusMeta, sourceMeta } from '@/composables/useFormat'
 import { toast } from 'vue3-toastify'
+import { useI18n } from 'vue-i18n'
 
 const props = defineProps({ modelValue: Boolean, parcelId: { type: Number, default: null } })
 const emit = defineEmits(['update:modelValue'])
 
+const { t } = useI18n()
 const loading = ref(false)
 const data = ref(null)
 
@@ -25,6 +27,25 @@ watch(() => [props.modelValue, props.parcelId], async ([open, id]) => {
 
 const rel = ts => data.value ? ts - data.value.parcel.started_ms : 0
 const sourceColor = { belt: 'primary', sorter: 'info', camera: 'secondary', api: 'success', tracker: 'warning', printer: 'secondary' }
+
+// 一眼看出卡在哪：超過門檻的區段標紅（門檻取 protocol-spec 的停線規則與實測 p95）
+const LIMITS = { knToC: 300, jToG: 550, pToO: 2000 }
+const anomalies = computed(() => {
+  const out = new Map()
+  if (!data.value) return out
+  const ev = data.value.events
+  const first = kind => ev.find(e => e.kind === kind)
+  const mark = (e, text) => { if (e) out.set(e, [...(out.get(e) || []), text]) }
+  const pair = (fromKind, toKind, limit, key) => {
+    const a = first(fromKind), b = first(toKind)
+    if (a && b && b.ts_ms - a.ts_ms > limit) mark(b, t(key, { ms: b.ts_ms - a.ts_ms, limit }))
+  }
+  pair('Kn', 'c', LIMITS.knToC, 'parcel.slowKnC')
+  pair('j', 'g', LIMITS.jToG, 'parcel.slowJG')
+  pair('P', 'O', LIMITS.pToO, 'parcel.slowPO')
+  for (const e of ev) if (e.kind === 'chute_late') mark(e, t('parcel.chuteLate'))
+  return out
+})
 </script>
 
 <template>
@@ -54,12 +75,17 @@ const sourceColor = { belt: 'primary', sorter: 'info', camera: 'secondary', api:
           <VTable density="compact" class="mb-4">
             <thead><tr><th>{{ $t('parcel.time') }}</th><th>+ms</th><th>{{ $t('parcel.sourceCol') }}</th><th>{{ $t('parcel.signal') }}</th><th>{{ $t('parcel.raw') }}</th></tr></thead>
             <tbody>
-              <tr v-for="(e, i) in data.events" :key="i">
+              <tr v-for="(e, i) in data.events" :key="i" :class="{ 'row-anomaly': anomalies.has(e) }">
                 <td class="text-no-wrap">{{ fmtMs(e.ts_ms) }}</td>
-                <td class="text-end">{{ rel(e.ts_ms) }}</td>
+                <td class="text-end" :class="{ 'text-error font-weight-bold': anomalies.has(e) }">{{ rel(e.ts_ms) }}</td>
                 <td><VChip size="x-small" :color="sourceColor[e.source] || 'secondary'" variant="tonal">{{ e.source }}</VChip></td>
                 <td class="font-weight-medium">{{ e.kind }}</td>
-                <td class="selectable text-medium-emphasis"><code>{{ e.raw }}</code></td>
+                <td class="selectable text-medium-emphasis">
+                  <code>{{ e.raw }}</code>
+                  <VChip v-for="(a, k) in anomalies.get(e) || []" :key="k" size="x-small" color="error" variant="tonal" label class="ms-2">
+                    <VIcon icon="tabler-alert-triangle" size="12" start />{{ a }}
+                  </VChip>
+                </td>
               </tr>
             </tbody>
           </VTable>
@@ -80,3 +106,7 @@ const sourceColor = { belt: 'primary', sorter: 'info', camera: 'secondary', api:
     </VCard>
   </VDialog>
 </template>
+
+<style scoped>
+.row-anomaly { background: rgba(var(--v-theme-error), 0.06); }
+</style>

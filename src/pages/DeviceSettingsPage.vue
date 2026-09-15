@@ -386,7 +386,7 @@ onBeforeUnmount(() => window.removeEventListener('beforeunload', beforeUnload))
             <VCol cols="6" md="2"><VLabel class="mb-1 text-body-medium">{{ $t('page.settings.buttons.device') }}</VLabel><VSelect v-model="b.device" :items="[{ value: 'belt', title: $t('device.belt') }, { value: 'sorter', title: $t('device.sorter') }]" density="compact" /></VCol>
             <VCol cols="3" md="1"><VLabel class="mb-1 text-body-medium">m2</VLabel><VNumberInput v-model="b.m2" :min="0" :max="99" density="compact" control-variant="hidden" /></VCol>
             <VCol cols="3" md="1"><VLabel class="mb-1 text-body-medium">bit</VLabel><VNumberInput v-model="b.bit" :min="0" :max="7" density="compact" control-variant="hidden" /></VCol>
-            <VCol cols="9" md="3"><VLabel class="mb-1 text-body-medium">{{ $t('page.settings.buttons.action') }}</VLabel><VSelect v-model="b.action" :items="[{ value: 'stop', title: $t('page.settings.buttons.stop') }, { value: 'start', title: $t('page.settings.buttons.start') }]" density="compact" /></VCol>
+            <VCol cols="9" md="3"><VLabel class="mb-1 text-body-medium">{{ $t('page.settings.buttons.action') }}</VLabel><VSelect v-model="b.action" :items="[{ value: 'stop', title: $t('page.settings.buttons.stop') }, { value: 'start', title: $t('page.settings.buttons.start') }, { value: 'estop', title: $t('page.settings.buttons.estop') }, { value: 'estop_release', title: $t('page.settings.buttons.estopRelease') }]" density="compact" /></VCol>
             <VCol cols="3" md="1" class="text-end"><VBtn icon variant="text" size="small" color="error" @click="cfg.emergency_buttons.splice(i, 1)"><VIcon icon="tabler-trash" size="20" /></VBtn></VCol>
           </VRow>
         </VCardText>

@@ -4,6 +4,7 @@ import { api } from '@/api/http'
 import { listen } from '@/api/events'
 import AppHeader from '@/components/AppHeader.vue'
 import PageActions from '@/components/PageActions.vue'
+import { toast } from 'vue3-toastify'
 import TablePagination from '@/components/TablePagination.vue'
 import MultiNoField from '@/components/MultiNoField.vue'
 import AppDatePicker from '@/components/AppDatePicker.vue'
@@ -41,6 +42,13 @@ const search = () => { page.value = 1; load() }
 const resetSearch = () => { level.value = null; category.value = null; q.value = ''; startDate.value = today; endDate.value = today; search() }
 const actions = computed(() => [{ key: 'reload', label: t('common.reload'), icon: 'tabler-refresh', loading: loading.value, onClick: load }])
 
+// 日誌檔：程式日誌與裝置原始訊號逐日一檔，直接從網頁下載，不用 SSH 進工控機撈
+const logFiles = ref([])
+const logMenu = ref(false)
+const loadLogFiles = async () => { try { logFiles.value = await api.logFiles() } catch (e) { toast(e.message, { type: 'error' }) } }
+const fmtSize = n => n >= 1_048_576 ? `${(n / 1_048_576).toFixed(1)} MB` : n >= 1024 ? `${Math.round(n / 1024)} KB` : `${n} B`
+watch(logMenu, open => { if (open) loadLogFiles() })
+
 watch(pageSize, () => { page.value = 1; load() })
 watch(page, load)
 let unlisten = null
@@ -62,7 +70,24 @@ onBeforeUnmount(() => unlisten?.())
 <template>
   <div>
     <AppHeader :title="$t('page.eventLog.title')" :subtitle="$t('page.eventLog.subtitle')" :subtitle-short="$t('page.eventLog.subtitleShort')" icon="tabler-bell-ringing">
-      <template #actions><PageActions :items="actions" /></template>
+      <template #actions>
+        <div class="d-flex align-center ga-2">
+          <VBtn variant="outlined" size="default">
+            <VIcon icon="tabler-file-download" size="16" class="me-1" />{{ $t('page.eventLog.downloadLogs') }}
+            <VMenu v-model="logMenu" activator="parent" :close-on-content-click="false">
+              <VList density="compact" min-width="320">
+                <VListItem v-if="!logFiles.length" disabled><VListItemTitle>{{ $t('page.eventLog.noLogFiles') }}</VListItemTitle></VListItem>
+                <VListItem v-for="f in logFiles" :key="f.name" :href="api.logFileUrl(f.name)" target="_blank">
+                  <template #prepend><VIcon :icon="f.kind === 'signals' ? 'tabler-activity' : 'tabler-file-text'" size="18" class="me-2" /></template>
+                  <VListItemTitle>{{ f.name }}</VListItemTitle>
+                  <VListItemSubtitle>{{ f.kind === 'signals' ? $t('page.eventLog.logKindSignals') : $t('page.eventLog.logKindApp') }} · {{ fmtSize(f.size) }}</VListItemSubtitle>
+                </VListItem>
+              </VList>
+            </VMenu>
+          </VBtn>
+          <PageActions :items="actions" />
+        </div>
+      </template>
     </AppHeader>
     <VAlert v-if="errorMsg" type="error" variant="tonal" class="mb-3">{{ errorMsg }}</VAlert>
 

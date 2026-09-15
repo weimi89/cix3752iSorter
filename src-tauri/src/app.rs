@@ -19,9 +19,9 @@ pub async fn bootstrap(config_path: &Path, data_dir: &Path, cancel: Cancellation
     let cfg = config::AppConfig::load_or_create(config_path).await?;
     // 日誌與裝置訊號留檔都放 data/logs，保留天數跟包裹資料一致
     let logs_dir = data_dir.join("logs");
-    crate::log::attach_file(&logs_dir, cfg.general.retention_days);
-    device::signal_log::init(logs_dir, cfg.general.retention_days);
     let config = config::ConfigHandle::new(config_path.to_path_buf(), cfg.clone());
+    crate::log::attach_file(&logs_dir);
+    device::signal_log::init(logs_dir, config.subscribe());
     let db = db::init(data_dir).await?;
     db::retention::start(db.clone(), config.subscribe(), cancel.clone());
 

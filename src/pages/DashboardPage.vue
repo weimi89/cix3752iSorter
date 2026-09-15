@@ -92,8 +92,16 @@ const deviceCards = computed(() => [
   { key: 'sorter', icon: 'tabler-route', ...status.devices.sorter },
   { key: 'camera', icon: 'tabler-scan', ...status.devices.camera },
 ])
+const latency = computed(() => status.chuteLatency)
+const latencyColor = computed(() => {
+  const l = latency.value
+  if (!l || !l.samples) return 'secondary'
+  if (l.p99_ms > l.budget_ms || l.over_budget_pct >= 1) return 'error'
+  if (l.p90_ms > l.budget_ms * 0.7) return 'warning'
+  return 'success'
+})
 const stats = computed(() => [
-  { key: 'today', icon: 'tabler-packages', color: 'primary', value: status.todayCount, label: t('page.dashboard.today') },
+  { key: 'today', icon: 'tabler-packages', color: 'primary', value: status.todayCount, label: t('page.dashboard.today'), hint: t('page.dashboard.todayHint') },
   { key: 'done', icon: 'tabler-circle-check', color: 'success', value: counters.value.done || 0, label: t('page.dashboard.doneSinceStart') },
   { key: 'abnormal', icon: 'tabler-alert-circle', color: 'error', value: counters.value.abnormal || 0, label: t('page.dashboard.abnormal') },
   { key: 'noread', icon: 'tabler-barcode-off', color: 'warning', value: counters.value.noread || 0, label: t('page.dashboard.noread') },
@@ -133,7 +141,7 @@ const stats = computed(() => [
           <VCardItem>
             <template #prepend><VAvatar :color="s.color" variant="tonal"><VIcon :icon="s.icon" /></VAvatar></template>
             <VCardTitle>{{ s.value }}</VCardTitle>
-            <VCardSubtitle>{{ s.label }}</VCardSubtitle>
+            <VCardSubtitle>{{ s.label }}<VTooltip v-if="s.hint" activator="parent" location="bottom">{{ s.hint }}</VTooltip></VCardSubtitle>
           </VCardItem>
         </VCard>
       </VCol>
@@ -200,6 +208,23 @@ const stats = computed(() => [
       </VCol>
 
       <VCol cols="12" lg="5">
+        <!-- 中介機查格口耗時：變慢時現場能提早發現，不用等到一堆件走預設口 -->
+        <VCard class="card-shadow mb-2">
+          <VCardItem>
+            <template #prepend><VAvatar :color="latencyColor" variant="tonal"><VIcon icon="tabler-clock-bolt" /></VAvatar></template>
+            <VCardTitle>{{ $t('page.dashboard.latency') }}<VTooltip activator="parent" location="bottom">{{ $t('page.dashboard.latencyHint') }}</VTooltip></VCardTitle>
+            <VCardSubtitle v-if="latency && latency.samples">{{ latency.samples }} {{ $t('page.dashboard.latencySamples') }} · {{ $t('page.dashboard.latencyOver') }} {{ latency.over_budget_pct.toFixed(1) }}%</VCardSubtitle>
+            <VCardSubtitle v-else>{{ $t('page.dashboard.latencyNone') }}</VCardSubtitle>
+            <template #append>
+              <div v-if="latency && latency.samples" class="d-flex ga-4 text-center">
+                <div v-for="q in ['p50', 'p90', 'p99']" :key="q">
+                  <div class="text-title-medium font-weight-bold" :class="latency[`${q}_ms`] > latency.budget_ms ? 'text-error' : ''">{{ latency[`${q}_ms`] }}<span class="text-body-small text-medium-emphasis">ms</span></div>
+                  <div class="text-body-small text-medium-emphasis">{{ q }}</div>
+                </div>
+              </div>
+            </template>
+          </VCardItem>
+        </VCard>
         <VCard class="card-shadow mb-2">
           <VCardItem>
             <template #prepend><VAvatar color="primary" variant="tonal"><VIcon icon="tabler-chart-bar" /></VAvatar></template>

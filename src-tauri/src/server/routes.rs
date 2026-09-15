@@ -78,11 +78,15 @@ pub(super) fn api_router() -> Router<ServerState> {
         .route("/devices/test", post(device_test))
         .route("/print-jobs", get(print_jobs))
         .route("/print-jobs/{id}/retry", post(print_job_retry))
+        .route("/print-jobs/{id}/preview.png", get(print_job_preview))
         .route("/printers", get(printers))
         .route("/printers/{port}/test", post(printer_test))
         .route("/report-queue", get(report_queue))
         .route("/report-queue/{id}/retry", post(report_retry))
         .route("/logs", get(logs))
+        .route("/logs/files", get(log_files))
+        .route("/logs/files/{name}", get(log_file_download))
+        .route("/lan-ips", get(lan_ips))
         .route("/update/status", get(update_status))
         .route("/update/check", post(update_check))
         .route("/update/install", post(update_install))
@@ -119,6 +123,7 @@ async fn status(State(state): State<ServerState>) -> ApiResult<serde_json::Value
         "uptime_secs": state.app.started_at.elapsed().as_secs(),
         "devices": { "belt": rt.belt, "sorter": rt.sorter, "camera": rt.camera },
         "tracker": tracker,
+        "chute_latency": state.app.resolver.get().map(|r| r.latency_stats()),
         "print": { "pending": print_pending, "failed": print_failed },
         "report": { "pending": report_pending, "failed": report_failed },
     })))
@@ -719,6 +724,25 @@ async fn print_job_retry(State(state): State<ServerState>, Path(id): Path<i64>) 
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
+/// 補印前看「印出來長怎樣」：從還沒印掉的點陣檔還原成 PNG；印完檔案就清了，只有待印／失敗的看得到
+async fn print_job_preview(State(state): State<ServerState>, Path(id): Path<i64>) -> Result<Response, ApiError> {
+    let row: Option<(String, String)> = sqlx::query_as("SELECT tspl_path, status FROM print_jobs WHERE id = ?").bind(id).fetch_optional(&state.app.db).await?;
+    let (path, status) = row.ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "找不到這筆列印任務".into()))?;
+    let data = tokio::fs::read(&path).await.map_err(|_| {
+        ApiError(StatusCode::NOT_FOUND, if status == "done" { "已印出的面單不保留點陣檔".into() } else { "點陣檔不存在".into() })
+    })?;
+    let png = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<u8>> {
+        let raster = tspl::parse_bitmap(&data).ok_or_else(|| anyhow::anyhow!("點陣檔格式不對"))?;
+        let img = crate::label::raster::to_preview(&raster);
+        let mut buf = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageLuma8(img).write_to(&mut buf, image::ImageFormat::Png)?;
+        Ok(buf.into_inner())
+    })
+    .await
+    .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))??;
+    Ok(([(header::CONTENT_TYPE, "image/png"), (header::CACHE_CONTROL, "no-store")], png).into_response())
+}
+
 async fn printers(State(state): State<ServerState>) -> ApiResult<serde_json::Value> {
     let attached: Vec<(String, String)> = match std::env::var("CIX_PRINT_FAKE_DIR") {
         Ok(dir) => std::fs::read_dir(&dir)
@@ -891,4 +915,85 @@ async fn update_upload(State(state): State<ServerState>, headers: HeaderMap, bod
     let up = state.app.updater.get().ok_or_else(|| unavailable("更新服務"))?.clone();
     up.install_uploaded(&body).await?;
     Ok(Json(serde_json::json!({ "ok": true, "restarting": true })))
+}
+
+// ---------- 日誌檔（data/logs）----------
+
+/// 只放行 `sorter.YYYY-MM-DD.log`／`signals-YYYY-MM-DD.log` 這種檔名，擋掉路徑穿越
+fn is_log_file_name(name: &str) -> bool {
+    let day_ok = |d: &str| d.len() == 10 && d.bytes().all(|b| b.is_ascii_digit() || b == b'-');
+    name.strip_suffix(".log")
+        .and_then(|n| n.strip_prefix("sorter.").or_else(|| n.strip_prefix("signals-")))
+        .is_some_and(day_ok)
+}
+
+async fn log_files(State(state): State<ServerState>) -> ApiResult<Vec<serde_json::Value>> {
+    let dir = state.app.data_dir.join("logs");
+    let mut out = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(&dir) {
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if !is_log_file_name(&name) {
+                continue;
+            }
+            let meta = e.metadata().ok();
+            let modified = meta.as_ref().and_then(|m| m.modified().ok()).map(|t| chrono::DateTime::<chrono::Local>::from(t).format("%Y-%m-%d %H:%M:%S").to_string());
+            out.push(serde_json::json!({
+                "name": name,
+                "kind": if name.starts_with("signals-") { "signals" } else { "app" },
+                "size": meta.map(|m| m.len()).unwrap_or(0),
+                "modified": modified,
+            }));
+        }
+    }
+    out.sort_by(|a, b| b["name"].as_str().cmp(&a["name"].as_str()));
+    Ok(Json(out))
+}
+
+async fn log_file_download(State(state): State<ServerState>, Path(name): Path<String>) -> Result<Response, ApiError> {
+    if !is_log_file_name(&name) {
+        return Err(bad("不是日誌檔名"));
+    }
+    let path = state.app.data_dir.join("logs").join(&name);
+    let data = tokio::fs::read(&path).await.map_err(|_| ApiError(StatusCode::NOT_FOUND, "檔案不存在".into()))?;
+    Ok((
+        [
+            (header::CONTENT_TYPE, "text/plain; charset=utf-8".to_string()),
+            (header::CONTENT_DISPOSITION, format!("attachment; filename=\"{name}\"")),
+        ],
+        data,
+    )
+        .into_response())
+}
+
+// ---------- 手機遙控連線資訊 ----------
+
+/// 本機區網 IPv4 與網頁埠：導覽列的「手機遙控」對話框拿來組網址與 QR
+async fn lan_ips(State(state): State<ServerState>) -> ApiResult<serde_json::Value> {
+    let bind = state.app.config.current().server.bind;
+    let port = bind.rsplit(':').next().unwrap_or("8080").to_string();
+    let mut ips = Vec::new();
+    if let Ok(ifas) = local_ip_address::list_afinet_netifas() {
+        for (name, ip) in ifas {
+            if let std::net::IpAddr::V4(v4) = ip {
+                if v4.is_loopback() || v4.is_link_local() || v4.is_unspecified() {
+                    continue;
+                }
+                ips.push(serde_json::json!({ "name": name, "ip": v4.to_string() }));
+            }
+        }
+    }
+    Ok(Json(serde_json::json!({ "ips": ips, "port": port })))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn 日誌檔名白名單() {
+        assert!(super::is_log_file_name("sorter.2026-09-15.log"));
+        assert!(super::is_log_file_name("signals-2026-09-15.log"));
+        assert!(!super::is_log_file_name("../config.toml"));
+        assert!(!super::is_log_file_name("sorter.2026-09-15.log.bak"));
+        assert!(!super::is_log_file_name("signals-x.log"));
+    }
 }

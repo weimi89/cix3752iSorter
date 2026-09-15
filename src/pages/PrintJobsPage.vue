@@ -47,6 +47,11 @@ const retry = async id => {
 }
 const actions = computed(() => [{ key: 'reload', label: t('common.reload'), icon: 'tabler-refresh', loading: loading.value, onClick: load }])
 
+// 面單預覽：只有還沒印掉的任務有點陣檔可看
+const preview = ref({ open: false, job: null, src: '', error: '' })
+const openPreview = j => { preview.value = { open: true, job: j, src: api.printJobPreviewUrl(j.id), error: '' } }
+const previewFailed = () => { preview.value.error = t('print.previewHint') }
+
 watch(pageSize, () => { page.value = 1; load() })
 watch(page, load)
 let unlisten = null
@@ -104,12 +109,35 @@ onBeforeUnmount(() => { unlisten?.(); clearTimeout(timer) })
             <td :data-label="$t('print.status')" class="text-center"><VChip size="x-small" :color="statusColor[j.status]" label>{{ $t(`print.s.${j.status}`) }}</VChip></td>
             <td :data-label="$t('print.attempts')" class="text-center">{{ j.attempts }}</td>
             <td :data-label="$t('print.error')" class="text-center text-error">{{ j.last_error }}</td>
-            <td class="text-center"><VBtn v-if="j.status !== 'done'" size="small" variant="tonal" @click="retry(j.id)">{{ $t('common.retry') }}</VBtn></td>
+            <td class="text-center text-no-wrap">
+              <VBtn v-if="j.status !== 'done'" size="small" variant="text" class="me-1" @click="openPreview(j)"><VIcon icon="tabler-eye" size="16" class="me-1" />{{ $t('print.preview') }}</VBtn>
+              <VBtn v-if="j.status !== 'done'" size="small" variant="tonal" @click="retry(j.id)">{{ $t('common.retry') }}</VBtn>
+            </td>
           </tr>
         </tbody>
       </VTable>
       <VDivider />
       <TablePagination v-model:page="page" v-model:per-page="pageSize" :total="total" />
     </VCard>
+
+    <VDialog v-model="preview.open" max-width="520">
+      <VCard>
+        <VCardTitle class="d-flex align-center">
+          <span>{{ $t('print.previewTitle') }}</span>
+          <span v-if="preview.job" class="text-body-medium text-medium-emphasis ms-3">{{ preview.job.chute_code }} · {{ preview.job.barcode }}</span>
+          <VSpacer />
+          <VBtn icon variant="text" @click="preview.open = false"><VIcon icon="tabler-x" /></VBtn>
+        </VCardTitle>
+        <VCardText class="text-center">
+          <VAlert v-if="preview.error" type="warning" variant="tonal" density="compact">{{ preview.error }}</VAlert>
+          <img v-else :src="preview.src" :alt="$t('print.previewTitle')" class="label-preview" @error="previewFailed">
+          <div class="text-body-small text-medium-emphasis mt-2">{{ $t('print.previewHint') }}</div>
+        </VCardText>
+      </VCard>
+    </VDialog>
   </div>
 </template>
+
+<style scoped>
+.label-preview { max-width: 100%; max-height: 70vh; border: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); background: #fff; }
+</style>

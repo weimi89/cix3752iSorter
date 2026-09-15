@@ -105,6 +105,8 @@ pub struct Machine {
     pub belt_running: bool,
     belt_input_bits: u8,
     sorter_input_bits: u8,
+    /// 急停按鍵按住中：放開前「急停恢復」不啟動（對應舊系統 `EmergencyStopIng`）
+    estop_latched: bool,
     led: Led,
     led_red_until: Option<i64>,
     led_last_activity: i64,
@@ -135,6 +137,7 @@ impl Machine {
             belt_running: false,
             belt_input_bits: 0,
             sorter_input_bits: 0,
+            estop_latched: false,
             led: Led::Off,
             led_red_until: None,
             led_last_activity: now_ms,
@@ -146,6 +149,10 @@ impl Machine {
     }
 
     pub fn set_config(&mut self, cfg: AppConfig) {
+        // 急停按鈕的定義改了（換位元、換動作），舊的鎖住狀態就不再有意義
+        if cfg.emergency_buttons != self.cfg.emergency_buttons {
+            self.estop_latched = false;
+        }
         self.cfg = cfg;
     }
 
@@ -198,6 +205,9 @@ impl Machine {
                 }
                 if device == Device::Belt && !connected {
                     self.belt_running = false;
+                    // 斷線期間按鈕放開不會再有 ~v 進來：輸入點狀態與急停鎖一併歸零，重連後以新訊號為準
+                    self.belt_input_bits = 0;
+                    self.estop_latched = false;
                 }
             }
             DeviceEvent::Belt { sig, raw, ts_ms } => {
@@ -285,6 +295,8 @@ impl Machine {
                     out.store_event(p, ts, "belt", "O", Some(raw));
                     enqueue = !p.is_ended();
                 }
+                // 已到交接點的件不再綁碼：之後才到的條碼一定是後面那件的（舊版同樣在 ~O 清掉綁定資格）
+                self.unbound.retain(|&k| k != key);
                 if enqueue {
                     self.head_queue.push_back(key);
                     self.pump_head(ts, out);
@@ -391,8 +403,9 @@ impl Machine {
                     if self.cfg.sysled.alarm_on_block {
                         self.set_led(Led::Red, ts, out);
                     }
-                    out.jam_alert(pos);
                 }
+                // 每個 ~k 都送出去，同格口的節流與「安靜 5 秒後重置」由外層決定（對齊舊 Node）
+                out.jam_alert(pos);
                 self.block_until = Some(ts + BLOCK_CLEAR_MS);
                 let Some(key) = self.by_cart.get(&cart).copied() else { return };
                 if let Some(p) = self.parcels.get_mut(&key) {
@@ -471,17 +484,22 @@ impl Machine {
     fn on_barcode<O: Outputs>(&mut self, code: String, raw: &str, ts: i64, out: &mut O) {
         let floor = self.cfg.camera.bind_floor_ms;
         let ceiling = self.cfg.camera.bind_ceiling_ms;
-        // 找最早一件在窗口內的未綁碼包裹
-        let mut found = None;
+        let expected = self.cfg.camera.bind_expected_ms;
+        // 窗口內有多件候選（前一件相機漏拍、還沒過 ~O）時，挑「~P 到條碼」最接近典型延遲的那件；
+        // 一律挑最早那件會把後面每一件的條碼都綁到前一件，一路錯到出現空檔為止
+        let mut found: Option<(u64, i64)> = None;
         for &key in &self.unbound {
             if let Some(p) = self.parcels.get(&key) {
                 let dt = ts - p.p_ms;
                 if dt >= floor && dt <= ceiling {
-                    found = Some(key);
-                    break;
+                    let dist = (dt - expected).abs();
+                    if found.is_none_or(|(_, best)| dist < best) {
+                        found = Some((key, dist));
+                    }
                 }
             }
         }
+        let found = found.map(|(k, _)| k);
         match found {
             Some(key) => {
                 self.unbound.retain(|&k| k != key);
@@ -700,12 +718,27 @@ impl Machine {
         for b in buttons.iter().filter(|b| b.device == device && b.m2 == m2 && b.bit < 8) {
             let mask = 0x80u8 >> b.bit;
             let rising = prev & mask == 0 && bits & mask != 0;
-            if rising {
-                match b.action.as_str() {
-                    "stop" => self.belt_stop(out, &format!("按鈕「{}」", b.describe)),
-                    "start" => self.belt_start(out, &format!("按鈕「{}」", b.describe)),
-                    _ => {}
+            let falling = prev & mask != 0 && bits & mask == 0;
+            match b.action.as_str() {
+                "stop" if rising => self.belt_stop(out, &format!("按鈕「{}」", b.describe)),
+                "start" if rising => self.belt_start(out, &format!("按鈕「{}」", b.describe)),
+                // 急停：按下停線並鎖住，放開才解鎖；鎖住期間「急停恢復」按了也不動（舊系統同樣互鎖）
+                "estop" if rising => {
+                    self.estop_latched = true;
+                    self.belt_stop(out, &format!("急停「{}」", b.describe));
                 }
+                "estop" if falling => {
+                    self.estop_latched = false;
+                    out.log(crate::event_log::Level::Info, "belt", "estop_release", format!("急停「{}」已放開", b.describe));
+                }
+                "estop_release" if rising => {
+                    if self.estop_latched {
+                        out.log(crate::event_log::Level::Warn, "belt", "estop_blocked", format!("急停仍按著，「{}」不啟動", b.describe));
+                    } else {
+                        self.belt_start(out, &format!("按鈕「{}」", b.describe));
+                    }
+                }
+                _ => {}
             }
         }
     }

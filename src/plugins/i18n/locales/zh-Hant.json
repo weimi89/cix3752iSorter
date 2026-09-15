@@ -48,7 +48,12 @@
   },
   "navbar": {
     "today": "今日",
-    "sseDown": "即時連線中斷"
+    "sseDown": "即時連線中斷",
+    "remote": "手機遙控",
+    "remoteHint": "同一個 Wi-Fi 的手機掃 QR 或輸入網址，就能在線邊看狀態、啟停皮帶；這頁不會碰到任何設定。",
+    "remoteNoIp": "找不到區網 IP，請確認工控機有接上網路。",
+    "copied": "已複製",
+    "copyManual": "這個瀏覽器不能自動複製，請長按網址複製"
   },
   "device": {
     "belt": "皮帶線",
@@ -79,6 +84,11 @@
     "manual": "手動"
   },
   "parcel": {
+    "slow": "超時",
+    "slowKnC": "下指令後 {ms}ms 才受理（門檻 {limit}ms）",
+    "slowJG": "上車後 {ms}ms 才離開頭部（門檻 {limit}ms）",
+    "slowPO": "上線到交接 {ms}ms（超過 2 秒）",
+    "chuteLate": "格口回覆太晚，已走預設口",
     "detail": "包裹詳情",
     "barcode": "條碼",
     "chute": "格口",
@@ -108,7 +118,10 @@
       "printing": "列印中",
       "done": "已印",
       "failed": "失敗"
-    }
+    },
+    "preview": "預覽",
+    "previewTitle": "面單預覽",
+    "previewHint": "這是實際要送到印表機的黑白點陣；已印出的任務不保留。"
   },
   "report": {
     "status": "狀態",
@@ -158,6 +171,12 @@
       "beltStart": "啟動皮帶",
       "beltStop": "停止皮帶",
       "today": "今日件數",
+      "todayHint": "今日進入皮帶的包裹數（含異常件與在途件）",
+      "latency": "格口查詢",
+      "latencyHint": "最近一小時向中介機查格口（含抓面單）的耗時；超過預算的件會走預設口",
+      "latencySamples": "件",
+      "latencyOver": "超過預算",
+      "latencyNone": "最近一小時沒有查詢",
       "doneSinceStart": "完成（本次啟動）",
       "abnormal": "異常件",
       "noread": "讀碼失敗",
@@ -200,7 +219,11 @@
       "title": "事件記錄",
       "subtitle": "裝置連線、停線、告警與系統動作的完整紀錄",
       "subtitleShort": "系統事件",
-      "searchHint": "訊息內容"
+      "searchHint": "訊息內容",
+      "downloadLogs": "下載日誌檔",
+      "logKindApp": "程式日誌",
+      "logKindSignals": "裝置訊號",
+      "noLogFiles": "還沒有日誌檔"
     },
     "chutes": {
       "title": "格口對照",
@@ -346,6 +369,8 @@
         "action": "動作",
         "stop": "停止皮帶",
         "start": "啟動皮帶",
+        "estop": "急停（按住時鎖住）",
+        "estopRelease": "急停恢復（急停放開才啟動）",
         "empty": "尚未設定急停按鈕；現場沒有接按鈕可不設。"
       },
       "testConn": "測試連線",

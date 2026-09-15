@@ -6,7 +6,7 @@ mod routes;
 
 use std::net::SocketAddr;
 
-use axum::{Router, routing::get};
+use axum::{Router, response::IntoResponse, routing::get};
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 use tower_http::cors::{AllowOrigin, CorsLayer};
@@ -26,6 +26,8 @@ pub fn router(app: AppState, close_tx: broadcast::Sender<()>) -> Router {
     Router::new()
         .nest("/api", routes::api_router())
         .route("/events/stream", get(events::events_stream))
+        // 手機遙控：現場人員站在線邊用的簡單頁（獨立 HTML），只有皮帶啟停與狀態，不碰設定
+        .route("/control", get(control_page))
         .fallback(assets::serve)
         // 更新用的 tar.gz 約 20MB，預設 2MB 上限會擋掉
         .layer(axum::extract::DefaultBodyLimit::max(64 * 1024 * 1024))
@@ -59,4 +61,8 @@ pub async fn serve(app: AppState, bind: &str, cancel: CancellationToken) -> anyh
         })
         .await?;
     Ok(())
+}
+
+async fn control_page() -> impl IntoResponse {
+    axum::response::Html(include_str!("control_page.html"))
 }

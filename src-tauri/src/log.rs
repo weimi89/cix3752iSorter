@@ -42,8 +42,9 @@ pub fn init() {
     tracing_subscriber::registry().with(filter()).with(file_layer).with(stdout).init();
 }
 
-/// 加上 `dir/sorter.YYYY-MM-DD.log` 逐日輪替檔；`keep_days` 0 = 不刪舊檔。重複呼叫只生效一次。
-pub fn attach_file(dir: &Path, keep_days: u32) {
+/// 加上 `dir/sorter.YYYY-MM-DD.log` 逐日輪替檔。舊檔清理交給 `device::signal_log`（同目錄、同天數、可熱套用）。
+/// 重複呼叫只生效一次。
+pub fn attach_file(dir: &Path) {
     if FILE_GUARD.lock().map(|g| g.is_some()).unwrap_or(true) {
         return;
     }
@@ -51,10 +52,7 @@ pub fn attach_file(dir: &Path, keep_days: u32) {
         tracing::error!(dir = %dir.display(), "日誌目錄建立失敗，只留 stdout: {e}");
         return;
     }
-    let mut builder = tracing_appender::rolling::Builder::new().rotation(tracing_appender::rolling::Rotation::DAILY).filename_prefix("sorter").filename_suffix("log");
-    if keep_days > 0 {
-        builder = builder.max_log_files(keep_days as usize);
-    }
+    let builder = tracing_appender::rolling::Builder::new().rotation(tracing_appender::rolling::Rotation::DAILY).filename_prefix("sorter").filename_suffix("log");
     let appender = match builder.build(dir) {
         Ok(a) => a,
         Err(e) => {

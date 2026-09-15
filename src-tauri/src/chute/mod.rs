@@ -33,6 +33,58 @@ pub struct ChuteResolver {
     mw: Middleware,
     tracker: TrackerHandle,
     chutes: Arc<RwLock<HashMap<String, ChuteRow>>>,
+    latency: Arc<RwLock<LatencyWindow>>,
+}
+
+/// 最近 N 次格口查詢（含面單下載）的耗時，看板用：中介機變慢時現場能提早察覺
+pub struct LatencyWindow {
+    samples: std::collections::VecDeque<(i64, u32)>,
+    cap: usize,
+}
+
+#[derive(Clone, Debug, Default, serde::Serialize)]
+pub struct LatencyStats {
+    pub samples: usize,
+    pub p50_ms: u32,
+    pub p90_ms: u32,
+    pub p99_ms: u32,
+    pub max_ms: u32,
+    /// 最近一小時內超過 `budget_ms` 的比例（%）
+    pub over_budget_pct: f32,
+    pub budget_ms: u32,
+}
+
+impl LatencyWindow {
+    pub fn new(cap: usize) -> Self {
+        Self { samples: std::collections::VecDeque::with_capacity(cap), cap }
+    }
+
+    pub fn push(&mut self, ts_ms: i64, elapsed_ms: u32) {
+        if self.samples.len() == self.cap {
+            self.samples.pop_front();
+        }
+        self.samples.push_back((ts_ms, elapsed_ms));
+    }
+
+    /// 只看最近 `window_ms` 內的樣本
+    pub fn stats(&self, now_ms: i64, window_ms: i64, budget_ms: u32) -> LatencyStats {
+        let mut v: Vec<u32> = self.samples.iter().filter(|(t, _)| now_ms - t <= window_ms).map(|(_, e)| *e).collect();
+        if v.is_empty() {
+            return LatencyStats { budget_ms, ..Default::default() };
+        }
+        v.sort_unstable();
+        let pick = |q: f64| v[((v.len() as f64 - 1.0) * q).round() as usize];
+        let over = v.iter().filter(|&&e| e > budget_ms).count();
+        LatencyStats {
+            samples: v.len(),
+            p50_ms: pick(0.5),
+            p90_ms: pick(0.9),
+            p99_ms: pick(0.99),
+            max_ms: *v.last().unwrap(),
+            over_budget_pct: over as f32 * 100.0 / v.len() as f32,
+            budget_ms,
+        }
+    }
 }
 
 pub struct Decision {
@@ -103,7 +155,7 @@ impl ChuteResolver {
         mut rx: mpsc::Receiver<ChuteRequest>,
         cancel: CancellationToken,
     ) -> Self {
-        let me = Self { app, mw, tracker, chutes: Arc::new(RwLock::new(chutes)) };
+        let me = Self { app, mw, tracker, chutes: Arc::new(RwLock::new(chutes)), latency: Arc::new(RwLock::new(LatencyWindow::new(2000))) };
         let this = me.clone();
         tokio::spawn(async move {
             loop {
@@ -120,6 +172,11 @@ impl ChuteResolver {
 
     pub fn set_chutes(&self, chutes: HashMap<String, ChuteRow>) {
         *self.chutes.write().unwrap() = chutes;
+    }
+
+    /// 最近一小時的查詢延遲；預算 = `~P→~O` 實測中位 1.3s 扣掉相機 0.2s ≈ 1100ms
+    pub fn latency_stats(&self) -> LatencyStats {
+        self.latency.read().unwrap().stats(crate::db::now_ms(), 3_600_000, 1100)
     }
 
     async fn resolve(&self, req: ChuteRequest) {
@@ -157,6 +214,7 @@ impl ChuteResolver {
             }
         }
         let elapsed = started.elapsed().as_millis() as i64;
+        self.latency.write().unwrap().push(crate::db::now_ms(), elapsed.clamp(0, u32::MAX as i64) as u32);
         if let Some(note) = &decision.note {
             event_log::log(&self.app.db, Level::Warn, "chute", "resolve", format!("條碼 {barcode} → {}（{elapsed}ms）：{note}", decision.code));
         } else {
@@ -186,6 +244,21 @@ impl ChuteResolver {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn 延遲統計_只看窗口內_超預算比例() {
+        let mut w = LatencyWindow::new(3);
+        w.push(0, 100);
+        w.push(1_000, 300);
+        w.push(2_000, 1_500);
+        w.push(3_000, 400); // 超過容量，最早的 100 被擠掉
+        let s = w.stats(3_000, 10_000, 1100);
+        assert_eq!((s.samples, s.p50_ms, s.max_ms), (3, 400, 1_500));
+        assert!((s.over_budget_pct - 33.3).abs() < 0.5);
+        let s = w.stats(3_000, 500, 1100);
+        assert_eq!(s.samples, 1, "窗口外的不算");
+        assert_eq!(LatencyWindow::new(3).stats(0, 1, 1100).samples, 0);
+    }
 
     fn chutes() -> HashMap<String, ChuteRow> {
         let mut m = HashMap::new();

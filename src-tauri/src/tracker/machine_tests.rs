@@ -249,7 +249,7 @@ fn 堵塞_停線_紅燈_告警_兩秒後恢復() {
     assert!(s.out.led.contains(&"KL 0 2 3200".to_string()));
     assert_eq!(s.parcel(1).status, Status::Blocked);
     s.at(500).sorter("~k2 73 73");
-    assert_eq!(s.out.jams.len(), 1, "同一次堵塞不重複告警");
+    assert_eq!(s.out.jams, vec![73, 73], "每個 ~k 都交給外層節流（JamThrottle 另有測試）");
     s.at(1800);
     assert_eq!(s.out.belt.len(), 1, "距最後一次 ~k 未滿 2 秒");
     s.at(300);
@@ -385,4 +385,42 @@ fn 網頁啟停皮帶_立即反映運轉狀態() {
     s.m.handle(Input::BeltStart, &mut s.out);
     s.belt("~k-1 -1");
     assert!(!s.m.belt_running);
+}
+
+#[test]
+fn 綁碼_窗口內多件候選_挑最接近典型延遲的() {
+    let mut s = Sim::new();
+    // 第一件相機漏拍；第二件在 400ms 後上線，它的條碼在自己 ~P 後 226ms 到
+    s.belt("~P1 1").at(400).belt("~P2 1").at(226).barcode("B0000000002");
+    assert_eq!(s.parcel(1).barcode, None, "第一件不該搶到第二件的條碼");
+    assert_eq!(s.parcel(2).barcode.as_deref(), Some("B0000000002"));
+}
+
+#[test]
+fn 綁碼_過了交接點就不再綁() {
+    let mut s = Sim::new();
+    s.belt("~P1 1").at(1300).belt("~O1 1").at(100).barcode("B0000000001");
+    assert_eq!(s.parcel(1).barcode, None, "~O 後才到的條碼不綁這件");
+    // 沒人可綁的條碼先暫存等下一個 ~P，暫存期過了才記「沒有可綁定的包裹」
+    s.at(200);
+    assert_eq!(s.parcel(1).barcode, None);
+    assert!(s.out.logs.iter().any(|l| l.contains("沒有可綁定的包裹")), "{:?}", s.out.logs);
+}
+
+#[test]
+fn 急停互鎖_按住時恢復無效_放開後才能啟動() {
+    let mut s = Sim::new();
+    let mut cfg = AppConfig::default();
+    cfg.emergency_buttons = vec![
+        crate::config::EmergencyButton { describe: "急停".into(), device: "belt".into(), m2: 0, bit: 2, action: "estop".into() },
+        crate::config::EmergencyButton { describe: "恢復".into(), device: "belt".into(), m2: 0, bit: 3, action: "estop_release".into() },
+    ];
+    s.m.set_config(cfg);
+    s.belt("~v0 32"); // bit2 = 0b00100000 → 急停按下
+    assert_eq!(s.out.belt, vec!["KM998 1"]);
+    s.belt("~v0 48"); // 急停仍按著（32）+ 恢復按下（16）→ 不啟動
+    assert_eq!(s.out.belt, vec!["KM998 1"]);
+    s.belt("~v0 0"); // 全放開
+    s.belt("~v0 16"); // 只按恢復 → 啟動
+    assert_eq!(s.out.belt, vec!["KM998 1", "KM998 3"]);
 }

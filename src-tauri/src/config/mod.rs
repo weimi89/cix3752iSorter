@@ -139,6 +139,8 @@ pub struct CameraConfig {
     /// 條碼時間相對 `~P` 的綁定窗口（毫秒）
     pub bind_floor_ms: i64,
     pub bind_ceiling_ms: i64,
+    /// 條碼通常在 `~P` 後多久到（現場實測中位 226ms）；窗口內有多件候選時挑最接近這個值的
+    pub bind_expected_ms: i64,
     /// 同一條碼多久內不重複觸發
     pub dedup_ms: u64,
 }
@@ -155,6 +157,8 @@ pub struct MiddlewareConfig {
     pub alert_timeout_ms: u64,
     /// 同一格口卡件警報最短間隔
     pub jam_alert_throttle_ms: u64,
+    /// 同一格口多久沒再收到 `~k` 視為那次堵塞結束，下一個 `~k` 立刻再告警
+    pub jam_alert_reset_ms: u64,
 }
 
 /// 異常時是否停線（對應舊 `conf.ng`）
@@ -200,7 +204,8 @@ pub struct EmergencyButton {
     pub m2: u32,
     /// 8 位元中的第幾位（0 = 最高位，對應舊設定）
     pub bit: u8,
-    /// 該位由 0 變 1 時的動作："stop" 停線、"start" 啟動
+    /// 該位由 0 變 1 時的動作："stop" 停線、"start" 啟動、
+    /// "estop" 急停（停線並鎖住，放開前「急停恢復」無效）、"estop_release" 急停恢復（急停沒鎖住才啟動）
     pub action: String,
 }
 
@@ -310,6 +315,7 @@ impl Default for CameraConfig {
             listen: "0.0.0.0:8051".into(),
             bind_floor_ms: -100,
             bind_ceiling_ms: 2000,
+            bind_expected_ms: 226,
             dedup_ms: 5000,
         }
     }
@@ -324,6 +330,7 @@ impl Default for MiddlewareConfig {
             report_timeout_ms: 5000,
             alert_timeout_ms: 3000,
             jam_alert_throttle_ms: 20_000,
+            jam_alert_reset_ms: 5_000,
         }
     }
 }

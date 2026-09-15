@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+<meta name="theme-color" content="#EAF3FB" />
+<title>皮帶線遙控</title>
+<style>
+  /* 手機遙控：現場人員站在線邊用，只有皮帶啟停、裝置燈、件數；不碰任何設定（版型對齊 cix3752iLabelPrint /control） */
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  :root {
+    --bg: #EFF3F8; --primary: #0EA5E9; --success: #16A34A; --warn: #F59E0B; --danger: #F43F5E;
+    --text: #11253A; --muted: #5E7283; --border: #E2E8F0; --card: #FFFFFF;
+  }
+  html, body { margin: 0; color: var(--text); font-family: -apple-system, "PingFang TC", "Noto Sans TC", "Microsoft JhengHei", system-ui, sans-serif; }
+  body { min-height: 100vh; background: linear-gradient(135deg, #EAF3FB 0%, #EDF1FA 55%, #F4F6FA 100%); background-attachment: fixed; }
+  header { position: sticky; top: 0; z-index: 5; background: rgba(240,244,248,.9); backdrop-filter: blur(12px); border-bottom: 1px solid var(--border);
+    padding: max(10px, env(safe-area-inset-top)) 16px 10px; display: flex; align-items: center; gap: 10px; }
+  header h1 { font-size: 17px; margin: 0; flex: 1; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--danger); box-shadow: 0 0 0 3px rgba(244,63,94,.18); }
+  .dot.on { background: var(--success); box-shadow: 0 0 0 3px rgba(22,163,74,.18); }
+  main { padding: 14px 14px max(20px, env(safe-area-inset-bottom)); max-width: 520px; margin: 0 auto; display: grid; gap: 12px; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 16px; padding: 14px 16px; box-shadow: 0 1px 2px rgba(17,37,58,.04); }
+  .belt { text-align: center; padding: 22px 16px; }
+  .belt .label { color: var(--muted); font-size: 13px; }
+  .belt .state { font-size: 28px; font-weight: 700; margin: 6px 0 16px; }
+  .belt .state.run { color: var(--success); }
+  .belt .state.stop { color: var(--muted); }
+  .belt .state.warn { color: var(--warn); }
+  .belt .state.off { color: var(--danger); }
+  button.big { width: 100%; border: none; border-radius: 14px; padding: 20px; font-size: 22px; font-weight: 700; color: #fff; }
+  button.big.start { background: var(--success); }
+  button.big.stop { background: var(--danger); }
+  button.big:disabled { background: #CBD5E1; color: #fff; }
+  button.big:active:not(:disabled) { transform: scale(.98); }
+  .devices { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+  .dev { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 10px 4px; border-radius: 12px; background: #F7F9FC; font-size: 13px; }
+  .dev .dot { width: 12px; height: 12px; }
+  .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .stat { padding: 10px 12px; border-radius: 12px; background: #F7F9FC; }
+  .stat .v { font-size: 26px; font-weight: 700; }
+  .stat .k { font-size: 12px; color: var(--muted); }
+  .current .k { font-size: 12px; color: var(--muted); }
+  .current .v { font-size: 20px; font-weight: 600; word-break: break-all; }
+  .row { display: flex; gap: 16px; }
+  .row > div { flex: 1; min-width: 0; }
+  .toast { position: fixed; left: 50%; bottom: max(24px, env(safe-area-inset-bottom)); transform: translateX(-50%); background: #11253A; color: #fff;
+    padding: 10px 16px; border-radius: 12px; font-size: 14px; opacity: 0; transition: opacity .2s; pointer-events: none; }
+  .toast.show { opacity: .95; }
+</style>
+</head>
+<body>
+<header>
+  <h1 id="title">皮帶線遙控</h1>
+  <span id="conn" class="dot" title="與主機連線"></span>
+</header>
+<main>
+  <section class="card belt">
+    <div class="label">皮帶線</div>
+    <div id="beltState" class="state off">連線中…</div>
+    <button id="beltBtn" class="big start" disabled>啟動皮帶</button>
+  </section>
+
+  <section class="card">
+    <div class="devices">
+      <div class="dev"><span id="d-belt" class="dot"></span>皮帶線</div>
+      <div class="dev"><span id="d-sorter" class="dot"></span>分揀機</div>
+      <div class="dev"><span id="d-camera" class="dot"></span>讀碼站</div>
+    </div>
+  </section>
+
+  <section class="card stats">
+    <div class="stat"><div id="today" class="v">0</div><div class="k">今日件數</div></div>
+    <div class="stat"><div id="inflight" class="v">0</div><div class="k">在途包裹</div></div>
+  </section>
+
+  <section class="card current">
+    <div class="row">
+      <div><div class="k">目前處理中</div><div id="curBarcode" class="v">—</div></div>
+      <div style="flex:0 0 auto"><div class="k">格口</div><div id="curChute" class="v">—</div></div>
+    </div>
+  </section>
+</main>
+<div id="toast" class="toast"></div>
+
+<script>
+(function () {
+  const $ = id => document.getElementById(id);
+  const state = { devices: { belt: false, sorter: false, camera: false }, tracker: null, busy: false };
+
+  function toast(msg) {
+    const t = $('toast'); t.textContent = msg; t.classList.add('show');
+    clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove('show'), 2200);
+  }
+
+  function render() {
+    for (const k of ['belt', 'sorter', 'camera']) $('d-' + k).classList.toggle('on', !!state.devices[k]);
+    const tr = state.tracker;
+    const st = $('beltState'), btn = $('beltBtn');
+    if (!state.devices.belt) {
+      st.textContent = '皮帶未連線'; st.className = 'state off';
+      btn.disabled = true; btn.textContent = '啟動皮帶'; btn.className = 'big start';
+    } else if (tr && tr.head_jam) {
+      st.textContent = '頭部堵塞停線中'; st.className = 'state warn'; setBtn(false);
+    } else if (tr && tr.blocked) {
+      st.textContent = '堵塞停線中'; st.className = 'state warn'; setBtn(false);
+    } else if (tr && tr.belt_running) {
+      st.textContent = '皮帶運轉中'; st.className = 'state run'; setBtn(true);
+    } else {
+      st.textContent = '皮帶已停止'; st.className = 'state stop'; setBtn(false);
+    }
+    function setBtn(running) {
+      btn.disabled = state.busy;
+      btn.textContent = running ? '停止皮帶' : '啟動皮帶';
+      btn.className = 'big ' + (running ? 'stop' : 'start');
+      btn.dataset.action = running ? 'stop' : 'start';
+    }
+    $('today').textContent = tr ? tr.today_count : 0;
+    $('inflight').textContent = tr && tr.in_flight ? tr.in_flight.length : 0;
+    const cur = tr && tr.current;
+    $('curBarcode').textContent = cur ? (cur.barcode || 'NoRead') : '—';
+    $('curChute').textContent = cur && cur.chute ? cur.chute.code : '—';
+  }
+
+  async function control() {
+    const action = $('beltBtn').dataset.action || 'start';
+    state.busy = true; render();
+    try {
+      const r = await fetch('/api/belt/' + action, { method: 'POST' });
+      if (!r.ok) {
+        // 服務重啟中會回非 JSON 的錯誤頁，先拿文字再試著解析
+        const text = await r.text();
+        let msg = '伺服器回應 ' + r.status;
+        try { msg = JSON.parse(text).error || msg; } catch {}
+        throw new Error(msg);
+      }
+      toast(action === 'start' ? '已送出啟動' : '已送出停止');
+    } catch (e) {
+      toast('失敗：' + e.message);
+    } finally {
+      state.busy = false; render();
+    }
+  }
+  $('beltBtn').addEventListener('click', control);
+
+  async function refresh() {
+    try {
+      const r = await fetch('/api/status');
+      const d = await r.json();
+      for (const k of ['belt', 'sorter', 'camera']) state.devices[k] = !!(d.devices && d.devices[k] && d.devices[k].connected);
+      state.tracker = d.tracker;
+      if (d.title) { $('title').textContent = d.title + '・遙控'; document.title = d.title + ' 遙控'; }
+      $('conn').classList.add('on');
+    } catch (e) {
+      $('conn').classList.remove('on');
+    }
+    render();
+  }
+
+  function connect() {
+    const es = new EventSource('/events/stream?only=status,device-state');
+    es.onopen = () => { $('conn').classList.add('on'); refresh(); };
+    es.onmessage = ev => {
+      let m; try { m = JSON.parse(ev.data); } catch { return; }
+      if (m.event === 'status') { state.tracker = m.payload; render(); }
+      else if (m.event === 'device-state') { state.devices[m.payload.device] = !!m.payload.connected; render(); }
+    };
+    es.onerror = () => { $('conn').classList.remove('on'); render(); };
+  }
+
+  refresh();
+  connect();
+  // 手機切回前景時 SSE 可能已被瀏覽器暫停，補抓一次現況
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
+})();
+</script>
+</body>
+</html>

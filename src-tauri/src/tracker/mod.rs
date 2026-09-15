@@ -114,9 +114,41 @@ struct LiveOutputs {
     chute_tx: mpsc::Sender<ChuteRequest>,
     label_tx: mpsc::Sender<LabelJob>,
     led_via_sorter: bool,
-    jam_last: HashMap<i32, i64>,
-    jam_throttle_ms: i64,
+    jam: JamThrottle,
     jam_tx: mpsc::Sender<i32>,
+}
+
+/// 卡件告警節流（對齊舊 Node）：同一格口 `throttle_ms` 內只報一次；
+/// 但連續 `reset_ms` 沒再收到該格口的 `~k` 就視為那次堵塞結束，下一個 `~k` 立刻再報
+pub struct JamThrottle {
+    throttle_ms: i64,
+    reset_ms: i64,
+    /// 格口 → (最後一次告警, 最後一次收到 ~k)
+    state: HashMap<i32, (i64, i64)>,
+}
+
+impl JamThrottle {
+    pub fn new(throttle_ms: i64, reset_ms: i64) -> Self {
+        Self { throttle_ms, reset_ms, state: HashMap::new() }
+    }
+
+    /// 設定改了只換參數，正在節流中的格口不重算（否則存個設定就會多報一次）
+    pub fn set_params(&mut self, throttle_ms: i64, reset_ms: i64) {
+        self.throttle_ms = throttle_ms;
+        self.reset_ms = reset_ms;
+    }
+
+    /// `~k` 的 pos → 格口號（`pos/10+1`）；回 Some 表示要告警
+    pub fn on_signal(&mut self, pos: i32, now: i64) -> Option<i32> {
+        let chute_no = pos / 10 + 1;
+        let (mut last_alert, last_signal) = self.state.get(&chute_no).copied().unwrap_or((i64::MIN / 2, i64::MIN / 2));
+        if now - last_signal > self.reset_ms {
+            last_alert = i64::MIN / 2;
+        }
+        let fire = now - last_alert >= self.throttle_ms;
+        self.state.insert(chute_no, (if fire { now } else { last_alert }, now));
+        fire.then_some(chute_no)
+    }
 }
 
 impl machine::Outputs for LiveOutputs {
@@ -166,14 +198,9 @@ impl machine::Outputs for LiveOutputs {
         event_log::log(&self.app.db, level, category, action, msg);
     }
     fn jam_alert(&mut self, pos: i32) {
-        let now = crate::db::now_ms();
-        let chute_no = pos / 10 + 1;
-        let last = self.jam_last.get(&chute_no).copied().unwrap_or(0);
-        if now - last < self.jam_throttle_ms {
-            return;
+        if let Some(chute_no) = self.jam.on_signal(pos, crate::db::now_ms()) {
+            let _ = self.jam_tx.try_send(chute_no);
         }
-        self.jam_last.insert(chute_no, now);
-        let _ = self.jam_tx.try_send(chute_no);
     }
     fn chute_decided(&mut self, p: &Parcel) {
         event_bus::emit("chute-decided", p);
@@ -227,8 +254,7 @@ pub async fn spawn(
         chute_tx,
         label_tx,
         led_via_sorter: cfg.sysled.via != "belt",
-        jam_last: HashMap::new(),
-        jam_throttle_ms: cfg.middleware.jam_alert_throttle_ms as i64,
+        jam: JamThrottle::new(cfg.middleware.jam_alert_throttle_ms as i64, cfg.middleware.jam_alert_reset_ms as i64),
         jam_tx,
     };
     let mut machine = Machine::new(cfg, chutes, today, crate::db::now_ms());
@@ -260,7 +286,7 @@ pub async fn spawn(
                 _ = cfg_rx.changed() => {
                     let cfg = cfg_rx.borrow().clone();
                     out.led_via_sorter = cfg.sysled.via != "belt";
-                    out.jam_throttle_ms = cfg.middleware.jam_alert_throttle_ms as i64;
+                    out.jam.set_params(cfg.middleware.jam_alert_throttle_ms as i64, cfg.middleware.jam_alert_reset_ms as i64);
                     machine.set_config(cfg);
                     // 格口表可能一起改了（設定頁存檔後會重載）
                     if let Ok(ch) = load_chutes(&app.db).await { machine.set_chutes(ch); }
@@ -292,5 +318,25 @@ fn snapshot(m: &Machine) -> TrackerSnapshot {
         counters: m.counters.clone(),
         current: m.current.and_then(|k| m.parcels.get(&k).cloned()),
         in_flight: m.in_flight().into_iter().cloned().collect(),
+    }
+}
+
+#[cfg(test)]
+mod jam_tests {
+    use super::JamThrottle;
+
+    #[test]
+    fn 同格口節流_安靜五秒後重置() {
+        let mut j = JamThrottle::new(20_000, 5_000);
+        assert_eq!(j.on_signal(73, 0), Some(8));
+        assert_eq!(j.on_signal(73, 1_000), None, "20 秒內同格口不重報");
+        assert_eq!(j.on_signal(25, 1_500), Some(3), "不同格口各自計");
+        // 一直有 ~k 進來（堵塞持續，每 2 秒一個）：滿 20 秒才再報
+        for t in (3_000..=19_000).step_by(2_000) {
+            assert_eq!(j.on_signal(73, t), None, "t={t}");
+        }
+        assert_eq!(j.on_signal(73, 21_000), Some(8));
+        // 清掉後安靜 6 秒再卡：不必等 20 秒，立刻報
+        assert_eq!(j.on_signal(73, 27_100), Some(8));
     }
 }
