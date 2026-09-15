@@ -40,6 +40,15 @@ which sorter && sorter --version
 
 ## 2. 切換（線上沒有包裹時做，約 3 分鐘）
 
+**一鍵版**（安裝時已放好 `sorter-switch`，用登入的帳號在終端機執行，會問一次 sudo 密碼）：
+
+```bash
+sorter-switch to-new      # 停舊 → 確認埠位放掉 → 舊的不再自啟 → 開新程式 → 等裝置連上
+sorter-switch status      # 隨時看現在誰在跑
+```
+
+每一步有檢查，卡住會停在那一步並印出原因，不會做到一半。下面是它做的事的手動版（一鍵版出錯時對照用）：
+
 ```bash
 # 2-1 停舊：先停 Node（放掉相機 8051），再停 Go（放掉皮帶／分揀機連線）
 sudo supervisorctl stop twfilter main_proj
@@ -70,6 +79,14 @@ sudo supervisorctl reread && sudo supervisorctl update
 | 7 | 跑 10 件以上看走預設口比例 | 看板「走預設口」不應明顯高於舊系統（每日 0.3–0.9%） | 高：「格口查詢」卡 p99 是否 > 1100ms |
 
 ## 3. 回退（出狀況時，目標 2 分鐘）
+
+**一鍵版**：
+
+```bash
+sorter-switch to-old      # 關新程式 → 拿掉自動啟動 → 舊的設定改回來並啟動 → 等舊後台回來
+```
+
+手動版：
 
 **3-1 停新**：把「智配通 分揀控制」視窗關掉（關視窗＝整個程式結束，裝置連線會乾淨放掉）。
 

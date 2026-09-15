@@ -81,10 +81,13 @@ else
   usermod -a -G lp "${APP_USER}" || true
 fi
 
+# 切換／回退工具：新舊程式一鍵互換（用法見 docs/cutover.md）
+install -m 755 "${HERE}/sorter-switch.sh" /usr/local/bin/sorter-switch
+
 # 3. 服務登記
 case "${MODE}" in
   desktop)
-    echo "3/3 完成。從應用選單開啟「智配通 分揀控制」，或於終端機執行：sorter"
+    echo "3/3 完成。切換時執行：sorter-switch to-new（會停舊程式並開啟視窗）；回退：sorter-switch to-old"
     ;;
   systemd)
     echo "3/3 登記 systemd 服務"
