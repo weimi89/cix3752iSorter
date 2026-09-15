@@ -39,6 +39,21 @@
 | SQL 字串拼接 | `web/history.go:33-62` | 參數化 |
 | 印表機寫入佔滿 libuv 執行緒池 | `server.js:1077` | 每台印表機一個 `spawn_blocking` worker，佇列落 SQLite |
 
+## 4b. 正式機執行檔 vs 交付原始碼（2026-09-15 用 `scripts/legacy-disasm.py` 對過）
+
+執行檔沒去符號，函式名與字串都在。比交付原始碼多出來的功能，與新版的對應：
+
+| 執行檔多出來的 | 做什麼 | 新版 |
+|---|---|---|
+| `logic.GetChuteFromApi`（相機綁碼時呼叫，取代 `~P` 時的 `GetOutFunc`） | `GET /get/to/chute?code=` 或 POST（依 `mode`），回覆對 `Chute` 表換成 CID；「返回超時,貨物已下發分揀指令」就不改 | ✅ 綁碼即問中介機、`~O` 後回覆只記錄 |
+| `logic.Chute`／`ChuteInfo` 表、`web.Get/Update/Delete/ResetChute` | 格口代號 ↔ CID 對照的網頁維護 | ✅ `chutes` 表 + 格口對照頁 |
+| `logic.PushHardwareAlarmToNode`（`~k` 時） | POST `localhost:3000/api/alarm` 讓 Node 轉 `PARCEL_JAM` 給中介機 | ✅ 直接對中介機發卡件告警（20 秒節流、安靜 5 秒重置） |
+| 歷史匯出 Excel（`history.xlsx`） | | ✅ 包裹查詢匯出 |
+| `~I` 建件（`IInitPac`／`IDelayTs`，頭部有件時跳過） | 入口光電觸發即建包裹 | ❌ 未做，現場設定關閉 |
+| `logic.PushPacInfo`（`pac.go:278`） | 推送包裹資訊到 WMS（`pushInfo.baseUri`） | ❌ 未做，現場 `pushInfo.used=false` |
+| `logic.SplitBarcode` | 相機送來的碼以 `,` 切、取最後一段 | 不需要：新版直接收相機幀，Node 那層不存在 |
+| 「📡 分揀機 TCP 原始訊號捕捉」除錯日誌 | | ✅ `signals-*.log` |
+
 ## 5. 現場資料
 
 - `main_proj/data/cmd.log`：71 萬行真實訊號，作為裝置模擬器回放素材。
