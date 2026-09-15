@@ -86,17 +86,14 @@ jobs:
           fi
           echo "version=${TAG_VERSION}" >> "$GITHUB_OUTPUT"
 
-      # 版本說明：優先用 annotated tag 的內容，沒有就用最近一次 commit 標題。
+      # 版本說明：CHANGELOG.md 對應 tag 的段落（與 cix3752iLabelPrint 同一套：發版前先寫 CHANGELOG 再打 tag）。
       # 同一份文字進 release body 與 latest.json 的 notes（程式內「發現新版本」對話框顯示的就是它）
       - name: Build release notes
         id: notes
         shell: bash
         run: |
           set -euo pipefail
-          git fetch --force origin "refs/tags/${TAG_NAME}:refs/tags/${TAG_NAME}"
-          NOTES=$(git tag -l --format='%(contents)' "${TAG_NAME}" | sed '/^-----BEGIN/,$d' | sed -e :a -e '/^\n*$/{$d;N;ba' -e '}')
-          [ -z "${NOTES}" ] && NOTES=$(git log -1 --pretty=%s)
-          printf '%s\n' "${NOTES}" > /tmp/release-notes.md
+          bash scripts/build-release-notes.sh "${TAG_NAME}" > /tmp/release-notes.md
           {
             echo "body<<RELEASE_NOTES_EOF"
             cat /tmp/release-notes.md

@@ -46,7 +46,7 @@ yarn tauri build                              # 本機打 macOS 版；Linux 版�
 設定檔 `config.toml` 首次啟動自動建立（桌面模式在使用者的應用資料夾，headless 在 `--config` 指定處），資料在 `data/`。
 自動更新兩條路讀同一份 `latest.json`，`platforms` 的鍵帶 distro（`linux-x86_64-ubuntu-20.04`、`…-headless`），程式照 `/etc/os-release` 挑自己那筆。
 
-發版：改 `src-tauri/Cargo.toml` 與 `src-tauri/tauri.conf.json` 版本（兩處要一致，GHA 會擋） → `git tag -a vX.Y.Z -m "版本說明"` → push tag → GHA 建置並上傳到 draft Release → 到 Releases 頁公開。
+發版（與 cix3752iLabelPrint 同一套）：改 `src-tauri/Cargo.toml` 與 `src-tauri/tauri.conf.json` 版本（兩處要一致，GHA 會擋） → 在 `CHANGELOG.md` 新增 `## vX.Y.Z` 段落（Release 說明與程式內更新提示都從這裡抽） → `git tag -a vX.Y.Z -m "vX.Y.Z"` → push tag → GHA 建置並上傳到 draft Release → 到 Releases 頁公開。已公開後才發現說明漏寫：`gh release edit vX.Y.Z --notes-file <(bash scripts/build-release-notes.sh vX.Y.Z)`，不要靠重跑 workflow。
 GitHub repo 的 secrets 要有 `TAURI_SIGNING_PRIVATE_KEY`／`TAURI_SIGNING_PRIVATE_KEY_PASSWORD`（對應 `~/.tauri/cix3752iSorter.key`），沒設 build 會直接失敗。
 
 ## 狀態

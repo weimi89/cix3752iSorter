@@ -83,7 +83,7 @@
 | 系統設定頁 UX | 段落捷徑列（貼頂）、每段卡片圖示標題＋副標、裝置段顯示連線狀態並可「測試連線」（`POST /api/devices/test`，只做握手不送指令）、位址／網址格式即時檢查（有錯不送出）、有改動才能儲存＋底部未儲存列（放棄／儲存）＋離頁提醒、停線規則改成清單列、列印紙張改成卡片、密碼可顯示 | Chrome 實測：測試連線成功／拒絕／逾時三種、格式錯誤警示、放棄變更還原、存檔落到 config.toml、離頁攔截 |
 | 未做 | IR 光電檢查頁（M6）；手機遙控頁 | — |
 
-**發版方式**（2026-09-14 改為三 distro Tauri 發版，見下一節）：`src-tauri/Cargo.toml` 與 `src-tauri/tauri.conf.json` 版本號一致 → `git tag -a vX.Y.Z -m "版本說明"` → push tag → GHA `release.yml` 在 ubuntu:20.04／22.04／24.04 三個 container 各建 .deb 與 headless tar.gz、合併 `latest.json` 上傳到 **draft** Release → 到 Releases 頁公開；工控機最多一小時內看到新版（`[update] check_interval_min`）。tag 版本與兩個設定檔不一致會被 GHA 擋下。GitHub repo 預設 `weimi89/cix3752iSorter`，建 repo 後若名稱不同要改 `config.toml` 的 `update.endpoint` 與 `src-tauri/tauri.conf.json` 的 `plugins.updater.endpoints`。
+**發版方式**（2026-09-14 改為三 distro Tauri 發版，見下一節）：`src-tauri/Cargo.toml` 與 `src-tauri/tauri.conf.json` 版本號一致 → **`CHANGELOG.md` 加 `## vX.Y.Z` 段落**（2026-09-15 起對齊 LabelPrint，Release 說明與 `latest.json` 的 notes 都從這裡抽） → `git tag -a vX.Y.Z -m "vX.Y.Z"` → push tag → GHA `release.yml` 在 ubuntu:20.04／22.04／24.04 三個 container 各建 .deb 與 headless tar.gz、合併 `latest.json` 上傳到 **draft** Release → 到 Releases 頁公開；工控機最多一小時內看到新版（`[update] check_interval_min`）。tag 版本與兩個設定檔不一致會被 GHA 擋下。GitHub repo 預設 `weimi89/cix3752iSorter`，建 repo 後若名稱不同要改 `config.toml` 的 `update.endpoint` 與 `src-tauri/tauri.conf.json` 的 `plugins.updater.endpoints`。
 **踩過的坑**：設定密碼對話框必須是全站單例（掛在 DefaultLayout），composable 裡 `ensure()` 才等得到；各頁各掛一個會永遠等不到。
 **開發方式**：`yarn dev`（Vite :5180 代理到後端 :18090，`CIX_BACKEND` 可改）或 `yarn tauri dev` 直接開視窗；正式建置 `yarn build` 後 `cd src-tauri && cargo build` 內嵌。
 **踩過的坑**：Chrome 自動化的分頁若在背景（`visibilityState=hidden`），`requestAnimationFrame` 不跑，所有 Vuetify 過場（對話框、底部列）會停在 opacity 0，看起來像沒出現；驗過場效果前先確認分頁在前景，或改查 DOM。
