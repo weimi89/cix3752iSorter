@@ -9,7 +9,7 @@
 
 安裝（一台機器只選一種）：
   sudo bash install.sh desktop      桌面模式：從應用選單開「智配通 分揀控制」；新版由程式內建更新安裝（會要系統密碼）
-  sudo bash install.sh systemd      無畫面：systemd 以 --headless 拉起，瀏覽器開 http://<ip>:8080；新版由網頁後台換檔
+  sudo bash install.sh systemd      無畫面：systemd 以 --headless 拉起，瀏覽器開 http://<ip>:18090；新版由網頁後台換檔
   sudo bash install.sh supervisor   同上，改用 supervisor
 
 20.04 的包可離線安裝；22.04 / 24.04 的包要能連 apt 套件源解依賴（webkit2gtk-4.1 等）。

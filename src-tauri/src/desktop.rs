@@ -20,7 +20,7 @@ pub struct Desktop {
 /// 前端在桌面模式要打的 API 位址；bind 若是 0.0.0.0 就改成 127.0.0.1
 #[tauri::command]
 fn backend_base_url(state: tauri::State<'_, Arc<Desktop>>) -> String {
-    let port = state.bind.rsplit(':').next().unwrap_or("8080");
+    let port = state.bind.rsplit(':').next().unwrap_or("18090");
     format!("http://127.0.0.1:{port}")
 }
 

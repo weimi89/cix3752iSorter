@@ -15,7 +15,7 @@
 | 交叉編譯 glibc 2.31（`scripts/build-linux.sh`） | ✅ | 產物 x86_64 ELF，最高需求 `GLIBC_2.30`，只依賴 libc/libm/libdl/libpthread |
 | GHA `release.yml`（ubuntu:20.04 容器） | ⏳ 未跑過 | 尚未推到 GitHub；推上去打 tag 後要看一次 |
 | `deploy/`：systemd 單元、supervisor 設定、`install.sh` | ⏳ 未實機 | 需在工控機執行 `sudo bash install.sh systemd` 驗證 |
-| **在工控機 20.04 實跑** | ⏳ **待主人操作** | 把 `dist-bin/cix3752i-sorter_0.1.0_linux-x86_64.tar.gz` 丟到工控機解開、`./sorter --config config.toml --data-dir data`，瀏覽器開 `http://<ip>:8080/api/health`。注意舊系統也用 8080，同時跑要改 `config.toml` 的 `server.bind` |
+| **在工控機 20.04 實跑** | ⏳ **待主人操作** | 把 `dist-bin/cix3752i-sorter_0.1.0_linux-x86_64.tar.gz` 丟到工控機解開、`./sorter --config config.toml --data-dir data`，瀏覽器開 `http://<ip>:18090/api/health`（預設埠已避開舊系統的 8080） |
 
 ### 已知待辦
 
@@ -85,7 +85,7 @@
 
 **發版方式**（2026-09-14 改為三 distro Tauri 發版，見下一節）：`src-tauri/Cargo.toml` 與 `src-tauri/tauri.conf.json` 版本號一致 → `git tag -a vX.Y.Z -m "版本說明"` → push tag → GHA `release.yml` 在 ubuntu:20.04／22.04／24.04 三個 container 各建 .deb 與 headless tar.gz、合併 `latest.json` 上傳到 **draft** Release → 到 Releases 頁公開；工控機最多一小時內看到新版（`[update] check_interval_min`）。tag 版本與兩個設定檔不一致會被 GHA 擋下。GitHub repo 預設 `weimi89/cix3752iSorter`，建 repo 後若名稱不同要改 `config.toml` 的 `update.endpoint` 與 `src-tauri/tauri.conf.json` 的 `plugins.updater.endpoints`。
 **踩過的坑**：設定密碼對話框必須是全站單例（掛在 DefaultLayout），composable 裡 `ensure()` 才等得到；各頁各掛一個會永遠等不到。
-**開發方式**：`yarn dev`（Vite :5180 代理到後端 :8080，`CIX_BACKEND` 可改）或 `yarn tauri dev` 直接開視窗；正式建置 `yarn build` 後 `cd src-tauri && cargo build` 內嵌。
+**開發方式**：`yarn dev`（Vite :5180 代理到後端 :18090，`CIX_BACKEND` 可改）或 `yarn tauri dev` 直接開視窗；正式建置 `yarn build` 後 `cd src-tauri && cargo build` 內嵌。
 **踩過的坑**：Chrome 自動化的分頁若在背景（`visibilityState=hidden`），`requestAnimationFrame` 不跑，所有 Vuetify 過場（對話框、底部列）會停在 opacity 0，看起來像沒出現；驗過場效果前先確認分頁在前景，或改查 DOM。
 **踩過的坑**：`vue-i18n` 的 `useI18n` 不在 AutoImport 清單，頁面要自己 import；空字串查詢參數前端不送、後端也當不篩選（`non_empty`）。
 
@@ -126,7 +126,7 @@
 **副作用要知道**：#3 之後「有面單的件」要 API＋面單都在 `~O` 前到齊才走正確格口，否則走預設口（舊 Node 同樣是 1200ms 總預算）；`middleware.parcel_timeout_ms` 與 `label_timeout_ms` 各自獨立，真正的截止線仍是 `~O`。**目標格口沒接印表機（L5／R5／LS）的件不抓面單**，圖片服務故障不會把它們拖去異常口（這點比舊 Node 寬鬆，舊版一律 RS）。
 **兩層覆檢後順手修的**：`retention` 只清已結束（done／failed）的列印任務，還在等印表機的不動；狀態機佇列滿時格口結果丟棄會記 error；面單圖超過 8MB 拒收；網頁啟停皮帶會立刻更新運轉狀態（皮帶運轉中沒有心跳，單顆啟停鈕靠這個切換，`~k-1` 會糾正）；headless 也處理 SIGTERM（supervisor／systemd 停服務用的），結束前 `log::flush()` 把日誌尾段落檔。
 **已知但沒改**：`retention_days` 改了之後，`signals-*.log`／`sorter.*.log` 的保留天數要**重啟才生效**（DB 清理是每小時讀最新設定）；`alarm_on_start` 紅燈在燈所在那條線**每次連上**都亮（含斷線重連），與舊系統一致。
-**開發機注意**：舊 session 留下的測試行程（`scratchpad/run/bin/sorter` 占 8051／18090、`replay` 占 17100／17198／18081）還在跑，模擬時要換埠或先殺掉。
+**開發機注意**：舊 session 留下的測試行程（`scratchpad/run/supervise.sh` 會不斷拉起舊版 `sorter` 占 8051／18090）2026-09-15 已清掉；再看到 18090 被占，先找 `supervise.sh`。
 
 ### 穩定性（B）與體驗（C）加強 — 完成（模擬器＋瀏覽器實測）
 
@@ -163,6 +163,6 @@
 
 ### 下一步：M6 現場切換
 
-1. 主人在正式機實裝 GHA 產出的 `cix3752iSorter-0.1.0-ubuntu-20.04.tar.gz`（`sudo bash install.sh desktop` 或 `systemd`），先改 `server.bind` 避開舊系統的 8080
-2. ~~設定轉換腳本~~ 不需要：`config/mod.rs` 的預設值與 `migrations/0001_init.sql` 的格口初值就是現場 `conf.json`／`gkconfig.json`／舊 `chute` 表的值，首次啟動自動產生的設定即可用；只有 `server.bind` 要在設定頁避開舊系統的 8080
+1. 主人在正式機實裝 GHA 產出的 `cix3752iSorter-0.1.0-ubuntu-20.04.tar.gz`（`sudo bash install.sh desktop` 或 `systemd`），預設埠 18090 已避開舊系統的 8080
+2. ~~設定轉換腳本~~ 不需要：`config/mod.rs` 的預設值與 `migrations/0001_init.sql` 的格口初值就是現場 `conf.json`／`gkconfig.json`／舊 `chute` 表的值，首次啟動自動產生的設定即可用（網頁埠預設 18090，不會撞到舊系統的 8080）
 3. ~~IR 光電檢查頁~~（已完成）、supervisor 切換與回退步驟

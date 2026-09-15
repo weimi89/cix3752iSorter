@@ -6,7 +6,7 @@ import Components from 'unplugin-vue-components/vite'
 import { fileURLToPath, URL } from 'node:url'
 
 // 瀏覽器開發：Vite 代理 /api 與 /events 到後端；桌面模式（tauri dev）前端會直接打後端位址，不經代理
-const BACKEND = process.env.CIX_BACKEND || 'http://127.0.0.1:8080'
+const BACKEND = process.env.CIX_BACKEND || 'http://127.0.0.1:18090'
 const host = process.env.TAURI_DEV_HOST
 
 export default defineConfig({

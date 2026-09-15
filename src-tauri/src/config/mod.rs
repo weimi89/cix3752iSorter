@@ -226,7 +226,8 @@ impl Default for AppConfig {
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
-            bind: "0.0.0.0:8080".into(),
+            // 舊廠商程式的網頁後台占著 8080，並行期間不能撞埠
+            bind: "0.0.0.0:18090".into(),
         }
     }
 }

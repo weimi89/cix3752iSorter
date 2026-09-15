@@ -944,7 +944,7 @@ async fn log_file_download(State(state): State<ServerState>, Path(name): Path<St
 /// 本機區網 IPv4 與網頁埠：導覽列的「手機遙控」對話框拿來組網址與 QR
 async fn lan_ips(State(state): State<ServerState>) -> ApiResult<serde_json::Value> {
     let bind = state.app.config.current().server.bind;
-    let port = bind.rsplit(':').next().unwrap_or("8080").to_string();
+    let port = bind.rsplit(':').next().unwrap_or("18090").to_string();
     let mut ips = Vec::new();
     if let Ok(ifas) = local_ip_address::list_afinet_netifas() {
         for (name, ip) in ifas {
