@@ -175,7 +175,7 @@
 
 ### 拆掉服務版 — 完成
 
-主人決定：現場要在視窗上啟停皮帶，程式只會以桌面版跑，服務版（supervisor／systemd、`--headless` 部署、後端自更新、網頁「立即更新」與上傳）全部多餘。拆掉：`deploy/` 只剩 `install.sh`（無模式參數）、`sorter-switch.sh`；`updater/mod.rs` 只留 `platform_tag`；`/api/update/*` 四個端點、`UpdateConfig`、前端瀏覽器更新路徑與上傳、`flate2`／`tar`／`sha2` 相依全移除；`release.yml` 不再出 headless tar.gz，Release 剩 3 個檔。`--headless` 旗標保留給開發機接模擬器用。上面幾節提到服務版的地方是當時的狀態，以本節為準。
+主人決定：現場要在視窗上啟停皮帶，程式只會以桌面版跑，服務版（supervisor／systemd、`--headless` 部署、後端自更新、網頁「立即更新」與上傳）全部多餘。拆掉：`deploy/` 只剩 `install.sh`（無模式參數）、`switch.sh`（裝成 `sorter-switch` 指令）；`updater/mod.rs` 只留 `platform_tag`；`/api/update/*` 四個端點、`UpdateConfig`、前端瀏覽器更新路徑與上傳、`flate2`／`tar`／`sha2` 相依全移除；`release.yml` 不再出 headless tar.gz，Release 剩 3 個檔。`--headless` 旗標保留給開發機接模擬器用。上面幾節提到服務版的地方是當時的狀態，以本節為準。
 
 ### 下一步：M6 現場切換
 

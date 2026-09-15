@@ -51,7 +51,7 @@ fi
 
 # 3. 切換／回退工具
 echo "3/3 安裝 sorter-switch"
-install -m 755 "${HERE}/sorter-switch.sh" /usr/local/bin/sorter-switch
+install -m 755 "${HERE}/switch.sh" /usr/local/bin/sorter-switch
 
 echo "完成：$(sorter --version)。"
 echo "  ・請登出再登入一次（印表機權限才會生效）"

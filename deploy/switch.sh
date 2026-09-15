@@ -1,5 +1,5 @@
 #!/bin/bash
-# 新舊分揀程式一鍵切換（由 install.sh 裝成 /usr/local/bin/sorter-switch）。
+# 新舊分揀程式一鍵切換（deploy/switch.sh，由 install.sh 裝成 /usr/local/bin/sorter-switch）。
 #
 #   sorter-switch to-new    停舊程式（main_proj、twfilter）→ 確認裝置與埠位放掉 → 舊的改成不自啟 → 起新程式 → 等它連上裝置
 #   sorter-switch to-old    停新程式 → 拿掉自動啟動 → 舊程式設定改回來並啟動 → 等舊後台回來

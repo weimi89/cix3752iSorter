@@ -5,7 +5,7 @@
   - cix3752i-sorter_<版本>_<distro>_amd64.deb   主程式（桌面視窗 + 內建網頁後台）
   - stack/usr/local/                            只有 Ubuntu 20.04 的包有：自編的 glib 2.78 + libsoup3 + webkit2gtk-4.1
                                                 （20.04 套件源沒有 webkit2gtk-4.1，桌面視窗要靠它）
-  - install.sh、sorter-switch.sh
+  - install.sh、switch.sh
 
 安裝：
   sudo bash install.sh                只裝不啟動；裝完登出再登入一次（印表機權限）
