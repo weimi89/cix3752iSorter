@@ -131,5 +131,5 @@
 ### 下一步：M6 現場切換
 
 1. 主人在正式機實裝 GHA 產出的 `cix3752iSorter-0.1.0-ubuntu-20.04.tar.gz`（`sudo bash install.sh desktop` 或 `systemd`），先改 `server.bind` 避開舊系統的 8080
-2. 設定轉換腳本（`conf.json` + `gkconfig.json` + 舊 `chute` 表 → `config.toml` + `chutes`）
+2. ~~設定轉換腳本~~ 不需要：`config/mod.rs` 的預設值與 `migrations/0001_init.sql` 的格口初值就是現場 `conf.json`／`gkconfig.json`／舊 `chute` 表的值，首次啟動自動產生的設定即可用；只有 `server.bind` 要在設定頁避開舊系統的 8080
 3. IR 光電檢查頁、supervisor 切換與回退步驟
