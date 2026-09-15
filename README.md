@@ -41,7 +41,7 @@ yarn tauri build                              # 本機打 macOS 版；Linux 版�
 | 模式 | 裝法 | 之後怎麼升級 |
 |---|---|---|
 | `desktop` | 裝 .deb，從應用選單開視窗（20.04 先把 `stack/` 放進 /usr/local） | 程式內「發現新版本」→ Tauri updater 下載 .deb 安裝（需系統密碼，pkexec） |
-| `systemd`／`supervisor` | 執行檔放 `/home/chipsort/cix3752iSorter/`，以 `--headless` 拉起 | 網頁後台「立即更新」→ 後端下載 headless tar.gz、校驗 SHA-256、換檔、交給 systemd／supervisor 重啟；沒外網可上傳 tar.gz |
+| `systemd`／`supervisor` | 執行檔放安裝帳號家目錄下的 `cix3752iSorter/`，以 `--headless` 拉起 | 網頁後台「立即更新」→ 後端下載 headless tar.gz、校驗 SHA-256、換檔、交給 systemd／supervisor 重啟；沒外網可上傳 tar.gz |
 
 設定檔 `config.toml` 首次啟動自動建立（桌面模式在使用者的應用資料夾，headless 在 `--config` 指定處），資料在 `data/`。
 自動更新兩條路讀同一份 `latest.json`，`platforms` 的鍵帶 distro（`linux-x86_64-ubuntu-20.04`、`…-headless`），程式照 `/etc/os-release` 挑自己那筆。

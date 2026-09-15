@@ -1,4 +1,4 @@
-# systemd 單元（Ubuntu 20.04 / 22.04 / 24.04 通用；由 install.sh systemd 安裝）
+# systemd 單元（Ubuntu 20.04 / 22.04 / 24.04 通用；由 install.sh systemd 安裝，__APP_USER__／__APP_DIR__ 安裝時代入）
 # 一定要帶 --headless：沒有它程式會去開 Tauri 視窗，服務環境沒有顯示器就會反覆崩潰重啟
 [Unit]
 Description=cix3752i 分揀控制
@@ -7,9 +7,9 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=chipsort
-WorkingDirectory=/home/chipsort/cix3752iSorter
-ExecStart=/home/chipsort/cix3752iSorter/sorter --headless --config /home/chipsort/cix3752iSorter/config.toml --data-dir /home/chipsort/cix3752iSorter/data
+User=__APP_USER__
+WorkingDirectory=__APP_DIR__
+ExecStart=__APP_DIR__/sorter --headless --config __APP_DIR__/config.toml --data-dir __APP_DIR__/data
 Restart=always
 RestartSec=2
 # 寫 USB 印表機需要 lp 群組（/dev/usb/lp* 預設 root:lp 660）

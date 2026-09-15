@@ -20,7 +20,7 @@
 ### 已知待辦
 
 - 前端 `frontend/` 尚未建立（M5），目前內嵌的是 `build.rs` 的佔位頁。
-- `deploy/*.conf` 的路徑假設安裝在 `/home/chipsort/cix3752iSorter`，現場不同要改。
+- `deploy/` 的服務範本以 `__APP_USER__`／`__APP_DIR__` 佔位，`install.sh` 依執行 `sudo` 的帳號代入。
 - 廠商正式機原始碼尚未到手：`docs/protocol-spec.md` 第 10 節待確認清單。
 
 ### M1 裝置層 + 模擬器 — 完成

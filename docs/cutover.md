@@ -1,7 +1,7 @@
 # 現場切換與回退步驟
 
 > 目標：上線當天照著貼指令就能把舊程式換成新程式；出狀況時 **2 分鐘內**讓舊程式恢復出貨。
-> 正式機：Ubuntu 20.04，使用者 `chipsort`，舊程式由 supervisor 管理（設定抓回來放在 `main_proj/supervisor/`）。
+> 正式機：Ubuntu 20.04，舊程式由 supervisor 管理（設定抓回來放在 `main_proj/supervisor/`）。下面的 `~` 都是安裝帳號的家目錄。
 
 ## 0. 現況（切換前的樣子）
 
@@ -9,7 +9,7 @@
 |---|---|---|
 | supervisor 程式名 | `main_proj`（Go `ecs1000`，`autorestart=false`）、`twfilter`（Node `server.js`） | `cix3752i-sorter`（headless 模式才有） |
 | 設定檔 | `/etc/supervisor/conf.d/main_proj.ini`、`twfilter.ini`（**只認 `.ini`**，`supervisord.conf` 的 include 是 `conf.d/*.ini`） | `/etc/supervisor/conf.d/cix3752i-sorter.ini` |
-| 執行身分 | root | `chipsort`（有加 `lp` 群組才能寫印表機） |
+| 執行身分 | root | 安裝時執行 `sudo` 的那個帳號（會自動加進 `lp` 群組才能寫印表機） |
 | 網頁後台 | `:8080` | `:18090` |
 | 收相機 | Node `:8051`（Go `:8050` 收 Node 轉來的碼） | 直接 `:8051` |
 | 連皮帶／分揀機 | `192.168.177.100:10006`、`192.168.177.198:10006` | 同 |
@@ -23,7 +23,7 @@
 
 ```bash
 # 1-1 把安裝包放到工控機並解開（版本號換成實際的）
-cd /home/chipsort && tar -xzf cix3752iSorter-0.1.0-ubuntu-20.04.tar.gz && cd cix3752iSorter-0.1.0-ubuntu-20.04
+cd ~ && tar -xzf cix3752iSorter-0.1.0-ubuntu-20.04.tar.gz && cd cix3752iSorter-0.1.0-ubuntu-20.04
 
 # 1-2 安裝但先不要起服務：headless 模式用 supervisor（與舊程式同一套管理方式，回退最快）
 sudo bash install.sh supervisor
@@ -33,7 +33,7 @@ sudo supervisorctl stop cix3752i-sorter        # 裝完會自動起來，先停�
 sudo supervisorctl status
 
 # 1-4 預設設定就是現場值，只確認一眼
-cat /home/chipsort/cix3752iSorter/config.toml | grep -E "bind|addr|base_url|listen"
+grep -E "bind|addr|base_url|listen" ~/cix3752iSorter/config.toml
 ```
 
 預期：`bind = "0.0.0.0:18090"`、皮帶 `192.168.177.100:10006`、分揀機 `192.168.177.198:10006`、相機 `0.0.0.0:8051`、中介機 `http://192.168.0.37:18080/`。
@@ -116,6 +116,6 @@ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8080/   # 200
 ```bash
 sudo supervisorctl status                                   # 三支程式誰在跑
 sudo tail -f /var/log/supervisor/cix3752i-sorter.log        # 新程式 stdout
-tail -f /home/chipsort/cix3752iSorter/data/logs/signals-$(date +%F).log   # 裝置原始訊號
+tail -f ~/cix3752iSorter/data/logs/signals-$(date +%F).log   # 裝置原始訊號
 sudo tail -f /etc/supervisor/main_proj.log                  # 舊程式（回退後）
 ```

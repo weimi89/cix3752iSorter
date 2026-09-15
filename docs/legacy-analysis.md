@@ -1,6 +1,6 @@
 # 舊系統（main_proj）分析與重寫依據
 
-> 2026-09-14 分析。舊系統位於 `/Users/RD-CAT/Documents/喵_程式/main_proj`，正式機路徑 `/home/chipsort/main_proj`（Ubuntu 20.04 x86_64）。
+> 2026-09-14 分析。舊系統原始碼在本機 `main_proj/`（與本專案同層），正式機裝在安裝帳號家目錄的 `main_proj/`（Ubuntu 20.04 x86_64）。
 
 ## 1. 舊系統組成
 

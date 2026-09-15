@@ -4,7 +4,7 @@
 
 廠商交付的分揀機控制系統 `main_proj`（Go `ecs1000` + Node `twfilter/server.js`）有結構性問題：斷線時空指標當機、重連後控制器重複、鎖未釋放死鎖、在途件不持久化、取消／異常件詳情被啟動清理誤刪（已驗證 472 筆）、格口查詢同步阻塞皮帶控制器。且資料夾內 Go 原始碼不是正式機二進位的來源。使用者決定以 **Rust 單一執行檔**重寫，合併 Go 與 Node 兩支，網頁後台打掉重做，樣板對齊自家中介機 `cix3752iLabelPrint`（Tauri v2 + axum + Vue 3/Vuetify）。
 
-- 新專案：`/Users/RD-CAT/Documents/喵_程式/cix3752iSorter`（已 `git init`，含 `README.md`、`docs/legacy-analysis.md`、`docs/protocol-spec.md`）
+- 新專案：`cix3752iSorter/`（已 `git init`，含 `README.md`、`docs/legacy-analysis.md`、`docs/protocol-spec.md`）
 - 目標主機：工控機 **Ubuntu 20.04 → 日後升 22.04 / 24.04**，x86_64
 - 中介機：`cix3752iLabelPrint`（`192.168.0.37:18080`），契約 `cix3752iLabelPrint/docs/local-http-api.md`、`device-alert-api.md`
 - 規格依據：`docs/protocol-spec.md`（由 71 萬行 `cmd.log` 逆推）；廠商正式機原始碼到手後補「待確認清單」

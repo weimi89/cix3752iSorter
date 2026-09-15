@@ -2,7 +2,7 @@
 # 工控機安裝／升級（解開發版的 cix3752iSorter-<ver>-<distro>.tar.gz 後於該目錄執行）。
 #
 #   sudo bash install.sh desktop      # 桌面模式：裝 .deb，從應用選單開視窗；之後由程式內建的更新升級（會跳系統密碼）
-#   sudo bash install.sh systemd      # 無畫面：執行檔放 /home/chipsort/cix3752iSorter，由 systemd 以 --headless 拉起
+#   sudo bash install.sh systemd      # 無畫面：執行檔放 <安裝帳號家目錄>/cix3752iSorter，由 systemd 以 --headless 拉起
 #   sudo bash install.sh supervisor   # 同上，改用現場既有的 supervisor 管理
 #
 # 一台機器只選一種：桌面與 headless 都綁同一個埠，兩種都裝會互搶。
@@ -14,9 +14,15 @@
 set -euo pipefail
 
 MODE="${1:-desktop}"
-APP_DIR="/home/chipsort/cix3752iSorter"
-APP_USER="chipsort"
+# 服務以哪個帳號跑、裝在哪：預設是執行 sudo 的那個人與他的家目錄；要換就 APP_USER=xxx sudo -E bash install.sh …
+APP_USER="${APP_USER:-${SUDO_USER:-$(id -un)}}"
+APP_HOME="$(getent passwd "${APP_USER}" | cut -d: -f6)"
+[ -n "${APP_HOME}" ] || { echo "找不到帳號 ${APP_USER} 的家目錄"; exit 1; }
+APP_DIR="${APP_DIR:-${APP_HOME}/cix3752iSorter}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
+
+# 範本裡的 __APP_USER__／__APP_DIR__ 在安裝時才代入，repo 裡不留現場帳號
+render() { sed -e "s|__APP_USER__|${APP_USER}|g" -e "s|__APP_DIR__|${APP_DIR}|g" "$1"; }
 
 DEB="$(find "${HERE}" -maxdepth 1 -name 'cix3752i-sorter_*.deb' -print -quit)"
 [ -n "${DEB}" ] || { echo "找不到 cix3752i-sorter_*.deb，請在解開的安裝包目錄執行"; exit 1; }
@@ -82,7 +88,8 @@ case "${MODE}" in
     ;;
   systemd)
     echo "3/3 登記 systemd 服務"
-    install -m 644 "${HERE}/sorter.service" /etc/systemd/system/cix3752i-sorter.service
+    render "${HERE}/sorter.service" > /etc/systemd/system/cix3752i-sorter.service
+    chmod 644 /etc/systemd/system/cix3752i-sorter.service
     systemctl daemon-reload
     systemctl enable cix3752i-sorter
     systemctl restart cix3752i-sorter
@@ -92,7 +99,8 @@ case "${MODE}" in
   supervisor)
     echo "3/3 登記 supervisor 程式"
     # 現場的 supervisord.conf 只 include conf.d/*.ini（廠商裝的），檔名用 .conf 會被無視、程式永遠登記不進去
-    install -m 644 "${HERE}/supervisor-sorter.ini" /etc/supervisor/conf.d/cix3752i-sorter.ini
+    render "${HERE}/supervisor-sorter.ini" > /etc/supervisor/conf.d/cix3752i-sorter.ini
+    chmod 644 /etc/supervisor/conf.d/cix3752i-sorter.ini
     supervisorctl reread
     supervisorctl update
     supervisorctl restart cix3752i-sorter
