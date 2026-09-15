@@ -1,0 +1,220 @@
+name: Build focal upstream stack
+description: >-
+  Ubuntu 20.04(focal)沒有 webkit2gtk-4.1,得自編 glib 2.78 + libsoup3 3.4 + webkit2gtk 2.42
+  整套放進 /opt/cix-stack。編一次要 1 小時 13 分,所以結果進 Actions 快取。
+  release 與快取預熱兩支 workflow 共用這個 action —— 這段有 200 行、含多個踩過坑的細節
+  (CMake 釘 3.31.x、手寫 PPA sources、快取只在 webkit 真的編成功才存),複製成兩份必然走樣。
+
+  ⚠️ 只能在 ubuntu:20.04 container 裡呼叫,且呼叫端要自己判斷 distro ——
+  action 內取不到 matrix context,原本的 `if: matrix.distro == 'ubuntu-20.04'` 已移到呼叫端。
+
+inputs:
+  force_rebuild:
+    description: >-
+      忽略現有快取直接重編。平時不要開 —— 這會多花 1 小時 13 分。
+      用途是定期驗證「建置流程本身還能跑」:平常快取一直命中,建置那條路根本不會執行,
+      等到快取真的失效那天才發現上游 tarball 搬家 / 相依改版,就是在發版當下爆掉。
+    required: false
+    default: 'false'
+
+runs:
+  using: composite
+  steps:
+    - name: Bootstrap apt (20.04 — source build webkit toolchain)
+      shell: sh
+      run: |
+        set -e
+        apt-get update
+        apt-get install -y --no-install-recommends \
+          curl wget gnupg ca-certificates lsb-release tzdata \
+          software-properties-common
+        # GCC 11 (webkit2gtk 2.42 OK) — 手動加 ubuntu-toolchain-r/test PPA。
+        # 不用 add-apt-repository:focal 版會把 Launchpad API 回應錯拆成
+        # 'ppa:~ubuntu-toolchain-r/ubuntu/test' 而找不到 PPA(持續性失敗,非偶發)。
+        # 金鑰改用 curl 走 HTTPS 從 keyserver web 介面取,繞過會 flake 的 dirmngr/--recv-keys。
+        mkdir -p /usr/share/keyrings
+        curl -fsSL "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x60C317803A41BA51845E371A1E9377A2BA9EF27F" \
+          | gpg --dearmor -o /usr/share/keyrings/ubuntu-toolchain-r.gpg
+        echo "deb [signed-by=/usr/share/keyrings/ubuntu-toolchain-r.gpg] https://ppa.launchpadcontent.net/ubuntu-toolchain-r/test/ubuntu focal main" \
+          > /etc/apt/sources.list.d/ubuntu-toolchain-r.list
+        # CMake 3.20+ from Kitware(focal 內建僅 3.16,webkit2gtk 2.42 需 3.20+)
+        wget -O - https://apt.kitware.com/keys/kitware-archive-latest.asc 2>/dev/null \
+          | gpg --dearmor -o /usr/share/keyrings/kitware.gpg
+        echo "deb [signed-by=/usr/share/keyrings/kitware.gpg] https://apt.kitware.com/ubuntu/ focal main" \
+          > /etc/apt/sources.list.d/kitware.list
+        # ⚠️ 必須釘在 3.31.x:WebKitGTK 2.42.5 不相容 CMake 4.x —— 4.x 下 WebKitMacros.cmake
+        # 的 _WEBKIT_TARGET_LINK_FRAMEWORK 會 "Unknown arguments specified" 而 configure 失敗
+        # (JavaScriptCore/CMakeLists.txt:431)。Kitware 倉庫滾動更新,不釘版本就會隨時間漂到 4.x;
+        # 本問題長期被 stack 快取掩蓋,直到 v0.16.0 快取過期重編才暴露。
+        # 若日後要升 CMake,必須同步升 webkit2gtk 版本並確認相容。
+        printf 'Package: cmake cmake-data\nPin: version 3.31.*\nPin-Priority: 1001\n' \
+          > /etc/apt/preferences.d/cmake-pin
+        apt-get update
+        apt-get install -y --no-install-recommends \
+          git build-essential gcc-11 g++-11 cmake ninja-build \
+          clang libclang-dev \
+          pkg-config python3 python3-pip python3-setuptools \
+          xz-utils unzip patchelf file ruby gperf bison flex unifdef \
+          libssl-dev libgtk-3-dev libxdo-dev librsvg2-dev \
+          libayatana-appindicator3-dev \
+          libffi-dev libpcre2-dev libmount-dev gettext zlib1g-dev \
+          libnghttp2-dev libpsl-dev libsqlite3-dev libxml2-dev libxslt1-dev \
+          libgcrypt20-dev libsystemd-dev libsecret-1-dev libtasn1-6-dev \
+          liblcms2-dev libjpeg-dev libwebp-dev libopenjp2-7-dev \
+          libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev \
+          libenchant-2-dev libhyphen-dev libwoff-dev \
+          libwayland-dev wayland-protocols libegl1-mesa-dev libgl1-mesa-dev libgbm-dev libdrm-dev libxt-dev libcups2-dev \
+          libgudev-1.0-dev libnotify-dev libsoup2.4-dev
+        update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-11 100 \
+          --slave /usr/bin/g++ g++ /usr/bin/g++-11
+        pip3 install --upgrade pip
+        pip3 install meson==1.3.2
+        echo "===== toolchain versions ====="
+        gcc --version | head -1
+        cmake --version | head -1
+        meson --version
+        # fail fast:pin 若失效(Kitware 移除 3.31.x 等),在此當場擋下。
+        # 否則要等 webkit configure 才爆,白跑前面 glib/libsoup 的十幾分鐘。
+        cmake --version | head -1 | grep -qE 'version 3\.' || {
+          echo "::error::CMake 必須是 3.x(webkit2gtk 2.42.5 不相容 4.x),實際為 $(cmake --version | head -1)"
+          exit 1
+        }
+
+    - name: Restore built upstream stack cache (20.04 only)
+      if: inputs.force_rebuild != 'true'
+      id: cache-stack
+      uses: actions/cache/restore@v5
+      with:
+        path: /opt/cix-stack
+        key: focal-upstream-stack-glib2.78-libsoup3.4-webkit2.42-v1
+
+    - name: Build glib 2.78 from upstream tarball (20.04 only)
+      if: steps.cache-stack.outputs.cache-hit != 'true'
+      shell: sh
+      run: |
+        set -e
+        mkdir -p /tmp/build /opt/cix-stack
+        cd /tmp/build
+        GLIB_VER=2.78.6
+        echo "::group::glib download"
+        wget -q "https://download.gnome.org/sources/glib/2.78/glib-${GLIB_VER}.tar.xz"
+        tar xf "glib-${GLIB_VER}.tar.xz"
+        echo "::endgroup::"
+        cd "glib-${GLIB_VER}"
+        echo "::group::glib meson setup"
+        meson setup _build \
+          --prefix=/usr/local \
+          --buildtype=release \
+          -Dtests=false \
+          -Dlibmount=enabled 2>&1 | tail -50
+        echo "::endgroup::"
+        echo "::group::glib ninja (~5-10 min)"
+        ninja -C _build 2>&1 | tail -50
+        echo "::endgroup::"
+        ninja -C _build install
+        ldconfig
+        DESTDIR=/opt/cix-stack/glib ninja -C _build install >/dev/null
+        pkg-config --modversion glib-2.0
+
+    - name: Build libsoup3 3.4 from upstream tarball (20.04 only)
+      if: steps.cache-stack.outputs.cache-hit != 'true'
+      shell: sh
+      run: |
+        set -e
+        cd /tmp/build
+        SOUP_VER=3.4.4
+        echo "::group::libsoup3 download"
+        wget -q "https://download.gnome.org/sources/libsoup/3.4/libsoup-${SOUP_VER}.tar.xz"
+        tar xf "libsoup-${SOUP_VER}.tar.xz"
+        echo "::endgroup::"
+        cd "libsoup-${SOUP_VER}"
+        echo "::group::libsoup3 meson setup"
+        meson setup _build \
+          --prefix=/usr/local \
+          --buildtype=release \
+          -Dtests=false -Dvapi=disabled -Ddocs=disabled \
+          -Dgssapi=disabled -Dsysprof=disabled -Dintrospection=disabled \
+          -Dpkcs11_tests=disabled -Dautobahn=disabled \
+          -Dntlm=disabled -Dbrotli=disabled \
+          -Dtls_check=false 2>&1 | tail -40
+        echo "::endgroup::"
+        echo "::group::libsoup3 ninja (~3-5 min)"
+        ninja -C _build 2>&1 | tail -40
+        echo "::endgroup::"
+        ninja -C _build install
+        ldconfig
+        DESTDIR=/opt/cix-stack/libsoup3 ninja -C _build install >/dev/null
+        pkg-config --modversion libsoup-3.0
+
+    - name: Build webkit2gtk-4.1 from upstream tarball (20.04 only, 1-2 hr)
+      id: build-webkit
+      if: steps.cache-stack.outputs.cache-hit != 'true'
+      shell: sh
+      run: |
+        set -e
+        cd /tmp/build
+        WK_VER=2.42.5
+        echo "::group::webkit2gtk download"
+        wget -q "https://webkitgtk.org/releases/webkitgtk-${WK_VER}.tar.xz"
+        tar xf "webkitgtk-${WK_VER}.tar.xz"
+        echo "::endgroup::"
+        cd "webkitgtk-${WK_VER}"
+        mkdir -p _build
+        cd _build
+        echo "::group::webkit2gtk cmake (GTK3 + libsoup3 port,disable many features)"
+        cmake -GNinja \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_INSTALL_PREFIX=/usr/local \
+          -DPORT=GTK \
+          -DUSE_SOUP2=OFF \
+          -DUSE_GTK4=OFF \
+          -DENABLE_DOCUMENTATION=OFF \
+          -DENABLE_INTROSPECTION=OFF \
+          -DENABLE_MINIBROWSER=OFF \
+          -DUSE_SYSTEMD=OFF \
+          -DENABLE_BUBBLEWRAP_SANDBOX=OFF \
+          -DENABLE_JOURNALD_LOG=OFF \
+          -DENABLE_GAMEPAD=OFF \
+          -DUSE_LIBBACKTRACE=OFF \
+          -DENABLE_WAYLAND_TARGET=OFF \
+          -DENABLE_X11_TARGET=ON \
+          -DUSE_JPEGXL=OFF \
+          -DUSE_AVIF=OFF \
+          -DENABLE_WEB_AUDIO=OFF \
+          -DENABLE_VIDEO=OFF \
+          -DENABLE_MEDIA_STREAM=OFF \
+          .. 2>&1 | tail -60
+        echo "::endgroup::"
+        echo "::group::webkit2gtk ninja (1-2 hr)"
+        ninja 2>&1 | tail -80
+        echo "::endgroup::"
+        ninja install
+        ldconfig
+        DESTDIR=/opt/cix-stack/webkit ninja install >/dev/null
+        pkg-config --modversion webkit2gtk-4.1
+
+    - name: Cache hit — restore /opt/cix-stack into /usr/local (20.04 only)
+      if: steps.cache-stack.outputs.cache-hit == 'true'
+      shell: sh
+      run: |
+        for d in glib libsoup3 webkit; do
+          if [ -d /opt/cix-stack/$d ]; then
+            cp -a /opt/cix-stack/$d/usr/local/. /usr/local/ 2>/dev/null || true
+          fi
+        done
+        ldconfig
+        pkg-config --modversion glib-2.0
+        pkg-config --modversion libsoup-3.0
+        pkg-config --modversion webkit2gtk-4.1
+
+    # always() 是為了「即使 Tauri build / packaging 後續 fail,webkit 編好的成果也保住」,
+    # 但**必須同時要求 webkit 這步真的成功**(build-webkit.outcome == 'success')——
+    # 否則 job 在編 webkit 途中被取消 / 失敗時,會把只有 glib+libsoup 的半成品存進快取。
+    # 之後每次 cache hit 都會跳過 webkit 編譯卻又找不到它(pkg-config 失敗),
+    # 20.04 就此永久卡住,直到有人手動 `gh cache delete`。v0.16.0 發版時實際踩過。
+    - name: Save built upstream stack cache (20.04 only)
+      if: always() && steps.cache-stack.outputs.cache-hit != 'true' && steps.build-webkit.outcome == 'success'
+      uses: actions/cache/save@v5
+      with:
+        path: /opt/cix-stack
+        key: focal-upstream-stack-glib2.78-libsoup3.4-webkit2.42-v1

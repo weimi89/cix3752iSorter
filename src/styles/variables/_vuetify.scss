@@ -1,0 +1,27 @@
+// ❗ 路徑必須是相對的
+// @forward "../@core/template/libs/vuetify/variables";
+
+// ℹ️ 刪除上述導入，取消下方的註解以覆寫核心變數。
+@forward "../@core/template/libs/vuetify/variables" with (
+  $grid-breakpoints: (
+    "xs": 0,
+    "sm": 576px,
+    "md": 768px,
+    "lg": 992px,
+    "xl": 1200px,
+    "xxl": 1400px,
+  ) !default,
+
+  $table-header-font-weight: 700,
+  $table-font-size: .9375rem,
+  $table-row-font-size: .9375rem,
+  $table-column-padding: .5rem 1rem,
+  $table-header-height: 50px,
+
+  // $field-font-size: 1rem,
+  $field-input-row-gap: 12px,
+
+  $field-control-padding-start: 10px,
+  $field-control-padding-end: 10px,
+  $field-control-affixed-padding: 10px,
+)

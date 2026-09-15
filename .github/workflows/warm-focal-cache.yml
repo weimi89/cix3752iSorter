@@ -1,0 +1,65 @@
+name: Warm focal stack cache
+
+# 20.04(focal)沒有 webkit2gtk-4.1,發版時得自編 glib+libsoup+webkit 整套,一次 1 小時 13 分。
+# 成果放 Actions 快取,但快取有兩個失效條件:**7 天沒被存取就過期**、
+# 總量逼近 10GB 上限時會被 LRU 擠掉(光 Rust 快取每份就 800MB)。
+# 發版間隔一旦超過 7 天,下次發版 20.04 就要重編一小時多。
+# 這支排程定期在 main 上碰一次快取:命中就只是刷新存取時間(一分鐘內結束),
+# 沒命中就重編並存回,讓發版永遠拿得到現成的。
+#
+# ⚠️ **必須跑在 main(預設分支)**。Actions 快取按 ref 隔離 —— 一個 run 只讀得到
+# 「自己這個 ref」與預設分支的快取。發版是 push tag 觸發,讀不到別的 tag 存的快取,
+# 只讀得到 main 的;預熱若存到別的 ref 等於完全白做。
+# (schedule 觸發本來就跑在預設分支;手動觸發時請確認選的是 main。)
+# 這正是 v0.19.0 之前「快取明明存在卻從沒命中、每次發版都白編一小時」的根因。
+
+on:
+  schedule:
+    # 每週日、週三 18:00 UTC(台北週一、週四 02:00)——
+    # 間隔 3-4 天,穩穩踩在 7 天過期線內側,不會因為單次 run 被取消就過期。
+    - cron: '0 18 * * 0,3'
+  workflow_dispatch:
+    inputs:
+      force_rebuild:
+        description: '強制重編(忽略現有快取,驗證建置流程還能跑;要多花 1h13m)'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+# 前一次還在編就別再疊一次上去(webkit 要編一小時多)
+concurrency:
+  group: warm-focal-cache
+  cancel-in-progress: false
+
+jobs:
+  warm:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+    container:
+      image: ubuntu:20.04
+      options: --user root
+    # 這組 env 是 focal stack 建置的前提(讓 pkg-config / linker 找得到自編到 /usr/local 的
+    # glib / libsoup),與 release.yml 的 release-linux job 同一組。改一邊要改另一邊。
+    env:
+      DEBIAN_FRONTEND: noninteractive
+      TZ: Etc/UTC
+      PKG_CONFIG_PATH: /usr/local/lib/x86_64-linux-gnu/pkgconfig:/usr/local/lib/pkgconfig:/usr/local/share/pkgconfig
+      LD_LIBRARY_PATH: /usr/local/lib/x86_64-linux-gnu:/usr/local/lib
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Build / restore focal upstream stack
+        uses: ./.github/actions/build-focal-stack
+        with:
+          force_rebuild: ${{ inputs.force_rebuild }}
+
+      - name: 回報這次是命中還是重編
+        shell: sh
+        run: |
+          set -e
+          echo "===== /usr/local 下的 stack 版本 ====="
+          pkg-config --modversion glib-2.0
+          pkg-config --modversion libsoup-3.0
+          pkg-config --modversion webkit2gtk-4.1

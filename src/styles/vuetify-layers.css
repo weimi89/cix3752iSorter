@@ -1,0 +1,8 @@
+/* Vuetify 4 的 cascade layer 順序宣告放在 index.html <head>(見該處註解),這裡只放要補回的 reset。
+   本專案自己的 SCSS 不分層(unlayered),依規則永遠壓過 layered 的 Vuetify 樣式,與 v3 時的行為一致。 */
+/* v4 移除了全域 reset(* { padding: 0; margin: 0 }),Materio 樣板的清單、標題、段落間距都靠它歸零,
+   依官方升級指南的「選擇性還原」片段補回;放在 vuetify-core.reset 層,不蓋任何元件樣式。 */
+@layer vuetify-core.reset {
+  ul, ol, figure, details, summary { padding: 0; margin: 0; }
+  h1, h2, h3, h4, h5, h6, p { margin: 0; }
+}

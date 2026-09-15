@@ -1,0 +1,79 @@
+[package]
+name = "cix3752i-sorter"
+version = "0.1.0"
+edition = "2024"
+description = "智配通 分揀控制：分揀機工控機上的單一執行檔（皮帶／分揀機／相機／面單列印／網頁後台）"
+default-run = "sorter"
+
+[lib]
+name = "cix3752i_sorter"
+path = "src/lib.rs"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "sorter"
+path = "src/main.rs"
+
+# 模擬器也會被 Tauri 一起打進安裝包（/usr/bin），名字加前綴避免在系統路徑上撞到別的 `replay`
+[[bin]]
+name = "sorter-replay"
+path = "src/bin/replay.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# Tauri（桌面視窗；`--headless` 時不建視窗、只跑服務）
+tauri = { version = "2", features = [] }
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
+tauri-plugin-autostart = "2"
+# 防止重複啟動：第二個實例只聚焦既有視窗後退出，不會搶埠位讓整個 App 崩潰
+tauri-plugin-single-instance = "2"
+
+# Async / web server
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+axum = { version = "0.8", features = ["macros"] }
+tower-http = { version = "0.7", features = ["cors", "trace", "compression-gzip"] }
+futures = "0.3"
+
+# HTTP client（對中介機）
+reqwest = { version = "0.13", features = ["json", "rustls", "query", "stream"], default-features = false }
+
+# Serialization / config
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "1"
+
+# Database
+sqlx = { version = "0.9", features = ["runtime-tokio", "tls-rustls", "sqlite", "chrono", "macros", "migrate"] }
+
+# 內嵌前端
+rust-embed = "8"
+mime_guess = "2"
+once_cell = "1"
+
+# Utils
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive", "env"] }
+anyhow = "1"
+thiserror = "2"
+ulid = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# 面單影像 → 點陣
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+socket2 = { version = "0.6.5", features = ["all"] }
+rust_xlsxwriter = "0.99.0"
+flate2 = "1.1.10"
+tar = "0.4.46"
+sha2 = "0.11.0"
+semver = "1.0.28"
+hex = "0.4.3"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

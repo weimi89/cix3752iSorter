@@ -1,0 +1,231 @@
+// =============================================================================
+// Font Face Definitions
+// =============================================================================
+
+// -----------------------------------------------------------------------------
+// Red Hat Mono (Latin)
+// -----------------------------------------------------------------------------
+
+/* red-hat-mono-300 - latin */
+@font-face {
+  font-display: swap;
+  font-family: 'Red Hat Mono';
+  font-style: normal;
+  font-weight: 300;
+  src: url('/static/assets/fonts/red-hat-mono-v15-latin-300.woff2') format('woff2');
+}
+
+/* red-hat-mono-300italic - latin */
+@font-face {
+  font-display: swap;
+  font-family: 'Red Hat Mono';
+  font-style: italic;
+  font-weight: 300;
+  src: url('/static/assets/fonts/red-hat-mono-v15-latin-300italic.woff2') format('woff2');
+}
+
+/* red-hat-mono-regular - latin */
+@font-face {
+  font-display: swap;
+  font-family: 'Red Hat Mono';
+  font-style: normal;
+  font-weight: 400;
+  src: url('/static/assets/fonts/red-hat-mono-v15-latin-regular.woff2') format('woff2');
+}
+
+/* red-hat-mono-italic - latin */
+@font-face {
+  font-display: swap;
+  font-family: 'Red Hat Mono';
+  font-style: italic;
+  font-weight: 400;
+  src: url('/static/assets/fonts/red-hat-mono-v15-latin-italic.woff2') format('woff2');
+}
+
+/* red-hat-mono-500 - latin */
+@font-face {
+  font-display: swap;
+  font-family: 'Red Hat Mono';
+  font-style: normal;
+  font-weight: 500;
+  src: url('/static/assets/fonts/red-hat-mono-v15-latin-500.woff2') format('woff2');
+}
+
+/* red-hat-mono-500italic - latin */
+@font-face {
+  font-display: swap;
+  font-family: 'Red Hat Mono';
+  font-style: italic;
+  font-weight: 500;
+  src: url('/static/assets/fonts/red-hat-mono-v15-latin-500italic.woff2') format('woff2');
+}
+
+/* red-hat-mono-600 - latin */
+@font-face {
+  font-display: swap;
+  font-family: 'Red Hat Mono';
+  font-style: normal;
+  font-weight: 600;
+  src: url('/static/assets/fonts/red-hat-mono-v15-latin-600.woff2') format('woff2');
+}
+
+/* red-hat-mono-600italic - latin */
+@font-face {
+  font-display: swap;
+  font-family: 'Red Hat Mono';
+  font-style: italic;
+  font-weight: 600;
+  src: url('/static/assets/fonts/red-hat-mono-v15-latin-600italic.woff2') format('woff2');
+}
+
+/* red-hat-mono-700 - latin */
+@font-face {
+  font-display: swap;
+  font-family: 'Red Hat Mono';
+  font-style: normal;
+  font-weight: 700;
+  src: url('/static/assets/fonts/red-hat-mono-v15-latin-700.woff2') format('woff2');
+}
+
+/* red-hat-mono-700italic - latin */
+@font-face {
+  font-display: swap;
+  font-family: 'Red Hat Mono';
+  font-style: italic;
+  font-weight: 700;
+  src: url('/static/assets/fonts/red-hat-mono-v15-latin-700italic.woff2') format('woff2');
+}
+
+// -----------------------------------------------------------------------------
+// Noto Sans TC (Chinese Traditional)
+// -----------------------------------------------------------------------------
+
+/* noto-sans-tc-300 - chinese-traditional */
+@font-face {
+  font-display: swap;
+  font-family: 'Noto Sans TC';
+  font-style: normal;
+  font-weight: 300;
+  src: url('/static/assets/fonts/noto-sans-tc-v37-chinese-traditional-300.woff2') format('woff2');
+}
+
+/* noto-sans-tc-regular - chinese-traditional */
+@font-face {
+  font-display: swap;
+  font-family: 'Noto Sans TC';
+  font-style: normal;
+  font-weight: 400;
+  src: url('/static/assets/fonts/noto-sans-tc-v37-chinese-traditional-regular.woff2') format('woff2');
+}
+
+/* noto-sans-tc-500 - chinese-traditional */
+@font-face {
+  font-display: swap;
+  font-family: 'Noto Sans TC';
+  font-style: normal;
+  font-weight: 500;
+  src: url('/static/assets/fonts/noto-sans-tc-v37-chinese-traditional-500.woff2') format('woff2');
+}
+
+/* noto-sans-tc-600 - chinese-traditional */
+@font-face {
+  font-display: swap;
+  font-family: 'Noto Sans TC';
+  font-style: normal;
+  font-weight: 600;
+  src: url('/static/assets/fonts/noto-sans-tc-v37-chinese-traditional-600.woff2') format('woff2');
+}
+
+/* noto-sans-tc-700 - chinese-traditional */
+@font-face {
+  font-display: swap;
+  font-family: 'Noto Sans TC';
+  font-style: normal;
+  font-weight: 700;
+  src: url('/static/assets/fonts/noto-sans-tc-v37-chinese-traditional-700.woff2') format('woff2');
+}
+
+/* noto-sans-tc-800 - chinese-traditional */
+@font-face {
+  font-display: swap;
+  font-family: 'Noto Sans TC';
+  font-style: normal;
+  font-weight: 800;
+  src: url('/static/assets/fonts/noto-sans-tc-v37-chinese-traditional-800.woff2') format('woff2');
+}
+
+/* noto-sans-tc-900 - chinese-traditional */
+@font-face {
+  font-display: swap;
+  font-family: 'Noto Sans TC';
+  font-style: normal;
+  font-weight: 900;
+  src: url('/static/assets/fonts/noto-sans-tc-v37-chinese-traditional-900.woff2') format('woff2');
+}
+
+// -----------------------------------------------------------------------------
+// Noto Sans SC (Chinese Simplified)
+// -----------------------------------------------------------------------------
+
+/* noto-sans-sc-300 - chinese-simplified */
+@font-face {
+  font-display: swap;
+  font-family: 'Noto Sans SC';
+  font-style: normal;
+  font-weight: 300;
+  src: url('/static/assets/fonts/noto-sans-sc-v38-chinese-simplified-300.woff2') format('woff2');
+}
+
+/* noto-sans-sc-regular - chinese-simplified */
+@font-face {
+  font-display: swap;
+  font-family: 'Noto Sans SC';
+  font-style: normal;
+  font-weight: 400;
+  src: url('/static/assets/fonts/noto-sans-sc-v38-chinese-simplified-regular.woff2') format('woff2');
+}
+
+/* noto-sans-sc-500 - chinese-simplified */
+@font-face {
+  font-display: swap;
+  font-family: 'Noto Sans SC';
+  font-style: normal;
+  font-weight: 500;
+  src: url('/static/assets/fonts/noto-sans-sc-v38-chinese-simplified-500.woff2') format('woff2');
+}
+
+/* noto-sans-sc-600 - chinese-simplified */
+@font-face {
+  font-display: swap;
+  font-family: 'Noto Sans SC';
+  font-style: normal;
+  font-weight: 600;
+  src: url('/static/assets/fonts/noto-sans-sc-v38-chinese-simplified-600.woff2') format('woff2');
+}
+
+/* noto-sans-sc-700 - chinese-simplified */
+@font-face {
+  font-display: swap;
+  font-family: 'Noto Sans SC';
+  font-style: normal;
+  font-weight: 700;
+  src: url('/static/assets/fonts/noto-sans-sc-v38-chinese-simplified-700.woff2') format('woff2');
+}
+
+/* noto-sans-sc-800 - chinese-simplified */
+@font-face {
+  font-display: swap;
+  font-family: 'Noto Sans SC';
+  font-style: normal;
+  font-weight: 800;
+  src: url('/static/assets/fonts/noto-sans-sc-v38-chinese-simplified-800.woff2') format('woff2');
+}
+
+/* noto-sans-sc-900 - chinese-simplified */
+@font-face {
+  font-display: swap;
+  font-family: 'Noto Sans SC';
+  font-style: normal;
+  font-weight: 900;
+  src: url('/static/assets/fonts/noto-sans-sc-v38-chinese-simplified-900.woff2') format('woff2');
+}

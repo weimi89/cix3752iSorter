@@ -1,0 +1,450 @@
+# 打 tag（v*）發版：Ubuntu 20.04 / 22.04 / 24.04 各建一份 Tauri .deb 與 headless 執行檔，
+# 打包成離線安裝包上傳 Release，最後合併出一份 latest.json 給程式內建的自動更新用。
+#
+# 三個 distro 為什麼要各建一份：20.04（focal）沒有 webkit2gtk-4.1，要自編 glib 2.78 + libsoup3 +
+# webkit2gtk-4.1 整套（./.github/actions/build-focal-stack，1 小時 13 分，成果進 Actions 快取，
+# 由 warm-focal-cache.yml 定期刷新）；22.04+ 直接連系統套件。兩邊的 .deb 與執行檔連的棧不同，不能互換，
+# 所以 latest.json 的 platforms 用 `linux-x86_64-<distro>`（桌面 .deb）與 `…-headless`（換檔 tar.gz）分開列，
+# 程式端照 /etc/os-release 選自己那筆（src-tauri/src/updater/mod.rs `platform_tag`）。
+#
+# 本機（macOS）沒辦法建 Linux 版：Tauri 要連目標平台的 gtk／webkit 開發套件，不能交叉編譯。Linux 產物只走這裡。
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag 名稱（已存在的 tag，例 v0.1.0）'
+        required: true
+        default: 'v0.1.0'
+
+permissions:
+  contents: write
+
+# 同 tag 只允許一個 run 同時跑；新 trigger 自動取消舊的，避免 release asset 上傳衝突
+concurrency:
+  group: release-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: true
+
+env:
+  TAG_NAME: ${{ github.event.inputs.tag || github.ref_name }}
+
+jobs:
+  # distro 清單只在這裡維護一份：release-linux 的 matrix 與 publish-manifest 的驗收都讀這個輸出，
+  # 增減 distro 不會兩邊漂移、也不會有某個 distro 缺席卻沒人發現。
+  setup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.m.outputs.matrix }}
+      distros: ${{ steps.m.outputs.distros }}
+    steps:
+      - id: m
+        shell: bash
+        run: |
+          set -euo pipefail
+          # source_build：要不要走自編 focal 棧；deb_depends：改寫進 .deb control 的 Depends
+          #（Tauri 預設會列 libwebkit2gtk-4.1-0，focal 沒這個套件，20.04 只能列系統本來就有的）
+          MATRIX='[
+            {"distro":"ubuntu-20.04","image":"ubuntu:20.04","source_build":true, "deb_depends":"libgtk-3-0"},
+            {"distro":"ubuntu-22.04","image":"ubuntu:22.04","source_build":false,"deb_depends":"libwebkit2gtk-4.1-0, libgtk-3-0"},
+            {"distro":"ubuntu-24.04","image":"ubuntu:24.04","source_build":false,"deb_depends":"libwebkit2gtk-4.1-0, libgtk-3-0"}
+          ]'
+          echo "matrix=$(echo "$MATRIX" | jq -c '{include: .}')" >> "$GITHUB_OUTPUT"
+          echo "distros=$(echo "$MATRIX" | jq -c '[.[].distro]')" >> "$GITHUB_OUTPUT"
+
+  # 只有這個 job 會建立 release；各 distro 的 job 拿它輸出的 release id 上傳 asset。
+  # 多個 job 各自「查無就建」會在同一時刻各建一份 draft（LabelPrint v0.17.1 實際炸過），從源頭只留一個入口。
+  create-release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      release_id: ${{ steps.release.outputs.release_id }}
+      notes: ${{ steps.notes.outputs.body }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ env.TAG_NAME }}
+
+      # tag 與 Cargo.toml / tauri.conf.json 版本不一致就擋下：工控機是照 latest.json 的 version 判斷有沒有新版，
+      # 三處對不上會抓錯版本或永遠以為有新版
+      - name: Check version consistency
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG_VERSION="${TAG_NAME#v}"
+          CARGO_VERSION=$(grep -m1 '^version' src-tauri/Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')
+          CONF_VERSION=$(jq -r .version src-tauri/tauri.conf.json)
+          if [ "$TAG_VERSION" != "$CARGO_VERSION" ] || [ "$TAG_VERSION" != "$CONF_VERSION" ]; then
+            echo "::error::tag ${TAG_NAME} 與 Cargo.toml（${CARGO_VERSION}）／tauri.conf.json（${CONF_VERSION}）版本不一致"
+            exit 1
+          fi
+          echo "version=${TAG_VERSION}" >> "$GITHUB_OUTPUT"
+
+      # 版本說明：優先用 annotated tag 的內容，沒有就用最近一次 commit 標題。
+      # 同一份文字進 release body 與 latest.json 的 notes（程式內「發現新版本」對話框顯示的就是它）
+      - name: Build release notes
+        id: notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --force origin "refs/tags/${TAG_NAME}:refs/tags/${TAG_NAME}"
+          NOTES=$(git tag -l --format='%(contents)' "${TAG_NAME}" | sed '/^-----BEGIN/,$d' | sed -e :a -e '/^\n*$/{$d;N;ba' -e '}')
+          [ -z "${NOTES}" ] && NOTES=$(git log -1 --pretty=%s)
+          printf '%s\n' "${NOTES}" > /tmp/release-notes.md
+          {
+            echo "body<<RELEASE_NOTES_EOF"
+            cat /tmp/release-notes.md
+            echo "RELEASE_NOTES_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      # 找同 tag 的既有 release（含 draft）就沿用，讓重跑 workflow 幂等；找不到才建 draft。
+      # draft 查不到 tag ref，不能用 releases/tags/{tag} 定位，只能整批 list 出來比 tag_name。
+      - name: Find existing release or create one
+        id: release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh api --paginate "repos/${{ github.repository }}/releases" | jq -s 'add' > /tmp/releases.json
+          RELEASE_ID=$(jq -r --arg tag "$TAG_NAME" 'first(.[] | select(.tag_name == $tag) | .id) // empty' /tmp/releases.json)
+          if [ -n "$RELEASE_ID" ]; then
+            echo "找到既有 release id=$RELEASE_ID（tag=$TAG_NAME），沿用，不覆寫既有說明"
+          else
+            RELEASE_ID=$(gh api "repos/${{ github.repository }}/releases" \
+              -X POST \
+              -f tag_name="$TAG_NAME" \
+              -f name="智配通 分揀控制 $TAG_NAME" \
+              -F draft=true \
+              -F prerelease=false \
+              -F body=@/tmp/release-notes.md \
+              --jq '.id')
+            echo "已建立 draft release id=$RELEASE_ID"
+          fi
+          echo "release_id=$RELEASE_ID" >> "$GITHUB_OUTPUT"
+
+  release-linux:
+    needs: [setup, create-release]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.setup.outputs.matrix) }}
+    container:
+      image: ${{ matrix.image }}
+      options: --user root
+    env:
+      DEBIAN_FRONTEND: noninteractive
+      TZ: Etc/UTC
+      # 讓 pkg-config / linker 優先找 /usr/local（20.04 自編棧用；22.04+ 那裡是空的，不影響系統 lib）
+      PKG_CONFIG_PATH: /usr/local/lib/x86_64-linux-gnu/pkgconfig:/usr/local/lib/pkgconfig:/usr/local/share/pkgconfig
+      LD_LIBRARY_PATH: /usr/local/lib/x86_64-linux-gnu:/usr/local/lib
+      # RUNPATH 寫進執行檔：工控機執行時跳過 ld.so.cache 直接找 /usr/local 的自編棧
+      RUSTFLAGS: "-C link-arg=-Wl,-rpath,/usr/local/lib/x86_64-linux-gnu -C link-arg=-Wl,-rpath,/usr/local/lib"
+      VERSION: ${{ needs.create-release.outputs.version }}
+      DISTRO: ${{ matrix.distro }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ env.TAG_NAME }}
+
+      # 20.04：自編 glib + libsoup3 + webkit2gtk-4.1（composite action 與 warm-focal-cache.yml 共用）
+      - name: Build / restore focal upstream stack (20.04 only)
+        if: matrix.source_build
+        uses: ./.github/actions/build-focal-stack
+
+      - name: Bootstrap apt (22.04 / 24.04 — system webkit2gtk-4.1)
+        if: ${{ !matrix.source_build }}
+        run: |
+          set -e
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            curl wget ca-certificates lsb-release tzdata \
+            git build-essential pkg-config patchelf file xz-utils unzip \
+            clang libclang-dev \
+            libssl-dev libgtk-3-dev libxdo-dev librsvg2-dev \
+            libayatana-appindicator3-dev libsoup-3.0-dev \
+            libwebkit2gtk-4.1-dev
+          pkg-config --modversion webkit2gtk-4.1
+
+      - name: Setup Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      # Node 22：vite 8 / vue-i18n 11 的 engines 要求；nodesource 倉庫 focal 也裝得上（需 glibc ≥ 2.28）
+      - name: Setup Node 22
+        run: |
+          curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+          apt-get install -y nodejs
+          npm i -g yarn
+          node --version
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: ${{ matrix.distro }}
+
+      - name: Install npm deps
+        run: yarn install --frozen-lockfile
+
+      # 後面組 manifest 片段與上傳 asset 都用 jq；官方 container image 沒預裝
+      - name: Ensure jq
+        run: command -v jq >/dev/null || apt-get install -y --no-install-recommends jq
+
+      # 20.04：focal 的系統套件仍會被 linker 先找到 /usr/lib 的 glib 2.64，直接用自編的覆蓋系統 .so
+      - name: Override system glib/soup/webkit with /usr/local (20.04 only)
+        if: matrix.source_build
+        run: |
+          for lib in libglib-2.0 libgobject-2.0 libgio-2.0 libgmodule-2.0 libgthread-2.0 \
+                     libsoup-3.0 libjavascriptcoregtk-4.1 libwebkit2gtk-4.1; do
+            for f in /usr/local/lib/x86_64-linux-gnu/${lib}.so* /usr/local/lib/${lib}.so*; do
+              [ -e "$f" ] && cp -fP "$f" /usr/lib/x86_64-linux-gnu/ 2>/dev/null || true
+            done
+          done
+          ldconfig
+          pkg-config --modversion glib-2.0
+
+      # tauri.conf.json 有 updater pubkey，build 階段會要私鑰；沒設這兩個 secret 直接 abort
+      - name: Tauri build .deb
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: yarn tauri build --bundles deb
+
+      # Tauri 用 productName（中文）當 .deb 的 Package 名，dpkg 會拒裝；Depends 也要依 distro 改寫
+      # （focal 沒有 libwebkit2gtk-4.1-0）。改完重新打包並重簽：Tauri 產的 .sig 是對原檔簽的，改過就失效。
+      - name: Rewrite .deb control and re-sign
+        shell: bash
+        env:
+          DEB_DEPENDS: ${{ matrix.deb_depends }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          DEB_DIR=src-tauri/target/release/bundle/deb
+          ORIG_DEB=$(find "$DEB_DIR" -maxdepth 1 -name '*.deb' -print -quit)
+          [ -n "$ORIG_DEB" ] || { echo "::error::找不到 Tauri 產出的 .deb"; exit 1; }
+          WORK=/tmp/deb-fix
+          rm -rf "$WORK"
+          dpkg-deb -R "$ORIG_DEB" "$WORK"
+          sed -i 's/^Package:.*/Package: cix3752i-sorter/' "$WORK/DEBIAN/control"
+          sed -i "s/^Depends:.*/Depends: ${DEB_DEPENDS}/" "$WORK/DEBIAN/control"
+          cat "$WORK/DEBIAN/control"
+          mkdir -p /tmp/out
+          DEB="/tmp/out/cix3752i-sorter_${VERSION}_${DISTRO}_amd64.deb"
+          dpkg-deb -b "$WORK" "$DEB"
+          yarn -s tauri signer sign "$DEB"
+          [ -s "${DEB}.sig" ] || { echo "::error::.deb 簽章沒有產出"; exit 1; }
+          ls -l /tmp/out
+
+      # headless 換檔用：只含執行檔的小包。程式內建更新只換這個檔，不動 webkit 棧與設定
+      - name: Package headless tarball
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          BIN=src-tauri/target/release/sorter
+          "$BIN" --version
+          TARBALL="/tmp/out/cix3752i-sorter_${VERSION}_${DISTRO}_headless.tar.gz"
+          tar -czf "$TARBALL" -C "$(dirname "$BIN")" sorter
+          sha256sum "$TARBALL" | cut -d' ' -f1 > "${TARBALL}.sha256"
+          # latest.json 每筆都要有 signature（Tauri updater 解析時的必填欄位），順手也對這包簽
+          yarn -s tauri signer sign "$TARBALL"
+          ls -l /tmp/out
+
+      # 離線安裝包：20.04 連自編棧一起帶；22.04+ 只帶 .deb，install.sh 走 apt 解依賴
+      - name: Package install tarball
+        shell: bash
+        env:
+          SOURCE_BUILD: ${{ matrix.source_build }}
+        run: |
+          set -euo pipefail
+          STAGE_NAME="cix3752iSorter-${VERSION}-${DISTRO}"
+          STAGE="/tmp/${STAGE_NAME}"
+          mkdir -p "$STAGE"
+
+          if [ "$SOURCE_BUILD" = "true" ]; then
+            mkdir -p "$STAGE/stack/usr/local"
+            for src in /opt/cix-stack/glib /opt/cix-stack/libsoup3 /opt/cix-stack/webkit; do
+              [ -d "$src/usr/local" ] && cp -a "$src/usr/local/." "$STAGE/stack/usr/local/"
+            done
+            # webkit 執行期還要這些 .so（focal 系統版本太舊或沒有），連 GCC 11 的 libstdc++ 一起從建置容器帶走
+            mkdir -p "$STAGE/stack/usr/local/lib/x86_64-linux-gnu"
+            for soname in \
+                libxslt.so.1 libwoff2dec.so.1.0.2 libwoff2common.so.1.0.2 \
+                libharfbuzz-icu.so.0 libopenjp2.so.7 libwebpdemux.so.2 \
+                libenchant-2.so.2 libsecret-1.so.0 libhyphen.so.0 \
+                libgbm.so.1 libdrm.so.2 libnghttp2.so.14 libatomic.so.1 \
+                libwayland-server.so.0 libstdc++.so.6; do
+              real=$(ldconfig -p 2>/dev/null | awk -v s="$soname" '$1==s{print $NF; exit}')
+              if [ -n "$real" ] && [ -e "$real" ]; then
+                actual=$(readlink -f "$real")
+                cp "$actual" "$STAGE/stack/usr/local/lib/x86_64-linux-gnu/"
+                if [ "$actual" != "$real" ]; then
+                  (cd "$STAGE/stack/usr/local/lib/x86_64-linux-gnu/" && ln -sf "$(basename "$actual")" "$soname")
+                fi
+              else
+                echo "::warning::$soname 在建置容器裡找不到，20.04 現場可能缺這個 .so"
+              fi
+            done
+            du -sh "$STAGE/stack"
+          fi
+
+          cp "/tmp/out/cix3752i-sorter_${VERSION}_${DISTRO}_amd64.deb" "$STAGE/"
+          cp deploy/install.sh deploy/sorter.service deploy/supervisor-sorter.conf deploy/README.txt "$STAGE/"
+          chmod +x "$STAGE/install.sh"
+
+          tar -C /tmp -czf "/tmp/out/${STAGE_NAME}.tar.gz" "${STAGE_NAME}"
+          ls -lh /tmp/out
+
+      # latest.json 的兩筆（桌面 .deb／headless tar.gz），先存成片段，publish-manifest 再合併三個 distro
+      - name: Write manifest fragment
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE="https://github.com/${{ github.repository }}/releases/download/${TAG_NAME}"
+          DEB="cix3752i-sorter_${VERSION}_${DISTRO}_amd64.deb"
+          HL="cix3752i-sorter_${VERSION}_${DISTRO}_headless.tar.gz"
+          jq -n \
+            --arg k_deb "linux-x86_64-${DISTRO}" \
+            --arg k_hl "linux-x86_64-${DISTRO}-headless" \
+            --arg u_deb "${BASE}/${DEB}" \
+            --arg u_hl "${BASE}/${HL}" \
+            --arg s_deb "$(cat "/tmp/out/${DEB}.sig")" \
+            --arg s_hl "$(cat "/tmp/out/${HL}.sig")" \
+            --arg sha_hl "$(cat "/tmp/out/${HL}.sha256")" \
+            '{($k_deb): {url: $u_deb, signature: $s_deb}, ($k_hl): {url: $u_hl, signature: $s_hl, sha256: $sha_hl}}' \
+            > "/tmp/out/manifest-${DISTRO}.json"
+          cat "/tmp/out/manifest-${DISTRO}.json"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: manifest-${{ matrix.distro }}
+          path: /tmp/out/manifest-${{ matrix.distro }}.json
+          if-no-files-found: error
+
+      # 改用 release id 直接打 uploads.github.com：draft release 用 tag 定位會 404。
+      # container 內沒有 gh，只用 curl + jq（bootstrap 已裝，20.04 由 build-focal-stack 裝）
+      - name: Upload assets to Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
+        run: |
+          set -euo pipefail
+          API_BASE="https://api.github.com/repos/${{ github.repository }}"
+          curl -sS -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" \
+            "${API_BASE}/releases/${RELEASE_ID}/assets?per_page=100" -o /tmp/existing-assets.json
+
+          for f in /tmp/out/*.deb /tmp/out/*.deb.sig /tmp/out/*_headless.tar.gz /tmp/out/*_headless.tar.gz.sig /tmp/out/*_headless.tar.gz.sha256 /tmp/out/cix3752iSorter-*.tar.gz; do
+            NAME=$(basename "$f")
+            # 同名 asset 已存在（重跑補傳）要先刪，upload API 對同名直接回 422
+            EXISTING=$(jq -r --arg n "$NAME" 'first(.[] | select(.name == $n) | .id) // empty' /tmp/existing-assets.json)
+            if [ -n "$EXISTING" ]; then
+              echo "同名 asset $NAME 已存在（id=$EXISTING），先刪除"
+              curl -sS -o /dev/null -X DELETE -H "Authorization: Bearer ${GH_TOKEN}" "${API_BASE}/releases/assets/${EXISTING}"
+            fi
+            STATUS=$(curl -sS -o /tmp/upload-response.json -w '%{http_code}' -X POST \
+              -H "Authorization: Bearer ${GH_TOKEN}" -H "Content-Type: application/octet-stream" \
+              --data-binary "@${f}" \
+              "https://uploads.github.com/repos/${{ github.repository }}/releases/${RELEASE_ID}/assets?name=${NAME}")
+            if [ "$STATUS" -lt 200 ] || [ "$STATUS" -ge 300 ]; then
+              echo "::error::上傳 $NAME 失敗，HTTP $STATUS"; cat /tmp/upload-response.json; exit 1
+            fi
+            echo "上傳 $NAME（HTTP $STATUS）"
+          done
+
+  # 三個 distro 都到齊才合併出 latest.json 並上傳。少一個就紅燈、不上傳：
+  # 工控機讀 releases/latest/download/latest.json，缺 distro 的 manifest 一旦上去，那個 distro 的機器會永遠找不到自己的更新。
+  publish-manifest:
+    needs: [setup, create-release, release-linux]
+    if: always() && needs.create-release.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      VERSION: ${{ needs.create-release.outputs.version }}
+      NOTES: ${{ needs.create-release.outputs.notes }}
+      RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
+      DISTROS: ${{ needs.setup.outputs.distros }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: manifest-*
+          path: /tmp/fragments
+          merge-multiple: true
+
+      - name: Merge latest.json
+        shell: bash
+        run: |
+          set -euo pipefail
+          MISSING=""
+          for d in $(echo "$DISTROS" | jq -r '.[]'); do
+            [ -s "/tmp/fragments/manifest-${d}.json" ] || MISSING="${MISSING} ${d}"
+          done
+          if [ -n "$MISSING" ]; then
+            echo "::error::下列 distro 沒有建置產物，latest.json 不上傳，補齊前不要公開這個 release：${MISSING}"
+            echo "補救方式：到 Actions 頁面手動觸發 Release，tag 填 ${TAG_NAME}"
+            exit 1
+          fi
+          jq -s --arg v "$VERSION" --arg notes "$NOTES" --arg d "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '{version: $v, notes: $notes, pub_date: $d, platforms: (reduce .[] as $f ({}; . + $f))}' \
+            /tmp/fragments/manifest-*.json > /tmp/latest.json
+          cat /tmp/latest.json
+
+      - name: Upload latest.json
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # --paginate 每頁各吐一行，只取第一個非空的
+          EXISTING=$(gh api --paginate "repos/${{ github.repository }}/releases/${RELEASE_ID}/assets" --jq 'first(.[] | select(.name == "latest.json") | .id) // empty' | awk 'NF{print; exit}')
+          if [ -n "$EXISTING" ]; then
+            gh api -X DELETE "repos/${{ github.repository }}/releases/assets/${EXISTING}"
+          fi
+          STATUS=$(curl -sS -o /tmp/upload-response.json -w '%{http_code}' -X POST \
+            -H "Authorization: Bearer ${GH_TOKEN}" -H "Content-Type: application/json" \
+            --data-binary "@/tmp/latest.json" \
+            "https://uploads.github.com/repos/${{ github.repository }}/releases/${RELEASE_ID}/assets?name=latest.json")
+          if [ "$STATUS" -lt 200 ] || [ "$STATUS" -ge 300 ]; then
+            echo "::error::上傳 latest.json 失敗，HTTP $STATUS"; cat /tmp/upload-response.json; exit 1
+          fi
+
+      - name: Verify release assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          export LC_ALL=C
+          : > /tmp/expected.txt
+          for d in $(echo "$DISTROS" | jq -r '.[]'); do
+            {
+              echo "cix3752i-sorter_${VERSION}_${d}_amd64.deb"
+              echo "cix3752i-sorter_${VERSION}_${d}_amd64.deb.sig"
+              echo "cix3752i-sorter_${VERSION}_${d}_headless.tar.gz"
+              echo "cix3752i-sorter_${VERSION}_${d}_headless.tar.gz.sig"
+              echo "cix3752i-sorter_${VERSION}_${d}_headless.tar.gz.sha256"
+              echo "cix3752iSorter-${VERSION}-${d}.tar.gz"
+            } >> /tmp/expected.txt
+          done
+          echo "latest.json" >> /tmp/expected.txt
+          sort -u /tmp/expected.txt -o /tmp/expected.txt
+          gh api --paginate "repos/${{ github.repository }}/releases/${RELEASE_ID}/assets" --jq '.[].name' | sort > /tmp/actual.txt
+          MISSING=$(comm -23 /tmp/expected.txt /tmp/actual.txt)
+          if [ -n "$MISSING" ]; then
+            echo "::error::release 缺少下列 asset，補齊前不要公開這個 release"
+            echo "$MISSING" | sed 's|^|  缺少：|'
+            exit 1
+          fi
+          echo "asset 到齊，共 $(wc -l < /tmp/expected.txt | tr -d ' ') 項。到 Releases 頁把 draft 公開後，工控機最多一小時內會看到新版。"

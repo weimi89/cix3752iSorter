@@ -1,0 +1,381 @@
+{
+  "app": {
+    "name": "智配通"
+  },
+  "common": {
+    "confirm": "確認",
+    "cancel": "取消",
+    "add": "新增",
+    "save": "儲存",
+    "saveSettings": "儲存設定",
+    "delete": "刪除",
+    "close": "關閉",
+    "search": "查詢",
+    "reset": "重設",
+    "reload": "重新載入",
+    "refresh": "重新整理",
+    "retry": "重送",
+    "all": "全部",
+    "noData": "無資料",
+    "noResults": "查無資料",
+    "saved": "已儲存",
+    "done": "已送出",
+    "keyword": "關鍵字",
+    "advancedSearch": "進階查詢",
+    "multiNoPlaceholder": "可貼多個單號，用逗號、空白或換行分隔"
+  },
+  "pagination": {
+    "pagePrefix": "第",
+    "pageSuffix": "頁",
+    "summary": "總計 {total} 筆記錄分為 {pages} 頁",
+    "perPagePrefix": "每頁",
+    "perPageSuffix": "筆"
+  },
+  "nav": {
+    "section": {
+      "live": "現場",
+      "queues": "佇列與記錄",
+      "settings": "設定"
+    },
+    "dashboard": "即時看板",
+    "parcels": "包裹查詢",
+    "printJobs": "列印任務",
+    "reportQueue": "回報佇列",
+    "eventLog": "事件記錄",
+    "chutes": "格口對照",
+    "printers": "印表機",
+    "devices": "系統設定"
+  },
+  "navbar": {
+    "today": "今日",
+    "sseDown": "即時連線中斷"
+  },
+  "device": {
+    "belt": "皮帶線",
+    "sorter": "分揀機",
+    "camera": "讀碼站"
+  },
+  "password": {
+    "title": "設定密碼",
+    "label": "請輸入設定密碼"
+  },
+  "status": {
+    "init": "初始化",
+    "received": "收件",
+    "done": "完成",
+    "lost": "失去追蹤",
+    "blocked": "堵塞",
+    "blockedTaken": "堵塞後取走",
+    "cancelled": "指令取消",
+    "triggerNg": "觸發異常",
+    "unknown": "未知"
+  },
+  "source": {
+    "pending": "等待中",
+    "api": "中介機",
+    "timeout": "逾時走預設口",
+    "noread": "讀碼失敗",
+    "default": "預設口",
+    "manual": "手動"
+  },
+  "parcel": {
+    "detail": "包裹詳情",
+    "barcode": "條碼",
+    "chute": "格口",
+    "source": "格口來源",
+    "status": "狀態",
+    "startedAt": "開始時間",
+    "travel": "耗時",
+    "cart": "小車",
+    "slot": "皮帶槽",
+    "responseId": "回報 ID",
+    "timeline": "訊號時間軸",
+    "time": "時間",
+    "sourceCol": "來源",
+    "signal": "訊號",
+    "raw": "原始內容",
+    "printJobs": "列印任務"
+  },
+  "print": {
+    "printer": "印表機",
+    "status": "狀態",
+    "attempts": "嘗試",
+    "error": "錯誤",
+    "createdAt": "建立時間",
+    "profile": "紙張",
+    "s": {
+      "pending": "待印",
+      "printing": "列印中",
+      "done": "已印",
+      "failed": "失敗"
+    }
+  },
+  "report": {
+    "status": "狀態",
+    "retries": "重試",
+    "nextRetry": "下次重試",
+    "s": {
+      "pending": "待送",
+      "sending": "傳送中",
+      "success": "成功",
+      "failed": "失敗"
+    }
+  },
+  "log": {
+    "levelLabel": "等級",
+    "category": "類別",
+    "time": "時間",
+    "action": "動作",
+    "message": "訊息",
+    "level": {
+      "info": "資訊",
+      "warn": "警告",
+      "error": "錯誤"
+    },
+    "cat": {
+      "belt": "皮帶線",
+      "sorter": "分揀機",
+      "camera": "讀碼站",
+      "tracker": "包裹追蹤",
+      "chute": "格口解析",
+      "middleware": "中介機",
+      "printer": "印表機",
+      "server": "系統"
+    }
+  },
+  "page": {
+    "dashboard": {
+      "title": "即時看板",
+      "subtitle": "皮帶啟停、裝置連線、今日件數與在途包裹",
+      "subtitleShort": "現場即時狀態",
+      "connected": "已連線",
+      "disconnected": "未連線",
+      "beltRunning": "皮帶運轉中",
+      "beltStopped": "皮帶已停止",
+      "beltBlocked": "堵塞停線中",
+      "beltHeadJam": "頭部堵塞停線中",
+      "beltOffline": "皮帶未連線",
+      "beltStart": "啟動皮帶",
+      "beltStop": "停止皮帶",
+      "today": "今日件數",
+      "doneSinceStart": "完成（本次啟動）",
+      "abnormal": "異常件",
+      "noread": "讀碼失敗",
+      "defaulted": "走預設口",
+      "queues": "待處理 / 失敗",
+      "current": "目前處理中",
+      "currentHint": "正在分揀機頭部等待上車的包裹",
+      "noCurrent": "目前沒有在分揀機頭部的包裹",
+      "inFlight": "在途包裹",
+      "inFlightHint": "已進線、尚未落格口的包裹",
+      "elapsed": "已經過",
+      "hourlyChart": "近 12 小時件數",
+      "chart": {
+        "done": "完成",
+        "abnormal": "異常"
+      },
+      "messages": "系統訊息"
+    },
+    "parcels": {
+      "title": "包裹查詢",
+      "subtitle": "每一件包裹的格口、狀態與訊號時間軸；點列開詳情",
+      "subtitleShort": "包裹歷史",
+      "from": "起",
+      "to": "迄",
+      "export": "匯出 Excel"
+    },
+    "printJobs": {
+      "title": "列印任務",
+      "subtitle": "面單送印狀態；印表機掉線時任務會保留，接回自動補印",
+      "subtitleShort": "面單送印狀態",
+      "searchHint": "埠位／紙張"
+    },
+    "reportQueue": {
+      "title": "回報佇列",
+      "subtitle": "向中介機回報「已收到格口」的狀態；失敗會自動退避重試",
+      "subtitleShort": "中介機回報狀態",
+      "searchHint": "回報 ID"
+    },
+    "eventLog": {
+      "title": "事件記錄",
+      "subtitle": "裝置連線、停線、告警與系統動作的完整紀錄",
+      "subtitleShort": "系統事件",
+      "searchHint": "訊息內容"
+    },
+    "chutes": {
+      "title": "格口對照",
+      "subtitle": "格口代號、分揀機 CID 與貼標機 USB 埠位；存檔後立即生效",
+      "subtitleShort": "格口與印表機對應",
+      "hint": "代號要與中介機「分揀通道」的代碼一致（L1–L5、R1–R5、LS、RS）。CID 是分揀機的格口編碼；印表機埠位是該格口貼標機接在哪個 USB 孔。",
+      "leftColumn": "左側格口",
+      "rightColumn": "右側格口",
+      "otherColumn": "直通與異常口",
+      "code": "代號",
+      "label": "說明",
+      "printer": "印表機埠位",
+      "noPrinter": "不列印",
+      "order": "順序",
+      "enabled": "使用中",
+      "disabled": "已停用",
+      "printerOffline": "印表機掉線",
+      "printerMissingHint": "設定的埠位目前沒有接印表機"
+    },
+    "printers": {
+      "title": "印表機",
+      "subtitle": "各格口貼標機的在線狀態與測試頁；要改對應請到「格口對照」",
+      "subtitleShort": "貼標機狀態",
+      "port": "USB 埠位",
+      "online": "在線",
+      "offline": "掉線",
+      "test": "測試頁",
+      "testSent": "測試頁已送出",
+      "noneConfigured": "尚未指派任何印表機",
+      "noneAttached": "目前沒有偵測到任何 USB 印表機",
+      "offlineAlert": "有 {n} 個格口的印表機掉線",
+      "attached": "目前接著的印表機",
+      "unit": "台"
+    },
+    "settings": {
+      "title": "系統設定",
+      "subtitle": "裝置位址、指令、停線規則、中介機與列印參數；存檔即生效",
+      "subtitleShort": "系統參數",
+      "addr": "位址（IP:埠）",
+      "resetSorter": "重置分揀機",
+      "resetSorterConfirm": "重置會清掉分揀機上所有在途指令，正在分揀的包裹會標為失去追蹤。確定要執行？",
+      "resetSorterSent": "重置指令已送出",
+      "sec": {
+        "general": "一般",
+        "middleware": "中介機",
+        "belt": "皮帶線",
+        "sorter": "分揀機",
+        "camera": "讀碼站",
+        "led": "系統燈",
+        "rules": "停線規則",
+        "print": "列印",
+        "buttons": "急停按鈕"
+      },
+      "general": {
+        "title": "站名",
+        "machine": "機台編號",
+        "retention": "資料保留天數",
+        "defaultChute": "預設格口",
+        "password": "設定密碼",
+        "bind": "網頁監聽位址",
+        "bindHint": "改了要重啟程式才生效；其餘設定存檔即生效"
+      },
+      "belt": {
+        "run": "啟動指令",
+        "auto": "節能啟動指令",
+        "stop": "停止指令",
+        "reset": "重置指令",
+        "defaultRun": "常動模式",
+        "defaultRunDesc": "開：啟動用「啟動指令」；關：用「節能啟動指令」"
+      },
+      "sorter": {
+        "speed": "速度",
+        "number": "小車數",
+        "irNum": "光電數",
+        "cTimeout": "下指令後等待受理",
+        "kxAfterE": "離開皮帶後等待上車",
+        "uAsDone": "丟失視為完成",
+        "uAsDoneDesc": "收到丟失訊號時當作正常完成，不記異常",
+        "initOnI": "以入口光電建件",
+        "initOnIDesc": "皮帶沒有觸發點訊號的機型才開"
+      },
+      "camera": {
+        "listen": "監聽位址",
+        "floor": "綁碼窗口下限",
+        "ceiling": "綁碼窗口上限",
+        "dedup": "同碼去重",
+        "hint": "條碼要在觸發點之後這段時間內到達才會綁到該件；下限為負代表允許條碼比觸發點早到。"
+      },
+      "led": {
+        "title": "系統燈",
+        "via": "走哪條線",
+        "green": "作業中",
+        "red": "異常",
+        "idle": "閒置",
+        "off": "全滅",
+        "hold": "異常燈維持",
+        "idleAfter": "閒置判定",
+        "alarm_on_start": "開機亮異常燈",
+        "alarm_on_block": "堵塞亮燈",
+        "alarm_on_lost": "丟失亮燈",
+        "alarm_on_cancel": "取消亮燈"
+      },
+      "rules": {
+        "title": "停線規則",
+        "on_block": "堵塞停線",
+        "on_blockDesc": "分揀機回報堵塞時停線，2 秒沒再回報就自動啟動",
+        "on_lost": "丟失停線",
+        "on_lostDesc": "包裹在分揀機上失去追蹤時停線",
+        "on_cancel": "指令取消停線",
+        "on_cancelDesc": "包裹沒上車、指令被取消時停線",
+        "on_i": "入口光電觸發停線",
+        "on_iDesc": "分揀機入口光電被觸發時停線",
+        "too_close": "間距過近停線",
+        "too_closeDesc": "兩件包裹間距小於最小間距時停線",
+        "minGap": "最小間距"
+      },
+      "mw": {
+        "title": "中介機",
+        "baseUrl": "中介機網址",
+        "parcelTimeout": "查格口逾時",
+        "parcelTimeoutHint": "包裹從觸發點到交接點約 1.3 秒，扣掉讀碼約 0.2 秒，查格口最多只能等 1.1 秒；超過就走預設口。",
+        "labelTimeout": "下載面單逾時",
+        "reportTimeout": "回報逾時",
+        "jamThrottle": "同格口卡件告警間隔"
+      },
+      "print": {
+        "title": "列印",
+        "addProfile": "新增紙張",
+        "delay": "每格口送印延遲",
+        "delayHint": "第 N 格延遲 (N-1)×此值，讓包裹先到再印",
+        "profileName": "名稱（含尺寸，如 PAPER-01#100*150）",
+        "cmd": "前置指令",
+        "org": "起點",
+        "retry": "重試次數",
+        "retryInterval": "重試間隔 ms",
+        "profileHint": "名稱中的 #寬*高 會被拿來換算面單縮放尺寸（mm）；前置指令多行以 \\r\\n 分隔。",
+        "noSize": "名稱沒有 #寬*高，將維持原圖尺寸"
+      },
+      "buttons": {
+        "title": "急停按鈕",
+        "describe": "說明",
+        "device": "裝置",
+        "action": "動作",
+        "stop": "停止皮帶",
+        "start": "啟動皮帶",
+        "empty": "尚未設定急停按鈕；現場沒有接按鈕可不設。"
+      },
+      "testConn": "測試連線",
+      "advanced": "進階時序參數（一般不用改）",
+      "unsaved": "有尚未儲存的變更",
+      "discard": "放棄變更",
+      "leaveConfirm": "有尚未儲存的變更，確定要離開？",
+      "v": {
+        "addr": "格式要是 IP:埠，例如 192.168.177.100:10006",
+        "url": "格式要是 http:// 開頭的網址",
+        "defaultChute": "預設格口不可空白"
+      }
+    }
+  },
+  "updater": {
+    "title": "發現新版本",
+    "available": "有新版 v{version}，點擊安裝",
+    "current": "目前版本",
+    "next": "新版本",
+    "downloading": "下載中",
+    "installing": "安裝中",
+    "restarting": "服務重啟中，完成後會自動重新載入",
+    "install": "立即更新",
+    "later": "稍後再說",
+    "upload": "上傳更新檔",
+    "uploadHint": "工控機沒有外網時，可直接上傳發版的 cix3752i-sorter_x.y.z_linux-x86_64.tar.gz。"
+  },
+  "bulk": {
+    "itemsCount": "{n} 筆",
+    "collapse": "收合",
+    "expandMore": "+{n} 筆"
+  }
+}

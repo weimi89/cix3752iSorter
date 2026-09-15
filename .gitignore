@@ -1,0 +1,38 @@
+# === Rust（src-tauri）===
+/src-tauri/target/
+/src-tauri/gen/schemas/
+
+# === Node / Vite ===
+node_modules/
+/dist/
+.vite/
+src/auto-imports.d.ts
+src/components.d.ts
+package-lock.json
+
+# === 本地資料（執行時生成）===
+/data/
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+/config.toml
+
+# === Logs ===
+*.log
+
+# === Editor / OS ===
+.vscode/
+.idea/
+.DS_Store
+
+# === 本地備份 ===
+backups/
+
+# === AI 工具工作目錄 ===
+.claude/
+.serena/
+graphify-out/
+
+# === 建置產物（發版由 GHA 產出）===
+/dist-bin/

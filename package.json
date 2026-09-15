@@ -1,0 +1,50 @@
+{
+  "name": "cix3752i-sorter",
+  "private": true,
+  "version": "0.1.0",
+  "description": "智配通 分揀控制（Tauri 桌面程式；前端 Vue 3 + Vuetify，後端 Rust）",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "tauri": "tauri",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build",
+    "icons": "node scripts/build-icon-subset.mjs"
+  },
+  "dependencies": {
+    "@floating-ui/dom": "^1.8.0",
+    "@iconify-json/mdi": "^1.2.3",
+    "@iconify-json/tabler": "^1.2.38",
+    "@iconify/vue": "^5.0.1",
+    "@tauri-apps/api": "^2.11.1",
+    "@tauri-apps/plugin-autostart": "^2.5.1",
+    "@tauri-apps/plugin-process": "^2.3.1",
+    "@tauri-apps/plugin-updater": "^2.10.1",
+    "@vueuse/core": "^14.4.0",
+    "axios": "^1.19.0",
+    "cookie-es": "^3.1.1",
+    "destr": "^2.0.5",
+    "echarts": "^6.1.0",
+    "overlayscrollbars": "^2.16.0",
+    "overlayscrollbars-vue": "^0.5.10",
+    "pinia": "^4.0.2",
+    "ufo": "^1.6.1",
+    "vue": "^3.5.40",
+    "vue-echarts": "^8.0.1",
+    "vue-i18n": "^11.4.8",
+    "vue-router": "^5.2.0",
+    "vue3-toastify": "^0.2.9",
+    "vuetify": "4.1.12"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.11.4",
+    "@vitejs/plugin-vue": "^6.0.8",
+    "sass-embedded": "^1.100.0",
+    "unplugin-auto-import": "^21.0.0",
+    "unplugin-vue-components": "^32.1.0",
+    "vite": "^8.2.0",
+    "vite-plugin-vuetify": "^2.1.3"
+  }
+}

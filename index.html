@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <!-- Vuetify 4 cascade layer 順序：必須是文件裡第一個 layer 宣告（先出現者定序） -->
+    <style>@layer base, vuetify-core, vuetify-components, vuetify-overrides, vuetify-utilities, vuetify-final, overrides;</style>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>智配通</title>
+  </head>
+  <body>
+    <div id="app"></div>
+    <!-- 畫面掛載前就出錯（桌面模式拿不到後端位址、舊版 webview 不支援語法）會是一片空白，
+         這裡把錯誤印出來，現場才有東西可以回報 -->
+    <script>
+      window.addEventListener('error', e => { if (!document.querySelector('.layout-wrapper')) document.getElementById('app').innerText = '啟動失敗：' + (e.message || e.error) })
+      window.addEventListener('unhandledrejection', e => { if (!document.querySelector('.layout-wrapper')) document.getElementById('app').innerText = '啟動失敗：' + (e.reason?.message || e.reason) })
+    </script>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

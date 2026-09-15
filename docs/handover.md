@@ -1,0 +1,112 @@
+# 交接紀錄
+
+> 依 `docs/plan.md` 里程碑推進；狀態只填實際驗證過的結果。
+
+## 2026-09-14
+
+### M0 骨架與建置 — 完成（本機驗證）
+
+| 項目 | 狀態 | 驗證方式 |
+|---|---|---|
+| Cargo 專案、`config`/`db`/`event_bus`/`event_log`/`fs_atomic`/`log`/`server` 骨架 | ✅ | `cargo check`、`cargo test`（7 個測試綠） |
+| `config.toml` 不存在時自建預設檔；缺區段以預設補齊 | ✅ | 冒煙測試看到 WARN「已用預設值建立」，檔案內容正確 |
+| SQLite WAL + `migrations/0001_init.sql`（7 張表 + 格口初值） | ✅ | 冒煙後 `.tables` 列出全部表 |
+| `GET /api/health`、`/api/status`、`/api/logs`、`/events/stream`、SPA fallback | ✅ | curl 逐一打過；`/events/stream` 目前尚無事件來源，只驗到連線不報錯 |
+| 交叉編譯 glibc 2.31（`scripts/build-linux.sh`） | ✅ | 產物 x86_64 ELF，最高需求 `GLIBC_2.30`，只依賴 libc/libm/libdl/libpthread |
+| GHA `release.yml`（ubuntu:20.04 容器） | ⏳ 未跑過 | 尚未推到 GitHub；推上去打 tag 後要看一次 |
+| `deploy/`：systemd 單元、supervisor 設定、`install.sh` | ⏳ 未實機 | 需在工控機執行 `sudo bash install.sh systemd` 驗證 |
+| **在工控機 20.04 實跑** | ⏳ **待主人操作** | 把 `dist-bin/cix3752i-sorter_0.1.0_linux-x86_64.tar.gz` 丟到工控機解開、`./sorter --config config.toml --data-dir data`，瀏覽器開 `http://<ip>:8080/api/health`。注意舊系統也用 8080，同時跑要改 `config.toml` 的 `server.bind` |
+
+### 已知待辦
+
+- 前端 `frontend/` 尚未建立（M5），目前內嵌的是 `build.rs` 的佔位頁。
+- `deploy/*.conf` 的路徑假設安裝在 `/home/chipsort/cix3752iSorter`，現場不同要改。
+- 廠商正式機原始碼尚未到手：`docs/protocol-spec.md` 第 10 節待確認清單。
+
+### M1 裝置層 + 模擬器 — 完成
+
+| 項目 | 狀態 | 驗證方式 |
+|---|---|---|
+| `protocol/`（belt/sorter 解析、Kn/Kx/Ka/KL 組裝、CID） | ✅ | 15 個單元測試，含 `cmd.log` 實例對照 |
+| `device/line_client.rs`（keepalive、讀逾時、退避重連、取消、斷線丟棄待送指令） | ✅ | 3 個測試（假裝置：收行／送指令／掛斷重連／讀逾時） |
+| `device/camera.rs`（:8051 收幀、挑碼規則移植、5 秒去重） | ✅ | 7 個測試 |
+| `bin/replay.rs`（回放 cmd.log 當皮帶／分揀機／相機；`--drop-every` 隨機掛斷；`--gate-c` 維持 Kn→~c 因果） | ✅ | 回放 09-07 19:00–19:20（7,741 行）逐種訊號計數與原始日誌**完全吻合**；掛斷後自動重連 |
+
+**踩過的坑**：`select!` 裡的讀取必須用 cancel-safe 的 `Lines::next_line`；用 `read_line` 會在送指令那一刻弄丟剛到的行。
+
+### M2 包裹狀態機 — 完成（模擬器驗證）
+
+| 項目 | 狀態 | 驗證方式 |
+|---|---|---|
+| `tracker/machine.rs`（綁碼窗口、頭部排隊、Kn/Kx、堵塞／丟失／取消、停線規則、燈號、兜底逾時） | ✅ | 16 個單元測試（`machine_tests.rs`，含每條停線規則） |
+| `tracker/store.rs`（~P 即落 DB、事件表、daily_stats、啟動時孤兒件收尾） | ✅ | 回放後 `parcels`/`parcel_events` 內容檢查 |
+| 與舊系統對照 | ✅ | 09-07 19:00–19:20 @20x：新 598/4/19/8（狀態 3/4/6/7）vs 舊 600/4/19/8；整個 09-07 班次 10,205 件 @50x：9871/78/133/105/15 vs 9887/77/134/86/15，RSS 20MB、結束時在途 3 件 |
+
+**未做／待確認**：多集群（`Ka`/`~n`）未實作（現場單集群）；`~I` 建件未實作（現場關閉）；50x 回放的 19 件額外取消是回放因果的殘餘，20x 完全吻合。
+
+### M3 格口與中介機 — 完成（假中介機驗證）
+
+| 項目 | 狀態 | 驗證方式 |
+|---|---|---|
+| `middleware/mod.rs`（`/api/parcel`、面單下載、`/api/report`、`/api/device-alert`，逾時與錯誤分類） | ✅ | 回應解析單元測試（正常／NOREAD／錯誤面單） |
+| `middleware/report_queue.rs`（落表、指數退避、4xx 永久失敗、重啟續送） | ✅ | 退避函式測試；1x 回放 144 筆全部 success |
+| `chute/mod.rs`（`decide()` 純函式：NOREAD／業務錯誤／停用格口／LS 直通；每請求獨立 task） | ✅ | 6 個單元測試 |
+| 模擬器假中介機（`--mw-delay-ms`、`--mw-error-every`，`/images` 回 PNG） | ✅ | 1x 回放 4 分鐘：api 144／default 3／noread 5／timeout 0（延遲中位 386ms、max 563ms）；延遲拉到 1s 中位：timeout 31、遲到回覆 31 筆只記錄不改格口 |
+
+**決策點（要主人拍板）**：回報時機沿用舊系統——**拿到格口就回報**（`chute_decided` 入列），不是等 `~e` 掉落；遲到回覆（已走預設口）**不回報**。若要改成「實際落格口才回報」，改 `tracker/mod.rs` 的 `chute_decided` → 在 `end_parcel(Done)` 時入列即可。
+
+### M4 列印 — 完成（假印表機驗證）
+
+| 項目 | 狀態 | 驗證方式 |
+|---|---|---|
+| `label/raster.rs`（profile 尺寸、contain 縮放、2mm 留白、門檻 200、1-bit 打包） | ✅ | 6 個單元測試；`CIX_PREVIEW_OUT=… cargo test 匯出點陣預覽 -- --ignored` 匯出預覽圖肉眼確認 |
+| `label/tspl.rs`（512 零前導 + SIZE/cmd/CLS/BITMAP/PRINT；測試頁） | ✅ | 位元組佈局測試 |
+| `label/usb.rs`（`/sys/class/usbmisc` 埠位對應；列出印表機） | ✅ | 假 sysfs 符號連結測試 |
+| `label/queue.rs`（`print_jobs` 落地、每埠位一個 worker、`spawn_blocking` 寫入 + 15s 逾時、重試／告警節流 60s、一小時放棄、重啟續印） | ✅ | 1x 回放 90 秒：43 件入列、36 件印出；故意不接 L4 → 7 件 pending + `USB_DISCONNECT` 告警送達假中介機（每 60s 重提醒）→ 接上後 8 秒內全部印出、spool 清空 |
+| 開發機沒有 USB 印表機 | — | 設 `CIX_PRINT_FAKE_DIR=<dir>`，目錄下存在名為埠位的檔案即當作印表機（測試就是這樣跑的） |
+
+**與舊版的差異**：縮放用 Lanczos3（Node 用 sharp 預設），像素不會逐位元組相同，但尺寸、留白、二值化門檻、TSPL 佈局一致；正式機上請先印一張對比。
+
+### M5 網頁後台 — 完成（本機瀏覽器實測）
+
+| 項目 | 狀態 | 驗證方式 |
+|---|---|---|
+| REST：status／parcels（查詢、詳情、xlsx 匯出）／stats／config／chutes／belt／sorter／print-jobs／printers／report-queue／logs | ✅ | curl 逐一打過（含密碼錯誤 403、CID 不合法 400、指令白名單 400） |
+| 前端 `frontend/`（Vue 3 + Vuetify，樣板移植自 cix3752iLabelPrint；離線圖示子集） | ✅ | Chrome 逐頁開過：即時看板（裝置燈、皮帶啟停、件數、當前件、在途表、14 天圖、系統訊息）、包裹查詢 + 詳情時間軸、列印任務、回報佇列、事件記錄、格口對照、印表機、系統設定六個分頁 |
+| 設定密碼流程（錯誤提示／正確存檔／sessionStorage 記住） | ✅ | 實際操作 |
+| SSE 即時更新（狀態 0.5s、包裹、列印、回報、系統訊息） | ✅ | 看板數字隨回放跳動 |
+| 主題 | ✅ 與 cix3752iLabelPrint 同一套（乖乖綠主色、半暗側欄，`useThemeApply` + `stores/theme.js`） | 實機比對 |
+| 語系 | 主人決定**不做多語系**：只留繁中，切換選單與越南文檔已移除（vue-i18n 保留當字串表用） | — |
+| 版型 | 全部頁面對齊 cix3752iLabelPrint：`AppHeader` 頁首（圖示／標題／副標／動作列，手機收進選單）、`card-shadow` 統計卡、「進階查詢」展開面板、`TablePagination` 表頭表尾雙分頁（每頁 25/50/100…）、`table-cards` 手機卡片式表格、格口對照左右欄卡片 | Chrome 逐頁比對 |
+| 記錄頁 | 列印任務／回報佇列／事件記錄都有關鍵字搜尋＋狀態篩選＋分頁（後端 total/list）；表格不顯示內部流水號 | 實機操作 |
+| 自動更新 | ✅ 對齊 LabelPrint：後端定期讀 GitHub Release 的 `latest.json`（`src/updater/`），導覽列出現下載徽章 → 對話框顯示版本說明 → 密碼 → 串流下載＋SHA-256 校驗 → 新檔先 `--version` 自檢 → `rename` 蓋掉執行檔 → 1 秒後結束交給 supervisor／systemd 重啟 → 前端輪詢 health 自動重載；沒外網可在同一對話框上傳 tar.gz | 本機以假發版（0.1.0 → 0.1.1、假 supervisor 迴圈）走完整流程，畫面自動變 v0.1.1 |
+| 系統設定頁 UX | 段落捷徑列（貼頂）、每段卡片圖示標題＋副標、裝置段顯示連線狀態並可「測試連線」（`POST /api/devices/test`，只做握手不送指令）、位址／網址格式即時檢查（有錯不送出）、有改動才能儲存＋底部未儲存列（放棄／儲存）＋離頁提醒、停線規則改成清單列、列印紙張改成卡片、密碼可顯示 | Chrome 實測：測試連線成功／拒絕／逾時三種、格式錯誤警示、放棄變更還原、存檔落到 config.toml、離頁攔截 |
+| 未做 | IR 光電檢查頁（M6）；手機遙控頁 | — |
+
+**發版方式**（2026-09-14 改為三 distro Tauri 發版，見下一節）：`src-tauri/Cargo.toml` 與 `src-tauri/tauri.conf.json` 版本號一致 → `git tag -a vX.Y.Z -m "版本說明"` → push tag → GHA `release.yml` 在 ubuntu:20.04／22.04／24.04 三個 container 各建 .deb 與 headless tar.gz、合併 `latest.json` 上傳到 **draft** Release → 到 Releases 頁公開；工控機最多一小時內看到新版（`[update] check_interval_min`）。tag 版本與兩個設定檔不一致會被 GHA 擋下。GitHub repo 預設 `weimi89/cix3752iSorter`，建 repo 後若名稱不同要改 `config.toml` 的 `update.endpoint` 與 `src-tauri/tauri.conf.json` 的 `plugins.updater.endpoints`。
+**踩過的坑**：設定密碼對話框必須是全站單例（掛在 DefaultLayout），composable 裡 `ensure()` 才等得到；各頁各掛一個會永遠等不到。
+**開發方式**：`yarn dev`（Vite :5180 代理到後端 :8080，`CIX_BACKEND` 可改）或 `yarn tauri dev` 直接開視窗；正式建置 `yarn build` 後 `cd src-tauri && cargo build` 內嵌。
+**踩過的坑**：Chrome 自動化的分頁若在背景（`visibilityState=hidden`），`requestAnimationFrame` 不跑，所有 Vuetify 過場（對話框、底部列）會停在 opacity 0，看起來像沒出現；驗過場效果前先確認分頁在前景，或改查 DOM。
+**踩過的坑**：`vue-i18n` 的 `useI18n` 不在 AutoImport 清單，頁面要自己 import；空字串查詢參數前端不送、後端也當不篩選（`non_empty`）。
+
+### Tauri 桌面化 + Linux 三 distro 發版 — 程式碼完成，GHA 未跑過
+
+| 項目 | 狀態 | 驗證方式 |
+|---|---|---|
+| 專案改成 Tauri 2 桌面程式（`src-tauri/`），預設開視窗、`--headless`／`CIX_HEADLESS=1` 只跑服務；兩種模式共用 `app::bootstrap` | ✅ | macOS：headless 模式接模擬器跑完整流程；桌面模式開視窗、前端載入、看板數字跟著回放跳動 |
+| 前端雙執行環境（`src/api/runtime.js`）：Tauri 內向 Rust 問 `backend_base_url`，瀏覽器用相對路徑 | ✅ | 同上 |
+| 自動更新雙路徑（`src/composables/useUpdater.js`）：桌面走 Tauri updater、瀏覽器走後端 `/api/update/*` | ✅ 瀏覽器路徑本機驗過；Tauri 路徑要等真的有 Release 才驗得到 | — |
+| `latest.json` 平台鍵帶 distro（`updater::platform_tag`：`linux-x86_64-ubuntu-20.04`、`…-headless`）；桌面 updater 在 Linux 設同樣的 target | ✅ 單元測試（os-release 解析、混合 manifest 解析） | `cargo test` 71 綠 |
+| 模擬器執行檔改名 `sorter-replay`（Tauri 會把所有 bin 一起打進 .deb 的 /usr/bin，避免撞名） | ✅ | `cargo metadata` 目標清單 |
+| `release.yml`：setup（distro 清單單一來源）→ create-release（版本一致性檢查、draft 幂等）→ release-linux（矩陣三 distro，20.04 走 `build-focal-stack` 自編棧）→ publish-manifest（三份齊才合併上傳 `latest.json`、驗 asset 到齊） | ⏳ **未在 GHA 跑過** | YAML 已解析；要推到 GitHub 打 tag 看一次 |
+| `deploy/install.sh` 改為安裝包腳本：`desktop`（裝 .deb）／`systemd`／`supervisor`（從 .deb 取執行檔放 APP_DIR，服務帶 `--headless`）；20.04 先鋪 `stack/` 到 /usr/local | ⏳ 未實機 | `bash -n` 過；要在工控機跑 |
+| `scripts/build-linux.sh`（zig 交叉編譯）已搬到 `backups/`：Tauri 版無法從 macOS 交叉編譯 Linux | — | — |
+
+**要主人做的事（GitHub UI）**：建 repo `weimi89/cix3752iSorter`（或改兩處 endpoint）→ Settings → Secrets 加 `TAURI_SIGNING_PRIVATE_KEY`（`~/.tauri/cix3752iSorter.key` 內容）與 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`（建金鑰時設的密碼，沒設就留空字串）→ 手動跑一次 `warm-focal-cache.yml`（在 main 上）把 20.04 的 webkit 棧先編好進快取 → 打 `v0.1.0` tag 觸發 `release.yml`。
+**已知風險**：Tauri updater 在 Linux 裝 .deb 走 `pkexec dpkg -i`，桌面模式按「立即更新」會跳系統密碼；現場若不想每次輸入，改用 headless 模式（換檔不需 root）。`dist-bin/` 內的舊 tar.gz 是 Tauri 化之前建的，不要再拿去工控機。
+
+### 下一步：M6 現場切換
+
+1. 主人在正式機實裝 GHA 產出的 `cix3752iSorter-0.1.0-ubuntu-20.04.tar.gz`（`sudo bash install.sh desktop` 或 `systemd`），先改 `server.bind` 避開舊系統的 8080
+2. 設定轉換腳本（`conf.json` + `gkconfig.json` + 舊 `chute` 表 → `config.toml` + `chutes`）
+3. IR 光電檢查頁、supervisor 切換與回退步驟

@@ -1,0 +1,948 @@
+// =============================================================================
+// 字體（完全對齊 Materio：Red Hat Mono 為主、Noto Sans TC 處理中文）
+// =============================================================================
+@use 'fonts';
+
+// Materio 整套 global styles(table / card / form 等覆寫)
+@use './styles';
+
+// =============================================================================
+// 桌面 App 行為：禁止選取 UI chrome 文字（按鈕/標題/導航等），
+// 只在輸入框、表格內容、code 區塊與標示 .selectable 的元素開放選取
+// =============================================================================
+html,
+body {
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: default;
+}
+
+input,
+textarea,
+[contenteditable='true'],
+.v-field__input,
+.v-table,
+code,
+pre,
+.selectable {
+  user-select: text;
+  -webkit-user-select: text;
+  cursor: auto;
+}
+
+// =============================================================================
+// VerticalNav active link 強制覆蓋 — Vuetify 的 a tag reset 蓋掉 %nav-link-active
+// 的 background-color,這裡用更高優先級補回紫色 active 背景
+// =============================================================================
+.layout-vertical-nav .nav-link > a.router-link-exact-active,
+.layout-vertical-nav .nav-link > a.router-link-active {
+  background-color: rgb(var(--v-global-theme-primary)) !important;
+  color: rgb(var(--v-theme-on-primary)) !important;
+}
+
+// =============================================================================
+// 進階查詢 VExpansionPanel:title 較緊湊、hover 不變色
+// =============================================================================
+// =============================================================================
+// 陰影統一：Vuetify 4 內建的是 Material 3 黑色硬陰影，Materio 的卡片是柔陰影
+// （0 4px 18px rgba(umbra, .1)）。凡是還走 Vuetify 內建陰影的元件都對齊成同一套，
+// 否則同一頁會出現一深一淺。
+// =============================================================================
+// 展開面板（進階查詢、進階時序參數），展開與收合都同一組
+.v-expansion-panel__shadow {
+  box-shadow: 0 4px 18px 0 rgba(var(--v-shadow-key-umbra-color), 0.1) !important;
+}
+
+// 下拉選單、日期選單等浮層
+.v-menu > .v-overlay__content {
+  box-shadow: 0 4px 18px 0 rgba(var(--v-shadow-key-umbra-color), 0.18) !important;
+}
+
+// 非 inset 開關的圓鈕：Materio 只幫 inset 樣式設了柔陰影，非 inset 會落回 Vuetify 的黑硬陰影
+.v-switch:not(.v-switch--inset) .v-switch__thumb {
+  box-shadow: 0 1px 6px rgba(var(--v-shadow-key-umbra-color), var(--v-shadow-xs-opacity));
+}
+
+// 關閉狀態的圓鈕不用白色（Materio 預設強制白），改成比軌道深一階的灰
+.v-switch:not(.v-switch--inset) .v-selection-control:not(.v-selection-control--dirty) .v-switch__thumb {
+  color: rgba(var(--v-theme-on-surface), 0.7) !important;
+  background-color: rgba(var(--v-theme-on-surface), 0.7) !important;
+}
+
+.advanced-search {
+  .v-expansion-panel {
+    border-radius: 6px;
+  }
+  .advanced-search__title {
+    font-size: 18px;
+    font-weight: 500;
+    color: rgba(var(--v-theme-on-surface), 0.9);
+    padding: 20px 24px !important;
+    min-block-size: 46px !important;
+  }
+  .v-expansion-panel-title__overlay {
+    background: transparent !important;
+  }
+  .v-expansion-panel-title:hover .v-expansion-panel-title__overlay {
+    opacity: 0 !important;
+  }
+}
+
+// 進階查詢欄位 — 對齊 Materio 實機數值,改用 VRow+VCol
+.search-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+
+  label {
+    font-size: 13px;
+    color: rgba(var(--v-theme-on-surface), 0.9);
+    line-height: 1.25;
+  }
+
+  .v-field {
+    --v-input-control-height: 38px;
+    min-block-size: 38px !important;
+  }
+  .v-field__input {
+    min-block-size: 38px !important;
+    font-size: 15px !important;
+  }
+  .v-select__selection-text {
+    font-size: 15px !important;
+  }
+}
+
+// VExpansionPanelText 內 padding 對齊
+.advanced-search .v-expansion-panel-text__wrapper {
+  padding: 0 20px 20px 24px !important;
+}
+
+// =============================================================================
+// 強制:≥ 992px(lg) 隱藏 sidebar 內 X 關閉鈕 + navbar 漢堡按鈕
+// (Vuetify 的 d-lg-none class 在我們 custom thresholds 下沒生效)
+// =============================================================================
+@media (min-width: 992px) {
+  .layout-vertical-nav .header-action > * {
+    display: none !important;
+  }
+  .layout-navbar .v-btn.d-lg-none,
+  .layout-navbar .v-btn.d-xl-none {
+    display: none !important;
+  }
+}
+
+// =============================================================================
+// 表格樣式對齊 Materio 精確值(抓自實機:audit-logs 頁面)
+// th: 15px / 700 / uppercase / center / padding 8x16
+// td: 15px / 400 / center / padding 8x16
+// =============================================================================
+.v-table {
+  th {
+    font-size: 15px !important;
+    font-weight: 700 !important;
+    text-transform: uppercase !important;
+    text-align: center !important;
+    padding: 8px 16px !important;
+  }
+  tbody td {
+    font-size: 15px;
+    font-weight: 400;
+    padding: 8px 16px;
+  }
+}
+
+// AppHeader 右上 menu(< md 收折按鈕)— spacer 12px、prepend 緊湊
+.v-overlay__content .v-list-item__prepend {
+  > .v-list-item__spacer {
+    width: 12px !important;
+  }
+  > .v-icon {
+    margin-inline-end: 0 !important;
+  }
+}
+
+// 拿掉 sidebar 內 link / button 點選後的 focus outline / 黑色虛線
+.layout-vertical-nav a,
+.layout-vertical-nav button,
+.layout-vertical-nav .nav-link a,
+.layout-vertical-nav .nav-group-label,
+.layout-vertical-nav .header-action > * {
+  outline: none !important;
+  box-shadow: none;
+
+  &:focus,
+  &:focus-visible,
+  &:active {
+    outline: none !important;
+  }
+}
+
+// =============================================================================
+// 全域字體與基底（對齊 Materio 實際 computed style）
+// =============================================================================
+html,
+body {
+  font-family: 'Red Hat Mono', 'Noto Sans TC', 'Noto Sans SC', sans-serif,
+    'Apple Color Emoji', 'Segoe UI Emoji', 'Segoe UI Symbol', 'Noto Color Emoji';
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  background-color: #F8F7FA;
+  font-size: 15px;
+  font-weight: 400;
+  line-height: 1.5;
+  color: rgba(47, 43, 61, 0.7);
+  letter-spacing: 0;
+}
+
+// =============================================================================
+// VBtn 對齊 Materio：高度 38px、primary 色陰影、font-weight 500
+// =============================================================================
+.v-btn {
+  font-weight: 500 !important;
+  text-transform: none !important;
+  letter-spacing: 0 !important;
+  border-radius: 6px !important;
+
+  &.v-btn--size-default {
+    min-block-size: 38px;
+    padding: 0 20px !important;
+  }
+
+  // 主要按鈕（紫底）：primary 色 30% 陰影
+  &.bg-primary,
+  &.v-btn--variant-flat.text-primary,
+  &[class*="bg-primary"] {
+    box-shadow: 0 2px 6px 0 rgba(var(--v-theme-primary), 0.3) !important;
+  }
+}
+
+// 日曆裡的按鈕(月份／年份切換、日期格)維持 Vuetify 自己的尺寸:
+// 套上上面那組 38px 高、左右 20px 內距,月份列會撐到 364px,整份日曆跟著從 328px 變寬、
+// 手機放不下、最右一欄被切
+.v-date-picker .v-btn.v-btn--size-default {
+  min-block-size: 0;
+  padding: 0 12px !important;
+
+  &.v-btn--icon,
+  &.v-date-picker-month__day-btn {
+    padding: 0 !important;
+  }
+}
+
+// =============================================================================
+// VField 對齊 Materio：高度 38px、6px 圓角、input font-size 15px
+// =============================================================================
+.v-field {
+  border-radius: 6px !important;
+}
+
+.v-input--density-comfortable .v-field,
+.v-input--density-default .v-field {
+  --v-input-control-height: 38px !important;
+  min-block-size: 38px !important;
+}
+
+// 連帶 .v-field__input 也壓到 38
+.v-input--density-comfortable .v-field__input,
+.v-input--density-default .v-field__input {
+  min-block-size: 38px !important;
+  padding-block-start: 0 !important;
+  padding-block-end: 0 !important;
+}
+
+.v-field input,
+.v-field textarea,
+.v-field__input {
+  font-size: 15px !important;
+}
+
+// VSelect / VAutocomplete 文字字級也對齊
+.v-field .v-select__selection-text {
+  font-size: 15px !important;
+}
+
+// =============================================================================
+// Header card：outlined + 底邊紫色橫線 + icon 在淡紫色 rounded box
+// =============================================================================
+// 貼頂的頁首：底色要跟頁面一樣，否則頁首與下方卡片之間的縫會透出捲過去的內容；
+// 下緣留 12px 當作與內容的間距（卡片自己的 margin 在 sticky 容器外會被吃掉）
+.app-header-sticky {
+  position: sticky;
+  z-index: 3;
+  background: rgb(var(--v-theme-background));
+  padding-block: 0.75rem;
+  // 頁面內容區本身有上邊距，貼頂容器把它吃進 padding 裡，位置才跟沒貼頂的頁首一樣
+  margin-block-start: -0.75rem;
+
+  .app-header-card:last-child {
+    margin-block-end: 0;
+  }
+}
+
+.app-header-card {
+  display: flex;
+  align-items: center;
+  // 手機寬度下按鈕放不下時要換行。少了這行,按鈕會把標題壓成一字一行的直排,
+  // 按鈕多的頁面(分揀通道有三顆)甚至會把整個版面撐寬、逼瀏覽器縮小全頁字級。
+  flex-wrap: wrap;
+  // 間距對齊 cix3752iWeb 的頁首（px-3 py-2、mb-3、gap-x-6 gap-y-3）
+  padding: 0.5rem 0.75rem;
+  margin-block-end: 0.75rem;
+  background: rgb(var(--v-theme-surface));
+  border: 1px solid rgba(var(--v-theme-on-surface), 0.10);
+  border-radius: 6px;
+  position: relative;
+  column-gap: 1.5rem;
+  row-gap: 0.75rem;
+  min-block-size: 64px;
+  box-shadow: 0 2px 6px 0 rgba(var(--v-shadow-key-umbra-color), 0.06);
+
+  // 底邊紫色橫線
+  &::after {
+    content: '';
+    position: absolute;
+    inset-inline: 0;
+    inset-block-end: -1px;
+    block-size: 2px;
+    background: rgb(var(--v-theme-primary));
+    border-end-start-radius: 6px;
+    border-end-end-radius: 6px;
+  }
+
+  &__lead {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    // 基準 0:文字區只拿「放完按鈕後剩下的寬度」,說明太長就在自己格子裡折行;
+    // 基準若是內容寬,長說明會先把整排按鈕擠到下一列、頁首變成兩層
+    flex: 1 1 0;
+    // flex 子項預設 min-inline-size:auto,文字不會縮到比最長的詞還窄 ——
+    // 歸零才允許它換行,否則寧可撐破容器也不折行
+    min-inline-size: 0;
+  }
+
+  // 圖示 40px 配 1.25rem 標題（cix3752iWeb 的 50px 在這裡太大）；手機 32px、1.125rem
+  &__icon {
+    color: rgba(var(--v-theme-on-surface), 0.78);
+    flex: 0 0 auto;
+    font-size: 40px;
+  }
+
+  &__text {
+    display: flex;
+    flex-direction: column;
+    min-inline-size: 0;
+  }
+
+  // 文字區自己會撐滿中間,撐開器留著反而跟它平分寬度
+  > .v-spacer {
+    display: none;
+  }
+
+  &__actions {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+  }
+
+  &__title {
+    font-size: 1.25rem;
+    font-weight: 500;
+    line-height: 1.3;
+    color: rgba(var(--v-theme-on-surface), 0.9);
+  }
+
+  &__subtitle {
+    font-size: 0.875rem;
+    color: rgba(var(--v-theme-on-surface), 0.55);
+    margin-block-start: 2px;
+  }
+
+  // 手機:對齊 cix3752iWeb 的頁首 —— 圖示靠左、標題與說明在右、動作收成右上角一顆選單鈕。
+  // 各頁的 actions 插槽照同一套寫:桌面按鈕列 `d-none d-md-flex`,手機 `d-md-none` 的 34px 圖示鈕開 VMenu。
+  @media (max-width: 599.98px) {
+    padding: 0.5rem 0.75rem;
+    column-gap: 0.5rem;
+    row-gap: 0.75rem;
+
+    &__lead {
+      gap: 0.5rem;
+    }
+
+    &__icon {
+      font-size: 32px;
+    }
+
+    // 選單鈕保持自己的寬度靠右;若某頁在手機仍放整排按鈕,容器的 flex-wrap 會讓它們折到下一列
+    &__actions {
+      flex: 0 0 auto;
+
+      .d-flex {
+        flex-wrap: wrap;
+      }
+    }
+
+    &__title {
+      font-size: 1.125rem;
+    }
+  }
+}
+
+// =============================================================================
+// Sidebar logo（紫漸層）
+// =============================================================================
+.app-brand {
+  display: flex;
+  align-items: center;
+  gap: 0.625rem;
+  padding: 0.875rem 0.875rem;
+}
+
+.app-brand__logo {
+  inline-size: 36px;
+  block-size: 36px;
+  border-radius: 9px;
+  background: linear-gradient(135deg, #8F86F4 0%, #6358E8 60%, #4D43C8 100%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  box-shadow:
+    inset 0 1px 1px rgba(255, 255, 255, 0.25),
+    0 4px 10px rgba(115, 103, 240, 0.35);
+}
+
+.app-brand__title {
+  font-size: 1.15rem;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  line-height: 1;
+}
+
+// =============================================================================
+// Sidebar list 樣式
+// =============================================================================
+.v-navigation-drawer {
+  background: rgb(var(--v-theme-surface)) !important;
+  box-shadow: 0 2px 8px 0 rgba(var(--v-shadow-key-umbra-color), 0.12) !important;
+  border: 0 !important;
+
+  .v-list-subheader {
+    font-size: 13px !important;
+    font-weight: 400 !important;
+    color: rgba(var(--v-theme-on-surface), 0.4) !important;
+    padding: 0 12px !important;
+    margin: 12px 12px 6px !important;
+    min-block-size: 20px !important;
+    text-transform: none !important;
+    letter-spacing: 0 !important;
+  }
+
+  .v-list-item {
+    margin: 0 12px 6px !important;
+    padding: 0 12px !important;
+    border-radius: 6px !important;
+    min-block-size: 38px !important;
+
+    // 對齊 Materio：icon 22px、icon 右邊距 8px、title 15px
+    .v-list-item__prepend {
+      inline-size: auto !important;
+      min-inline-size: auto !important;
+      margin-inline-end: 0 !important;
+
+      > .v-icon {
+        font-size: 22px !important;
+        block-size: 22px !important;
+        inline-size: 22px !important;
+        margin-inline-end: 8px !important;
+        margin-inline-start: 0 !important;
+        opacity: 1 !important;
+        color: rgba(var(--v-theme-on-surface), 0.7);
+      }
+    }
+
+    .v-list-item__spacer { inline-size: 0 !important; }
+
+    .v-list-item-title {
+      font-size: 15px !important;
+      font-weight: 400 !important;
+      line-height: 1.5 !important;
+    }
+  }
+
+  .v-list-item--active {
+    background: linear-gradient(270deg, rgba(115, 103, 240, 0.7) 0%, rgb(115, 103, 240) 100%) !important;
+    color: #fff !important;
+    box-shadow: 0 2px 6px 0 rgba(115, 103, 240, 0.3) !important;
+
+    .v-list-item-title { color: #fff !important; font-weight: 500; }
+    .v-icon { color: #fff !important; }
+  }
+
+  // ===== Rail 模式下隱藏 nested 子項目（與 Materio 行為一致） =====
+  &.v-navigation-drawer--rail .v-list-group__items {
+    display: none !important;
+  }
+  &.v-navigation-drawer--rail .v-list-subheader {
+    display: none !important;
+  }
+
+  // ===== Nested 子節點：左側空心圓 dot + 縮排 =====
+  .v-list-group__items .nav-sub-item,
+  .nav-sub-item {
+    padding-inline-start: 36px !important;
+    position: relative;
+    min-block-size: 32px !important;
+
+    .v-list-item-title { font-size: 14px !important; }
+
+    &::before {
+      content: '';
+      position: absolute;
+      inset-inline-start: 18px;
+      inset-block-start: 50%;
+      transform: translateY(-50%);
+      inline-size: 6px;
+      block-size: 6px;
+      border-radius: 50%;
+      border: 1.5px solid rgba(var(--v-theme-on-surface), 0.45);
+      background: transparent;
+      transition: all 0.15s;
+      z-index: 1;
+    }
+    &:hover::before { border-color: rgb(var(--v-theme-primary)); }
+    &.v-list-item--active::before {
+      border-color: #fff;
+      background: #fff;
+    }
+  }
+}
+
+// =============================================================================
+// VCard
+// =============================================================================
+// 統一 VCard 樣式：白底 + 淡灰邊框 + 陰影
+// 蓋掉 vuetify outlined 預設用 currentColor 的黑框與 transparent 背景
+.v-card {
+  &.v-card--variant-elevated,
+  &.v-card--variant-outlined {
+    background: rgb(var(--v-theme-surface)) !important;
+    color: rgba(var(--v-theme-on-surface), var(--v-high-emphasis-opacity, 0.9)) !important;
+    border: 1px solid rgba(var(--v-theme-on-surface), 0.12) !important;
+    box-shadow:
+      0 2px 6px 0 rgba(var(--v-shadow-key-umbra-color), 0.10),
+      0 0 transparent,
+      0 0 transparent !important;
+  }
+}
+
+.card-shadow {
+  box-shadow: 0 2px 6px rgba(var(--v-shadow-key-umbra-color), 0.14), 0 0 transparent, 0 0 transparent !important;
+}
+
+.header-card-border-block-end {
+  border-block-end: 2px solid rgb(var(--v-theme-primary)) !important;
+}
+
+// =============================================================================
+// 工具 class
+// =============================================================================
+.text-medium-emphasis {
+  color: rgba(var(--v-theme-on-surface), var(--v-medium-emphasis-opacity, 0.7)) !important;
+}
+.text-high-emphasis {
+  color: rgba(var(--v-theme-on-surface), var(--v-high-emphasis-opacity, 0.9)) !important;
+}
+
+::-webkit-scrollbar { inline-size: 8px; block-size: 8px; }
+::-webkit-scrollbar-thumb { background: #DBDADE; border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: #BFBEC4; }
+::-webkit-scrollbar-track { background: transparent; }
+
+// =============================================================================
+// 樣式：bordered 模式 — 卡片只有邊框、無陰影
+// =============================================================================
+.style-bordered {
+  .v-card.v-card--variant-elevated,
+  .v-card.v-card--variant-outlined {
+    border: 1px solid rgba(var(--v-theme-on-surface), 0.18) !important;
+    box-shadow: none !important;
+  }
+}
+
+// 預設 style：陰影較重、邊框較淡（與 bordered 區分）
+.style-default {
+  .v-card.v-card--variant-elevated,
+  .v-card.v-card--variant-outlined {
+    border: 1px solid rgba(var(--v-theme-on-surface), 0.08) !important;
+    box-shadow:
+      0 4px 18px 0 rgba(var(--v-shadow-key-umbra-color), 0.10),
+      0 0 transparent,
+      0 0 transparent !important;
+  }
+}
+
+// =============================================================================
+// 內容寬度：compact = 限 1280；wide = 全寬
+// =============================================================================
+.content-compact .layout-page-content {
+  max-inline-size: 1280px;
+  margin-inline: auto !important;
+}
+.content-wide .layout-page-content {
+  max-inline-size: 100%;
+  margin: 4px 24px 0 !important;
+}
+
+// =============================================================================
+// 半暗色選單：sidebar 變深色，其他內容仍為亮色
+// =============================================================================
+.semi-dark .v-navigation-drawer {
+  background: #2F3349 !important;
+  color: #E1DEF5;
+
+  .app-logo__title { color: #E1DEF5 !important; }
+  .app-logo__toggle { color: rgba(225, 222, 245, 0.55); }
+  .v-list-subheader { color: rgba(225, 222, 245, 0.45) !important; }
+  .v-list-item-title { color: rgba(225, 222, 245, 0.9) !important; }
+  .v-list-item .v-icon { color: rgba(225, 222, 245, 0.7) !important; }
+
+  .v-list-item--active {
+    .v-list-item-title { color: #fff !important; }
+    .v-icon { color: #fff !important; }
+  }
+
+  .nav-sub-item::before {
+    border-color: rgba(225, 222, 245, 0.4);
+  }
+}
+
+// =============================================================================
+// 全域 placeholder 樣式 — 拉開與 value 的差異
+// Vuetify 預設 placeholder 與 disabled 文字幾乎同色,難辨別
+// =============================================================================
+.v-field__input::placeholder,
+.v-field input::placeholder,
+.v-field textarea::placeholder {
+  color: rgba(var(--v-theme-on-surface), 0.32) !important;
+  opacity: 1 !important;
+  font-style: italic;
+  font-weight: 400;
+}
+
+// VSelect / VCombobox 未選時內部 v-field-label 顯示為 placeholder 的情境
+.v-field .v-field__field .v-label.v-field-label:not(.v-field-label--floating) {
+  color: rgba(var(--v-theme-on-surface), 0.32) !important;
+  font-style: italic;
+  font-weight: 400;
+}
+
+// 書籤式分頁(面單預產輸入模式、現場作業監控廠別):選中頁籤與下方卡片同色接合
+.bookmark-tabs {
+  min-block-size: 42px;
+}
+.bookmark-tabs .v-tab.v-btn {
+  border-start-start-radius: 10px !important;
+  border-start-end-radius: 10px !important;
+  border-end-start-radius: 0 !important;
+  border-end-end-radius: 0 !important;
+  margin-inline-end: 3px;
+  min-block-size: 42px;
+  background: rgba(var(--v-theme-on-surface), 0.05);
+  color: rgba(var(--v-theme-on-surface), 0.6);
+  text-transform: none;
+  letter-spacing: normal;
+}
+.bookmark-tabs .v-tab.v-btn:last-child {
+  margin-inline-end: 0;
+}
+// 手機:四個書籤要一次全部露出,不能靠橫向捲動(使用者看不出還有第四個);
+// Vuetify 預設每個頁籤最小 90px 加左右 16px 內距,四個放不進 390px 的卡片
+@media (max-width: 599.98px) {
+  // 頁籤列的內容層預設可以比容器寬(那是給可橫捲的頁籤用的),這裡鎖成容器寬,
+  // 四個頁籤才會被迫平分而不是各自撐到內容寬
+  .bookmark-tabs .v-slide-group__content {
+    flex: 1 1 0;
+    min-inline-size: 0;
+    max-inline-size: 100%;
+  }
+
+  // 頁籤列與頁籤本身的高度都是 Vuetify 用變數鎖死的,要放開才容得下折成兩行的字
+  .bookmark-tabs.v-tabs,
+  .bookmark-tabs .v-slide-group__container,
+  .bookmark-tabs .v-slide-group__content {
+    block-size: auto !important;
+  }
+
+  .bookmark-tabs .v-tab.v-btn {
+    // grow 預設是 1 0 auto:基準是內容寬,長字串會把整列撐出去而不是折行;
+    // 改成基準 0 才會真的平分寬度
+    flex: 1 1 0;
+    min-inline-size: 0;
+    padding-inline: 6px !important; // 全域按鈕樣式用 !important 鎖了 20px 內距,要同樣強度才蓋得過
+    block-size: auto !important;
+    min-block-size: 42px;
+    font-size: 0.8125rem;
+
+    // 越南文頁籤名稱(例如「轉寄出貨」)一個字都放不下時折成兩行,而不是把整條頁籤列撐到要橫捲
+    .v-btn__content {
+      white-space: normal;
+      line-height: 1.25;
+      padding-block: 4px;
+    }
+  }
+}
+.bookmark-tabs .v-tab--selected {
+  background: rgb(var(--v-theme-primary)) !important;
+  color: #fff !important;
+  font-weight: 700;
+}
+.bookmark-card {
+  border-start-start-radius: 0 !important;
+  border-start-end-radius: 0 !important;
+}
+
+// =============================================================================
+// Vuetify 4 字級相容:codemod 把 MD2 class 換成 MD3 名稱後,Vuetify 內建的字級數值也跟著變
+// (標題 h6→title-large 變大變細、h3/h4/h1 變小、caption / subtitle 行高變小)。
+// 這裡把「實際使用中、且肉眼看得出差異」的幾個 class 鎖回 Vuetify 3 的數值,畫面維持升級前的樣子。
+// 未列出的(headline-small、body-medium)在 v4 數值本來就相同,不必覆寫。
+// =============================================================================
+// 官方對照把 subtitle-1 與 body-1 都併成 body-large,但兩者行高/字距不同;
+// 原本用 subtitle-1 的 6 處保留舊名,由本專案自己提供(Vuetify 4 不再內建)
+// 放進 Vuetify 自己的 vuetify-utilities.typography 層(不能用不分層的規則):不分層永遠壓過分層,
+// 會把後面 helpers 層的 font-weight-bold / font-weight-medium 一起蓋掉;同層且排在後面,只贏過 v4 的字級預設。
+@layer vuetify-utilities.typography {
+  .text-title-large { font-size: 1.25rem !important; font-weight: 500; line-height: 2rem; letter-spacing: 0.0125em !important; }
+  .text-headline-large { font-size: 2.125rem !important; line-height: 2.5rem; letter-spacing: 0.0073529412em !important; }
+  .text-display-medium { font-size: 3rem !important; line-height: 3.125rem; letter-spacing: normal !important; }
+  .text-body-large { line-height: 1.5rem; }
+  .text-subtitle-1 { font-size: 1rem !important; font-weight: 400; line-height: 1.75rem; letter-spacing: 0.009375em !important; font-family: var(--v-font-body, inherit); }
+  .text-body-small { line-height: 1.25rem; }
+}
+
+// Vuetify 4 的 VNumberInput 疊式(stacked)上下箭頭各是一顆 VBtn,預設最小高度 36px × 2,
+// 會把整個欄位撐到 72px、比旁邊 compact 欄位高一倍;讓箭頭鈕跟著欄位高度縮放。
+.v-number-input--stacked .v-number-input__control .v-btn {
+  min-block-size: 0;
+  block-size: auto;
+}
+
+// 可點擊圖示(VIcon 掛 @click,Vuetify 會給 tabindex 讓它可聚焦):滑鼠點完焦點留在圖示上,
+// WebKit 會畫內建焦點框(Vuetify 3/4 都沒為它定義樣式,只是 v4 配色基底不同讓框變色)。
+// 本 App 全為滑鼠/觸控操作,點完不留框;側欄收合鈕、各頁的圖示按鈕一併適用。
+.v-icon--clickable:focus,
+.v-icon--clickable:focus-visible {
+  outline: none;
+}
+
+// 提示訊息(VAlert)的語氣圖示:
+// 1. 尺寸 —— 預設 28px 圖示 + 16px 間距,在短訊息旁邊像多了一顆按鈕,把提示撐高。
+//    縮到與內文同高、間距收窄。
+// 2. 排版 —— 預設把圖示放在獨立一欄(grid:prepend content append close),文字只能用右半邊,
+//    窄版面時每行都被截短、右邊空一塊、短句被拆成好幾行。改成讓圖示浮動進文字流,
+//    第二行起就能流到圖示下方,整條提示的寬度用得完。
+.v-alert:not(.v-alert--prominent) {
+  display: block; // grid item 無法浮動,得先脫離 Vuetify 的四欄 grid
+
+  .v-alert__prepend {
+    // 高度取一行文字的行高、圖示在其中置中(Vuetify 本來就給它 display: flex),
+    // 圖示中線因此對齊第一行的字中,而不是貼著行頂
+    align-items: center;
+    block-size: 1.5em;
+    float: inline-start;
+    margin-inline-end: 0.375rem;
+    min-block-size: 0;
+    padding-block-start: 0;
+
+    > .v-icon {
+      block-size: 1.125rem;
+      font-size: 1.125rem;
+      inline-size: 1.125rem;
+    }
+  }
+
+  // 脫離 grid 後關閉鈕會掉到文字後面,改釘在右上角(.v-alert 本身已是 position: relative);
+  // 只有真的有關閉鈕的提示才把內容右邊空出來,免得每一則提示都白白少一截寬度。
+  .v-alert__close {
+    position: absolute;
+    inset-block-start: 0.375rem;
+    inset-inline-end: 0.5rem;
+  }
+
+  // Vuetify 給內容區 overflow: hidden,那會建立 BFC —— 整塊內容被整個推到浮動圖示右側,
+  // 每一行都縮排,等於 float 白做。外框(.v-alert)自己仍有 overflow: hidden,圓角照樣裁得住。
+  .v-alert__content {
+    overflow: visible;
+  }
+
+  &:has(.v-alert__close) .v-alert__content {
+    padding-inline-end: 1.25rem;
+  }
+}
+
+// toast 的線條圖示用 currentColor 上色,容器本身沒有顏色 → 依語氣給色,
+// 對齊 toast 內建的四種語氣色(成功綠、錯誤紅、警告橘、資訊藍)。
+.Toastify__toast--success .Toastify__toast-icon { color: var(--toastify-icon-color-success); }
+.Toastify__toast--error .Toastify__toast-icon { color: var(--toastify-icon-color-error); }
+.Toastify__toast--warning .Toastify__toast-icon { color: var(--toastify-icon-color-warning); }
+.Toastify__toast--info .Toastify__toast-icon { color: var(--toastify-icon-color-info); }
+
+// =============================================================================
+// 日曆彈窗(桌面用 VMenu 貼著輸入框開;手機由 AppDatePicker 改開置中對話框,不經這裡)
+// =============================================================================
+// 日曆維持 Vuetify 預設的 328px,不隨輸入框變寬(VMenu 預設會把彈窗最小寬度對齊輸入框)
+.app-date-picker-menu {
+  min-width: auto !important;
+}
+
+// =============================================================================
+// 起訖日期一組(對話框裡的「設定日期區間」)
+// =============================================================================
+// 一個日期欄含圖示與內距至少要 160px 才放得下「2026-09-11」;桌面對話框兩欄並排,
+// 手機對話框只有 300px 左右,硬並排會把日期最後一碼切掉,改成各佔一列、中間的「~」收起
+.date-range {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+
+  &__field {
+    flex: 1 1 160px;
+    min-inline-size: 160px;
+  }
+
+  @media (max-width: 599.98px) {
+    &__sep {
+      display: none;
+    }
+  }
+}
+
+// =============================================================================
+// 導覽列在手機的預算
+// =============================================================================
+// 360px 的螢幕扣掉頁面邊距與導覽列卡片自己的內距後只剩 270px,卻要放:漢堡、印單統計數字、
+// 清關進度、登出(外網時)、網路狀態、語系,五位數的統計一出現就把最右邊的語系擠出卡片。
+// 卡片內距與圖示鈕縮一點,把預算撐到 300px 以上
+@media (max-width: 599.98px) {
+  .layout-navbar .navbar-content-container {
+    padding-inline: 12px !important;
+  }
+
+  .layout-navbar .v-btn--icon.v-btn--size-small {
+    inline-size: 36px;
+    block-size: 36px;
+  }
+
+  .layout-navbar .v-chip .ms-2 {
+    margin-inline-start: 4px !important;
+  }
+}
+
+// =============================================================================
+// 卡片說明文字要能換行
+// =============================================================================
+// Vuetify 的 VCardSubtitle 預設單行、超出就用刪節號截掉。桌面寬度多半看得完,
+// 但手機寬度會把整段說明截成半句 —— 設定頁的說明正是用它寫的,截掉之後
+// 使用者看不出這個開關在做什麼。寧可佔兩三行,也不要只看到前半句。
+.v-card-subtitle {
+  white-space: normal;
+}
+
+// 標題同理,但只放寬手機:桌面標題幾乎不會超出,越南文標題(例如「工控機連線位址」)
+// 在手機上卻長到一半就被截成刪節號。頁面明確標了 text-truncate 的(袋號、單號這類
+// 折了行反而會被讀錯的識別碼)維持原本的截斷行為
+@media (max-width: 599.98px) {
+  .v-card-title:not(.text-truncate) {
+    white-space: normal;
+  }
+}
+
+// =============================================================================
+// 表格在手機上改成卡片式（.table-cards）
+// =============================================================================
+// 記錄類頁面的欄位多（請求記錄有 12 欄,整列寬度超過 1300px）,在手機上只看得到
+// 前兩欄,要看完一筆得左右滑好幾次。窄螢幕改成「一筆一張卡、欄名寫在每格左邊」,
+// 直著讀就看得完。
+//
+// 刻意不另外做一套手機版模板:那等於同一份資料維護兩份畫面,日後改欄位很容易漏掉一邊。
+// 欄名取自各 <td> 的 data-label，加新欄位時要一併補上，否則手機上那格會沒有名稱。
+@media (max-width: 599.98px) {
+  .table-cards {
+    .v-table__wrapper > table,
+    .v-table__wrapper > table > tbody {
+      display: block;
+      inline-size: 100%;
+    }
+
+    // 一筆一張卡要跟外面的卡片邊、上下的分頁列留點距離,不然卡貼著卡看起來像框線畫錯
+    .v-table__wrapper > table > tbody {
+      padding: 0.5rem 0.75rem 0.25rem;
+    }
+
+    // 表頭在卡片模式沒有意義（欄名改寫在每一格前面）
+    .v-table__wrapper > table > thead {
+      display: none;
+    }
+
+    .v-table__wrapper > table > tbody > tr {
+      display: block;
+      margin-block-end: 0.5rem;
+      padding-block: 0.25rem;
+      border: 1px solid rgba(var(--v-theme-on-surface), 0.12);
+      border-radius: 8px;
+
+      // 「查無資料」那一列只有一格橫跨整列,不是資料,不要畫成一張卡
+      &:has(> td[colspan]:only-child) {
+        border: none;
+        margin-block-end: 0;
+        padding-block: 0.75rem;
+      }
+    }
+
+    // 欄名靠左、內容全部靠右:靠「欄名撐開右邊距」而不是 space-between,
+    // 否則一格裡有兩顆按鈕(編輯／刪除)時會被拆到中間和右邊
+    .v-table__wrapper > table > tbody > tr > td {
+      display: flex !important;
+      align-items: center;
+      justify-content: flex-end !important;
+      gap: 0.75rem;
+      block-size: auto !important;
+      min-block-size: 0 !important;
+      padding: 0.375rem 0.75rem !important;
+      border: none !important;
+      text-align: end !important;
+
+      // 欄名可以縮、可以折行,數值不行:欄名與數值都很長時(作業監控「清關 · 件(剩 / 總)」配「4,467 / 4,672」)
+      // 若欄名不肯讓,整格會撐破卡片、數值被推到邊上
+      &::before {
+        content: attr(data-label);
+        flex: 1 1 auto;
+        min-inline-size: 0;
+        white-space: normal;
+        color: rgba(var(--v-theme-on-surface), 0.6);
+        font-size: 0.8125rem;
+        line-height: 1.3;
+        text-align: start;
+      }
+
+      // 數值本身(可能是好幾個 span 拼成「剩 / 總」)不縮、不折,一起留在右邊
+      > * {
+        flex: 0 0 auto;
+      }
+
+      // 「查無資料」這種橫跨整列的格子沒有欄名，維持置中
+      &[colspan] {
+        justify-content: center !important;
+        text-align: center !important;
+
+        &::before {
+          content: none;
+        }
+      }
+    }
+  }
+}
