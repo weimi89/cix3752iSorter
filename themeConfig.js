@@ -1,5 +1,5 @@
 import { h } from 'vue'
-import { breakpointsBootstrapV5 } from '@vueuse/core'
+import { breakpointsTailwind } from '@vueuse/core'
 import { VIcon } from 'vuetify/components/VIcon'
 import { defineThemeConfig } from '@core'
 import { Skins } from '@core/enums'
@@ -14,7 +14,7 @@ export const { themeConfig, layoutConfig } = defineThemeConfig({
     logo: h('div', { style: 'line-height:0; color: rgb(var(--v-global-theme-primary))' }, h(AppLogo)),
     contentWidth: ContentWidth.Fluid,
     contentLayoutNav: AppContentLayoutNav.Vertical,
-    overlayNavFromBreakpoint: breakpointsBootstrapV5.lg,
+    overlayNavFromBreakpoint: breakpointsTailwind.lg,
     i18n: {
       enable: true,
       defaultLocale: 'zh-Hant',

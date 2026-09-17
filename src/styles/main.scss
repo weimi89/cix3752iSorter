@@ -119,20 +119,6 @@ pre,
 }
 
 // =============================================================================
-// 強制:≥ 992px(lg) 隱藏 sidebar 內 X 關閉鈕 + navbar 漢堡按鈕
-// (Vuetify 的 d-lg-none class 在我們 custom thresholds 下沒生效)
-// =============================================================================
-@media (min-width: 992px) {
-  .layout-vertical-nav .header-action > * {
-    display: none !important;
-  }
-  .layout-navbar .v-btn.d-lg-none,
-  .layout-navbar .v-btn.d-xl-none {
-    display: none !important;
-  }
-}
-
-// =============================================================================
 // 表格樣式對齊 Materio 精確值(抓自實機:audit-logs 頁面)
 // th: 15px / 700 / uppercase / center / padding 8x16
 // td: 15px / 400 / center / padding 8x16
@@ -362,7 +348,7 @@ body {
 
   // 手機:對齊 cix3752iWeb 的頁首 —— 圖示靠左、標題與說明在右、動作收成右上角一顆選單鈕。
   // 各頁的 actions 插槽照同一套寫:桌面按鈕列 `d-none d-md-flex`,手機 `d-md-none` 的 34px 圖示鈕開 VMenu。
-  @media (max-width: 599.98px) {
+  @media (max-width: 639.98px) {
     padding: 0.5rem 0.75rem;
     column-gap: 0.5rem;
     row-gap: 0.75rem;
@@ -660,7 +646,7 @@ body {
 }
 // 手機:四個書籤要一次全部露出,不能靠橫向捲動(使用者看不出還有第四個);
 // Vuetify 預設每個頁籤最小 90px 加左右 16px 內距,四個放不進 390px 的卡片
-@media (max-width: 599.98px) {
+@media (max-width: 639.98px) {
   // 頁籤列的內容層預設可以比容器寬(那是給可橫捲的頁籤用的),這裡鎖成容器寬,
   // 四個頁籤才會被迫平分而不是各自撐到內容寬
   .bookmark-tabs .v-slide-group__content {
@@ -814,7 +800,7 @@ body {
     min-inline-size: 160px;
   }
 
-  @media (max-width: 599.98px) {
+  @media (max-width: 639.98px) {
     &__sep {
       display: none;
     }
@@ -827,7 +813,7 @@ body {
 // 360px 的螢幕扣掉頁面邊距與導覽列卡片自己的內距後只剩 270px,卻要放:漢堡、印單統計數字、
 // 清關進度、登出(外網時)、網路狀態、語系,五位數的統計一出現就把最右邊的語系擠出卡片。
 // 卡片內距與圖示鈕縮一點,把預算撐到 300px 以上
-@media (max-width: 599.98px) {
+@media (max-width: 639.98px) {
   .layout-navbar .navbar-content-container {
     padding-inline: 12px !important;
   }
@@ -855,7 +841,7 @@ body {
 // 標題同理,但只放寬手機:桌面標題幾乎不會超出,越南文標題(例如「工控機連線位址」)
 // 在手機上卻長到一半就被截成刪節號。頁面明確標了 text-truncate 的(袋號、單號這類
 // 折了行反而會被讀錯的識別碼)維持原本的截斷行為
-@media (max-width: 599.98px) {
+@media (max-width: 639.98px) {
   .v-card-title:not(.text-truncate) {
     white-space: normal;
   }
@@ -870,7 +856,7 @@ body {
 //
 // 刻意不另外做一套手機版模板:那等於同一份資料維護兩份畫面,日後改欄位很容易漏掉一邊。
 // 欄名取自各 <td> 的 data-label，加新欄位時要一併補上，否則手機上那格會沒有名稱。
-@media (max-width: 599.98px) {
+@media (max-width: 639.98px) {
   .table-cards {
     .v-table__wrapper > table,
     .v-table__wrapper > table > tbody {

@@ -130,7 +130,7 @@ const verticalNavAttrs = computed(() => {
     transition: padding-inline-start 0.2s ease-in-out;
     will-change: padding-inline-start;
 
-    @media screen and (min-width: 992px) {
+    @media screen and (min-width: 1024px) {
       padding-inline-start: variables.$layout-vertical-nav-width;
     }
   }
@@ -192,7 +192,7 @@ const verticalNavAttrs = computed(() => {
 
   // Adjust right column pl when vertical nav is collapsed
   &.layout-vertical-nav-collapsed .layout-content-wrapper {
-    @media screen and (min-width: 1200px) {
+    @media screen and (min-width: 1024px) {
       padding-inline-start: variables.$layout-vertical-nav-collapsed-width;
     }
   }

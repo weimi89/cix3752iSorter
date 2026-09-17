@@ -116,10 +116,10 @@ export default createVuetify({
     defaultTheme: 'light',
     themes: { light: lightTheme, dark: darkTheme },
   },
-  // Vuetify 4 把預設斷點縮小(md 840 / lg 1145 / xl 1545),側欄收合與 d-md-* 切換點會整個位移;
-  // 鎖回 v3 預設維持現行版面行為(SCSS 端 $grid-breakpoints 另在 styles/variables/_vuetify.scss)
+  // 與 styles/variables/_breakpoints.scss 同一組值（Tailwind 4）：JS 端 useDisplay()／mobile-breakpoint
+  // 與 CSS 端 d-md-*／v-col-* 各自獨立判斷，兩邊不一致就會出現「JS 說桌機、CSS 排手機」的區間
   display: {
-    thresholds: { md: 960, lg: 1280, xl: 1920, xxl: 2560 },
+    thresholds: { xs: 0, sm: 640, md: 768, lg: 1024, xl: 1280, xxl: 1536 },
   },
   icons: {
     defaultSet: 'iconify',

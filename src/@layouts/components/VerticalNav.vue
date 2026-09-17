@@ -249,7 +249,7 @@ const hideTitleAndIcon = configStore.isVerticalNavMini(isHovered)
 }
 
 // Small screen vertical nav transition — overlay mode 隱藏 sidebar
-@media (max-width: 991.98px) {
+@media (max-width: 1023.98px) {
   .layout-vertical-nav {
     &:not(.visible) {
       transform: translateX(-#{variables.$layout-vertical-nav-width});

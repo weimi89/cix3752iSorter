@@ -1,16 +1,8 @@
 // ❗ 路徑必須是相對的
-// @forward "../@core/template/libs/vuetify/variables";
+@use "./breakpoints" as bp;
 
-// ℹ️ 刪除上述導入，取消下方的註解以覆寫核心變數。
 @forward "../@core/template/libs/vuetify/variables" with (
-  $grid-breakpoints: (
-    "xs": 0,
-    "sm": 576px,
-    "md": 768px,
-    "lg": 992px,
-    "xl": 1200px,
-    "xxl": 1400px,
-  ) !default,
+  $grid-breakpoints: bp.$grid-breakpoints !default,
 
   $table-header-font-weight: 700,
   $table-font-size: .9375rem,

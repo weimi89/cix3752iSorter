@@ -1,0 +1,5 @@
+// vite-plugin-vuetify 的 styles.configFile：Vuetify 元件樣式編譯時載入這份，
+// 讓 d-*／v-col-*／text-*-h* 這些 class 的媒體查詢用我們的斷點，而不是 Vuetify 原廠值。
+// 只放斷點：樣板的其他 Vuetify 變數覆寫沒有經由這裡套用，這裡多放一個就會改到全站元件外觀。
+@use "./variables/breakpoints" as bp;
+@forward "vuetify/settings" with ($grid-breakpoints: bp.$grid-breakpoints);

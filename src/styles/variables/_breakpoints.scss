@@ -1,0 +1,11 @@
+// 全站唯一的響應式斷點來源（Tailwind 4 預設值）。
+// Vuetify 的 CSS class（d-md-*、v-col-lg-*、text-lg-h4…）、JS 端 useDisplay() 的 thresholds、
+// 側欄常駐／覆蓋的切換點都必須跟這裡一致，否則會出現「JS 說是桌機、CSS 排成手機」的錯位區間。
+$grid-breakpoints: (
+  "xs": 0,
+  "sm": 640px,
+  "md": 768px,
+  "lg": 1024px,
+  "xl": 1280px,
+  "xxl": 1536px,
+);

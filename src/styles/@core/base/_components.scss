@@ -108,7 +108,7 @@
   }
 }
 
-@media (min-width: 600px) {
+@media (min-width: 640px) {
   .v-dialog {
     &.v-dialog-sm,
     &.v-dialog-lg,
@@ -120,7 +120,7 @@
   }
 }
 
-@media (min-width: 960px) {
+@media (min-width: 1024px) {
   .v-dialog {
     &.v-dialog-lg,
     &.v-dialog-xl {
@@ -131,7 +131,7 @@
   }
 }
 
-@media (min-width: 1264px) {
+@media (min-width: 1280px) {
   .v-dialog.v-dialog-xl {
     .v-overlay__content {
       inline-size: 1165px !important;

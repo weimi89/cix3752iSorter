@@ -1,4 +1,4 @@
-import { breakpointsBootstrapV5 } from '@vueuse/core'
+import { breakpointsTailwind } from '@vueuse/core'
 import { AppContentLayoutNav, ContentWidth, FooterType, HorizontalNavType, NavbarType } from '@layouts/enums'
 
 export const layoutConfig = {
@@ -7,7 +7,7 @@ export const layoutConfig = {
     logo: h('img', { src: '/src/assets/logo.svg' }),
     contentWidth: ContentWidth.Boxed,
     contentLayoutNav: AppContentLayoutNav.Vertical,
-    overlayNavFromBreakpoint: breakpointsBootstrapV5.xl,
+    overlayNavFromBreakpoint: breakpointsTailwind.xl,
 
     // isRTL: false,
     i18n: {

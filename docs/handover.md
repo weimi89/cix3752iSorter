@@ -182,3 +182,75 @@
 1. 主人在正式機實裝 GHA 產出的 `cix3752iSorter-<ver>-ubuntu-20.04.tar.gz`（`sudo bash install.sh`），預設埠 18090 已避開舊系統的 8080
 2. ~~設定轉換腳本~~ 不需要：`config/mod.rs` 的預設值與 `migrations/0001_init.sql` 的格口初值就是現場 `conf.json`／`gkconfig.json`／舊 `chute` 表的值，首次啟動自動產生的設定即可用（網頁埠預設 18090，不會撞到舊系統的 8080）
 3. ~~IR 光電檢查頁~~、~~supervisor 切換與回退步驟~~（都完成，見 `docs/cutover.md`）；剩：推 GitHub 跑發版、正式機實裝、實印一張對比、`p1` 格式確認
+
+## 2026-09-16
+
+### 正式機首次 `to-new` 失敗、重開機舊程式回來 — 根因已查明，切換工具已修（待裝回正式機）
+
+**現象**：v0.1.1 已裝在工控機（`chipsort@chipsort-YL-CFL42L`，SSH 別名 `cat-taoyuan`）。主人跑 `sorter-switch to-new` 後重開機，舊程式又被 supervisor 拉起來搶走相機（讀碼站紅燈）；新程式也一起自動啟動，**兩邊同時連著皮帶／分揀機**（`ss` 看到 4 條 `:10006` ESTAB，新程式每 5 分鐘重連時送 `Kx999;Kk2`、`KL`、`KM998 1`）。
+
+**根因（依 supervisord.log、新程式日誌與 `ss` 實證）**：
+
+| # | 問題 | 證據 | 修法（`deploy/switch.sh`） |
+|---|---|---|---|
+| 1 | `to-new` 第 2 步「分揀機／皮帶連線關閉」用 `ss -tn` 數**所有** `:10006` socket：主人切換前已從選單開了新程式，舊程式一停它就接上裝置，檢查永遠過不了 → `die`，第 3 步「.ini 改 .off」沒跑到 → 重開機 supervisor 照舊拉起 | supervisord.log 13:31:14 stop 兩程式；新程式日誌 13:28 啟動、13:31:16 綁埠；`conf.d/` 仍是 `.ini` | 新程式已開著先關掉再走流程；只數 `state established`（剛結束的 socket 會在 FIN_WAIT／TIME_WAIT 留一分鐘）；先等舊程式行程結束再等埠位 |
+| 2 | `to-old` 拿掉自動啟動用 `xargs rm`，`.desktop` 檔名「智配通 分揀控制.desktop」含空白，被切成兩個不存在的檔 → 從沒刪成功 | 我在機上用同寫法試刪，檔還在；改 `-Z`／`-0` 後刪掉 | `autostart_files` 改 NUL 分隔，`xargs -0`；刪完再驗一次沒刪掉就 `die` |
+| 3 | `status` 沒警告「新舊同時在跑」 | — | 兩邊都 RUNNING 時印 `!!` 警告 |
+
+**當下處置（已做）**：在機上 `pkill -x sorter` 停掉新程式、刪掉它的自動啟動檔，回到「舊程式在跑、新程式只裝不跑」的安全狀態；修好的 `switch.sh` 已放到工控機 `~/下载/cix3752iSorter-0.1.1-ubuntu-20.04/switch.sh`。
+
+**另外發現**：切換當時新程式的相機埠曾被改成 `0.0.0.0:8050`（13:31:16 日誌「相機監聽啟動 addr=0.0.0.0:8050」），現在 `config.toml` 已是 8051。相機硬體只認 8051，8050 是舊 Go 收 Node 轉碼用的中轉埠，新架構沒有。
+
+**同日 14:13–14:19 第二、三次 `to-new` 又各卡一個地方，都已修**：
+
+| # | 卡點 | 修法 |
+|---|---|---|
+| 4 | 我改的「等舊程式行程結束」用 `bash -c "pgrep -f 'ecs1000\|…'"`，`pgrep -f` 把跑檢查的 bash 自己的命令列也比對進去 → 永遠「還在」→ 中斷（此時舊已停、新沒起，**線上沒有程式在控制**） | 樣式改 `[e]cs1000\|[t]wfilter…` |
+| 5 | 主人從 SSH 終端機（`pts/0`）跑 `to-new`，沒有 `DISPLAY`，視窗程式在寫日誌前就結束，第 4 步 40 秒逾時；輸出導到 `/dev/null` 什麼痕跡都沒有 | `start_new` 沒 `DISPLAY` 時從登入中的 `gnome-shell` 借 `DISPLAY`／`XAUTHORITY`／`DBUS_SESSION_BUS_ADDRESS`；啟動輸出改留 `data/logs/sorter-launch.log`，逾時時印最後 15 行 |
+
+**14:17 切換完成（我從 SSH 借桌面環境起的）**：新程式在跑、皮帶／分揀機／讀碼站（相機 `192.168.177.20`）三個都連線、`/api/health` 正常、`conf.d/` 兩個 `.ini.off`、自動啟動已登記。修好的 `switch.sh`（含 #4、#5）已在機上 `~/下载/…/switch.sh` 並實測從無 `DISPLAY` 的 SSH 起得來，**但 `/usr/local/bin/sorter-switch` 還是舊的**，要主人再 `sudo install` 一次。
+
+**待主人**：
+1. `sudo install -m 755 ~/下载/cix3752iSorter-0.1.1-ubuntu-20.04/switch.sh /usr/local/bin/sorter-switch`（裝最終版切換工具）
+2. 照 `docs/cutover.md` 7 項驗收：掃一件、印一張、中介機收到回報、光電檢查
+3. 驗完重開機一次，確認舊程式不回來、新程式自己起、三燈綠
+
+**未做的改進（要不要做請主人決定）**：新程式每次啟動都會登記自動啟動並連裝置，不會偵測舊程式還在跑。若現場有人不小心點開它，就會回到「兩邊同時下指令」的狀態。可在程式啟動時偵測 `ecs1000` 行程存在就不連裝置、不登記自動啟動並在看板顯示「舊程式還在跑」，需要出新版才生效。
+
+### 套件升級（2026-09-17）— 完成，未 commit
+
+| 端 | 升了什麼 | 附帶修改 |
+|---|---|---|
+| Rust | `cargo update` 20 個間接相依（clap 4.6.7、rustls 0.23.45、quinn…）；**ulid 1.2.1 → 3.0.0**（major） | ulid 2.0 把 `Ulid::new()` 改名，3.0 定名 `Ulid::generate()`；5 處呼叫點改名，輸出字串格式不變 |
+| 前端 | vuetify 4.1.12 → **4.2.1**（寫死版號，手改）；@vueuse/core 14.4.0 → **15.0.0**（major）；@vitejs/plugin-vue 6.0.9、vue-i18n 11.4.12 | Vuetify 4.2 移除三個 Sass 變數（`$select-chips-margin-bottom`、`$switch-inset-thumb-off-width`、`$table-row-font-size`），樣板有覆寫 → 建置失敗。對照 4.1.12 原始包確認**三個在 4.1.12 就沒被任何樣式使用**，直接拿掉覆寫，畫面不變；`_overrides.scss` 引用從未定義的 `var(--select-chips-margin-bottom)` 那條規則一併移除（專案沒有自訂 selection 插槽，本來就沒命中） |
+
+VueUse 15 的破壞性變更（拿掉 `templateRef`、`useThrottleFn` trailing 預設改 true、`useEventSource`／`useIDBKeyval` 行為、不支援 Node 20）專案都沒用到；`useTimeoutFn` 的 `immediate` 仍支援。
+
+**驗證**：`cargo check --all-targets`、`cargo test`（83+2 綠）、`yarn build`、`yarn audit`（0）、`cargo audit`（0 漏洞；7 個 unmaintained／unsound 警告全來自 Tauri 2 的 gtk／glib 0.18 與 urlpattern 鏈，上游未換）、本機 headless 起後端開瀏覽器看板／系統設定／光電檢查三頁：版面正常、console 零訊息。
+
+**升不上去的**：axum 0.8.9 把 `matchit` 釘在 0.8.4；`crypto-common` 0.1.7 會把 generic-array 降版，cargo 自己不選。皆上游決定。
+
+**既有、非本次造成**：`pinia@4.0.3` 要 peer `@vue/devtools-api ^8`，頂層裝的是 6.6.4（vue-router／vue-i18n 帶的）；只影響開發工具，正式建置不含 devtools 程式碼。
+
+**GHA 未跑**：Linux 20.04 的建置要推上去打 tag 才會驗到，本機只驗了 macOS 的 cargo 與前端。
+
+### RWD 斷點統一為 Tailwind 4（2026-09-17）— 完成，未 commit
+
+**改前**是三套各說各話：Vuetify 的 CSS class（`d-md-*`、`v-col--lg`）用原廠 600/840/1145/1545（樣板的 `$grid-breakpoints` 覆寫根本沒接到 vite-plugin-vuetify，形同虛設）；JS `useDisplay()` 是 600/960/1280/1920；側欄覆蓋點 992（Bootstrap lg）；`main.scss` 另有一段「≥992 強制藏漢堡鈕」的補丁去掩蓋 `d-lg-none` 對不上的問題。
+
+**改後**全部 640／768／1024／1280／1536，單一來源 `src/styles/variables/_breakpoints.scss`：
+
+| 位置 | 做法 |
+|---|---|
+| `src/styles/vuetify-settings.scss`（新）＋ `vite.config.js` `styles.configFile` | 只把 `$grid-breakpoints` 餵給 Vuetify 元件樣式編譯；**刻意不接樣板整份 `_vuetify.scss`**，接了會把 120 個 Vuetify 變數覆寫一起套到全站元件外觀 |
+| `src/styles/variables/_vuetify.scss` | `$grid-breakpoints` 改引用同一來源 |
+| `src/plugins/vuetify.js` `display.thresholds` | 寫滿六級同一組值 |
+| 側欄切換點四處 | `themeConfig.js`／`@layouts/config.js` 改 `breakpointsTailwind`；`VerticalNavLayout.vue` 兩條 `min-width` 與 `VerticalNav.vue` 的 `max-width` 改 1024／1023.98 |
+| 硬寫媒體查詢 | `main.scss` 六條手機規則 599.98→639.98；`_components.scss` dialog 尺寸 600/960/1264→640/1024/1280；`styles.scss` 1200→1280 |
+| 刪掉 | `main.scss` 的「≥992 強制隱藏」補丁：`d-lg-none` 現在真的在 1024 切，且它的第一條選擇器 `.header-action` 在本專案根本沒渲染（`DefaultLayout.vue` 用自己的 nav-header 插槽） |
+
+**順手修正原本對不上的**：`VerticalNavLayout.vue` 側欄收合後的內容內距原本寫 1200、側欄常駐卻是 992，992～1199 之間收合側欄內容不會縮進；現在兩者同為 1024，實測 1024 收合後內距 70px。
+
+**驗證**：打包 CSS 只剩 640/768/1024/1280/1536 與對應 `.98`（480 是 Toastify、430/399.98 是元件微尺寸）；瀏覽器縮放 639/640、767/768、1023/1024、1279/1280、1535/1536 各一次：側欄常駐↔覆蓋與漢堡鈕、`layout-overlay-nav` class、`d-md-*` 切換、VCol 欄寬、導覽列手機內距全部在同一像素切換，漢堡鈕點開覆蓋側欄正常。
+
+**死檔已搬走**（裡面留著舊數字會誤導下次盤點；都沒被引用）：`src/plugins/vuetify-materio/`、`src/@core/libs/apex-chart/apexCharConfig.js`（專案用 echarts，沒裝 apexcharts）、`src/styles/@core/template/pages/page-auth.scss`、`libs/shepherd.scss` → `backups/20260917092551/{原結構}`（2026-09-17 09:25，搬完 `yarn build` 通過）。
