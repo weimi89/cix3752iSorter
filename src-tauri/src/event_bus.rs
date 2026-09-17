@@ -34,10 +34,16 @@ mod tests {
     #[tokio::test]
     async fn 訂閱者收得到送出的事件() {
         let mut rx = subscribe();
-        emit("device-state", serde_json::json!({ "device": "belt", "connected": true }));
-        let got = rx.recv().await.expect("應收到事件");
-        assert_eq!(got.event, "device-state");
-        assert_eq!(got.payload["device"], "belt");
+        // 匯流排是全程序共用的，其他平行測試的事件也會進來；只認自己這一則，不能拿第一則就斷言
+        let marker = format!("bus-test-{}", ulid::Ulid::generate());
+        emit("device-state", serde_json::json!({ "device": marker, "connected": true }));
+        loop {
+            let got = rx.recv().await.expect("應收到事件");
+            if got.event == "device-state" && got.payload["device"] == marker {
+                assert_eq!(got.payload["connected"], true);
+                break;
+            }
+        }
     }
 
     #[test]

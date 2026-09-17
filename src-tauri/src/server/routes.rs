@@ -1,10 +1,13 @@
 //! REST 端點。回應一律 JSON，錯誤回 `{ "error": "..." }`。
 //!
-//! 內網工具、程式由自己維護，不設操作密碼：所有端點免認證。
+//! 認證在 `auth.rs` 的中介層統一處理：內網免登入，外網要共用密碼；
+//! 這裡只有「換門鎖」的兩件事（存取設定、密碼）另外要求來源必須在內網。
+
+use std::net::SocketAddr;
 
 use axum::{
     Json, Router,
-    extract::{Path, Query, State},
+    extract::{ConnectInfo, Path, Query, State},
     http::{StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -58,6 +61,7 @@ pub(super) fn api_router() -> Router<ServerState> {
         .route("/stats/daily", get(stats_daily))
         .route("/stats/hourly", get(stats_hourly))
         .route("/config", get(config_get).put(config_put))
+        .route("/web-auth/password", get(web_auth_password_get).put(web_auth_password_put))
         .route("/chutes", get(chutes_get).put(chutes_put))
         .route("/belt/start", post(belt_start))
         .route("/belt/stop", post(belt_stop))
@@ -415,16 +419,85 @@ async fn config_get(State(state): State<ServerState>) -> ApiResult<AppConfig> {
     Ok(Json(state.app.config.current()))
 }
 
-async fn config_put(State(state): State<ServerState>, Json(cfg): Json<AppConfig>) -> ApiResult<serde_json::Value> {
+async fn config_put(
+    State(state): State<ServerState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Json(cfg): Json<AppConfig>,
+) -> ApiResult<serde_json::Value> {
+    let external = super::auth::guard_web_access_change(&state, peer.ip(), &cfg.web_access).map_err(|m| ApiError(StatusCode::FORBIDDEN, m))?;
     for b in &cfg.emergency_buttons {
         if b.bit > 7 {
             return Err(bad(format!("按鈕「{}」的位元必須在 0–7", b.describe)));
         }
     }
     cfg.server.bind.parse::<std::net::SocketAddr>().map_err(|_| bad("網頁監聽位址格式錯誤"))?;
-    state.app.config.update(cfg).await?;
+    for c in &cfg.web_access.lan_cidrs {
+        c.parse::<ipnet::IpNet>().map_err(|_| bad(format!("內網網段「{c}」不是有效的 CIDR（例如 192.168.0.0/16）")))?;
+    }
+    // 安全參數的上下限不能只靠畫面：設定檔可以手改、API 可以直接打；超出範圍的值會讓鎖定形同虛設
+    // 或讓 SQLite 的時間運算回 NULL
+    let w = &cfg.web_access;
+    if !(1..=720).contains(&w.session_hours) {
+        return Err(bad("登入後可用時數必須在 1–720 小時"));
+    }
+    if !(1..=50).contains(&w.max_fail_attempts) {
+        return Err(bad("密碼可錯次數必須在 1–50"));
+    }
+    if !(1..=1440).contains(&w.lock_minutes) {
+        return Err(bad("鎖住分鐘數必須在 1–1440"));
+    }
+    // 外網來源：不管送來的 web_access 長怎樣，一律以拿到寫入鎖當下的現況為準——
+    // 只比對不覆蓋的話，外網拿著舊快照就能把內網剛改好的設定蓋回去
+    state
+        .app
+        .config
+        .update_with(move |current| {
+            let mut next = cfg;
+            if external {
+                next.web_access = current.web_access.clone();
+            }
+            next
+        })
+        .await?;
     event_log::log(&state.app.db, Level::Info, "server", "config", String::from("設定已更新"));
     Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// 是否已設定網頁存取密碼（不回雜湊本身）
+async fn web_auth_password_get(State(state): State<ServerState>) -> ApiResult<serde_json::Value> {
+    let set = super::auth::stored_password_hash(&state.app.db).await?.is_some();
+    Ok(Json(serde_json::json!({ "password_set": set })))
+}
+
+#[derive(Deserialize)]
+struct SetPasswordBody {
+    password: String,
+}
+
+/// 設定或清除網頁存取密碼；只准在工控機本機或現場網路內做（見 auth::guard_lan_only）
+async fn web_auth_password_put(
+    State(state): State<ServerState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Json(body): Json<SetPasswordBody>,
+) -> ApiResult<serde_json::Value> {
+    super::auth::guard_lan_only(&state, peer.ip(), "更換網頁存取密碼").map_err(|m| ApiError(StatusCode::FORBIDDEN, m))?;
+    let pw = body.password.trim().to_string();
+    // 對外只有這一組密碼，短密碼等於沒有
+    if !pw.is_empty() && pw.chars().count() < 8 {
+        return Err(bad("網頁存取密碼至少需要 8 個字元"));
+    }
+    if pw.chars().count() > super::auth::PASSWORD_MAX_CHARS {
+        return Err(bad(format!("網頁存取密碼最多 {} 個字元", super::auth::PASSWORD_MAX_CHARS)));
+    }
+    super::auth::set_password(&state.app.db, &pw).await?;
+    event_log::log(
+        &state.app.db,
+        Level::Info,
+        "security",
+        "password",
+        if pw.is_empty() { "網頁存取密碼已清除，外部連線將無法登入" } else { "網頁存取密碼已更新，已登入的連線都需要重新輸入" },
+    );
+    Ok(Json(serde_json::json!({ "ok": true, "password_set": !pw.is_empty() })))
 }
 
 #[derive(serde::Serialize, serde::Deserialize, sqlx::FromRow)]
@@ -476,9 +549,8 @@ async fn chutes_put(State(state): State<ServerState>, Json(list): Json<Vec<Chute
     if let Some(r) = state.app.resolver.get() {
         r.set_chutes(map);
     }
-    // 狀態機經設定 watch 重載（送一次相同設定即可觸發）
-    let cfg = state.app.config.current();
-    state.app.config.update(cfg).await?;
+    // 狀態機經設定 watch 重載：只通知、不重寫設定檔
+    state.app.config.touch();
     event_log::log(&state.app.db, Level::Info, "server", "chutes", String::from("格口對照已更新"));
     Ok(Json(serde_json::json!({ "ok": true })))
 }

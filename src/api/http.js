@@ -5,6 +5,10 @@
  */
 import { apiBase } from '@/api/runtime'
 
+/** 收到 401 時通知外層（main.js）導向登入頁 */
+let onUnauthorized = null
+export const setUnauthorizedHandler = fn => { onUnauthorized = fn }
+
 /** 空字串／null 的查詢參數不送，後端一律當「不篩選」 */
 const qs = params => new URLSearchParams(Object.entries(params || {}).filter(([, v]) => v !== '' && v != null && v !== undefined))
 
@@ -17,14 +21,25 @@ async function request(method, path, body, { raw = false } = {}) {
   } catch (e) {
     throw new Error(`無法連線到分揀控制服務：${e.message}`)
   }
+  if (res.status === 401) {
+    onUnauthorized?.()
+    const err = new Error('尚未登入或登入已逾期')
+    err.status = 401
+    throw err
+  }
   if (!res.ok) {
     let message = `伺服器回應 ${res.status}`
+    let code = ''
     try {
       const j = await res.json()
       if (j?.error) message = j.error
+      if (j?.code) code = j.code
     } catch { /* 非 JSON 錯誤頁 */ }
+    // 外網使用者登入中被關掉「開放外部連線」：所有請求都變 403，帶回登入頁說明原因
+    if (res.status === 403 && code === 'not_public') onUnauthorized?.()
     const err = new Error(message)
     err.status = res.status
+    err.code = code
     throw err
   }
   if (raw) return res
@@ -51,6 +66,8 @@ export const api = {
 
   config: () => request('GET', '/api/config'),
   saveConfig: cfg => request('PUT', '/api/config', cfg),
+  webAuthPassword: () => request('GET', '/api/web-auth/password'),
+  setWebAuthPassword: password => request('PUT', '/api/web-auth/password', { password }),
   chutes: () => request('GET', '/api/chutes'),
   saveChutes: list => request('PUT', '/api/chutes', list),
 

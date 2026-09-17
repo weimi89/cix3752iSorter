@@ -127,6 +127,7 @@
     state.busy = true; render();
     try {
       const r = await fetch('/api/belt/' + action, { method: 'POST' });
+      if (r.status === 401) { requireLogin(); return; }
       if (!r.ok) {
         // 服務重啟中會回非 JSON 的錯誤頁，先拿文字再試著解析
         const text = await r.text();
@@ -143,9 +144,15 @@
   }
   $('beltBtn').addEventListener('click', control);
 
+  // 從外網開這頁而還沒登入時，後端回 401；帶去主畫面的登入頁，登入後會跳回來
+  function requireLogin() {
+    location.replace('/#/login?redirect=' + encodeURIComponent('/control'));
+  }
+
   async function refresh() {
     try {
       const r = await fetch('/api/status');
+      if (r.status === 401) { requireLogin(); return; }
       const d = await r.json();
       for (const k of ['belt', 'sorter', 'camera']) state.devices[k] = !!(d.devices && d.devices[k] && d.devices[k].connected);
       state.tracker = d.tracker;

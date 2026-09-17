@@ -73,6 +73,15 @@ rust_xlsxwriter = "0.99.0"
 semver = "1.0.28"
 hex = "0.4.3"
 
+# 網頁存取控制（外網要密碼）
+# argon2：共用密碼的雜湊（慢雜湊，擋離線暴力破解）
+# sha2：session token 的雜湊（token 本身是高熵亂數，不需要慢雜湊，每次請求都要驗）
+# ipnet：內網網段（CIDR）比對；uuid：session token 的亂數來源
+argon2 = "0.6"
+sha2 = "0.11"
+ipnet = "2"
+uuid = { version = "1", features = ["v4"] }
+
 [profile.release]
 lto = "thin"
 codegen-units = 1

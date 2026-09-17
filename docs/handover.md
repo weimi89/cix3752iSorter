@@ -254,3 +254,28 @@ VueUse 15 的破壞性變更（拿掉 `templateRef`、`useThrottleFn` trailing �
 **驗證**：打包 CSS 只剩 640/768/1024/1280/1536 與對應 `.98`（480 是 Toastify、430/399.98 是元件微尺寸）；瀏覽器縮放 639/640、767/768、1023/1024、1279/1280、1535/1536 各一次：側欄常駐↔覆蓋與漢堡鈕、`layout-overlay-nav` class、`d-md-*` 切換、VCol 欄寬、導覽列手機內距全部在同一像素切換，漢堡鈕點開覆蓋側欄正常。
 
 **死檔已搬走**（裡面留著舊數字會誤導下次盤點；都沒被引用）：`src/plugins/vuetify-materio/`、`src/@core/libs/apex-chart/apexCharConfig.js`（專案用 echarts，沒裝 apexcharts）、`src/styles/@core/template/pages/page-auth.scss`、`libs/shepherd.scss` → `backups/20260917092551/{原結構}`（2026-09-17 09:25，搬完 `yarn build` 通過）。
+
+### 網頁後台外網存取（密碼登入）— 完成，本機實測，雙層覆檢已修，已 commit
+
+與 LabelPrint 同一套設計搬過來（見其 `server/auth.rs`），差別是 Sorter 前端本來就走 HTTP，不需要 RPC 橋接，只加存取控制這一層：
+
+| 位置 | 內容 |
+|---|---|
+| `config/mod.rs` `WebAccessConfig` | `enabled`（預設關）、`lan_cidrs`、`session_hours`、`max_fail_attempts`、`lock_minutes` |
+| `migrations/0002_web_auth.sql` | `app_setting`（密碼雜湊）、`web_session`、`web_login_attempt` |
+| `server/auth.rs` | 中介層：跨站檢查（先於內網放行；桌面 `tauri://localhost` 與 Vite 來源信任清單與 CORS 共用）→ 帶內容的寫入必須 JSON → 內網放行 → 外網：開關關則 403、靜態殼與 `/auth/*` 放行、`/api/`／`/events/` 要 session。登入流程序列化鎖、鎖定查詢失敗即拒絕。`/auth/status`、`/auth/login`、`/auth/logout` |
+| `server/routes.rs` | `PUT /api/config` 外網不得改 `web_access`；`GET/PUT /api/web-auth/password`（PUT 僅限內網，至少 8 字） |
+| `server/events.rs` | SSE 每 60 秒重驗（登出／逾期／被移出內網就收線） |
+| 前端 | `composables/useWebAuth.js`、`pages/LoginPage.vue`（登入頁不套主版面）、路由守衛、`http.js` 401 → 導回登入頁、導覽列登出鈕（只有外網登入者看得到）、系統設定新增「網頁存取」區、`control_page.html` 401 導向登入並登入後跳回 |
+| `main.js` | `await router.isReady()` 再掛載：否則登入頁那一瞬間會先套主版面打 `/api/status`，401 觸發導向把 `redirect` 洗掉（實測抓到才加的） |
+
+**實測（本機用區網 IP 當外網：`lan_cidrs` 只留 10/8，從 192.168.36.52 打）**：開關關閉外網 `/`、`/auth/status`、`/api/*` 全 403、本機正常；開啟後外網 `/`、`/control` 200、`/api/status`、`/events/stream` 401；短密碼被拒；錯 3 次第 4 次 429、鎖定期正確密碼也 429、60 秒後登入成功拿 cookie；帶 cookie `/api/status`、`/events/stream` 200；外網換密碼 403、改 `lan_cidrs` 403、`web_access` 不變改別的設定 200；登出後 401；跨站 Origin／`Sec-Fetch-Site: cross-site` 403、頂層導覽放行、`tauri://localhost` 放行、`text/plain` 帶內容 415、無內容 POST 照常；登出後 60 秒內既有 SSE 收線。瀏覽器：登入頁、錯誤訊息、登入後回原頁、登出鈕、設定頁「網頁存取」區、外網改設定與清密碼各自吐出正確錯誤、`/control` 未登入導向登入並登入後跳回、console 零訊息。
+
+**第一層覆檢（code-review high）抓到並已修、已覆驗**：① 跨站 `<form method="POST">` 的標頭與頂層導覽一樣（document/navigate），空表單連內容型別檢查都過 → 豁免只給 GET/HEAD；② 桌面視窗的 `<img>` 預覽（列印任務縮圖）不帶 `Origin`、`Sec-Fetch-Site: cross-site` 會被誤擋 → 沒有 `Origin` 時改看 `Referer` 的來源是否在信任清單（網頁可不送但不能偽造）；③ 對外未開放時登入頁誤顯示「尚未設定密碼」→ 後端 403 帶 `code: not_public`，登入頁改顯示「未開放外部連線」；④ 登入中被關掉開關會原地一直跳 403 → `http.js` 收到 `not_public` 也走導回登入頁。四項都用 curl 與瀏覽器重驗過。
+
+**第二層覆檢（Codex 獨立審查）抓到並已修、已覆驗**：H1 設定更新沒有序列化，外網拿舊快照回寫能把內網剛改的 `web_access` 蓋回去 → `ConfigHandle` 加寫入鎖與 `update_with()`，外網來源寫入時一律以鎖內現況覆蓋 `web_access`；`chutes_put` 改 `touch()` 只通知不重寫檔；H2 改密碼與登入沒共用鎖、寫雜湊與清 session 不在同一交易 → 共用 `LOGIN_LOCK` 且同一交易；H4 `/auth/login` 吃全站 64 MiB 上限 → 該路由 4 KiB、密碼上限 128 字、全站縮到 1 MiB（更新上傳端點早已移除）；M1 鎖定鍵改 IPv6 以 /64 為單位、失敗紀錄一天沒動就清；L1 內容型別精確比對 `application/json`；L2 `session_hours`／`max_fail_attempts`／`lock_minutes` 後端加上下限。
+**接受不改的**：H3 反向代理／tunnel 部署會讓全部外網被當內網——現場是路由器直接轉埠，README 已寫明前提；M2 三種標頭全缺時放行——只有非瀏覽器客戶端會這樣，現代瀏覽器跨站請求至少帶 `Sec-Fetch-Site` 或 `Origin`，要再收緊得改成 CSRF token；M3 桌面 `<img>` 靠 `Referer: tauri://localhost/` 放行沒在 WebKitGTK 實機驗過，若正式機列印預覽圖 403 就改成前端 `fetch` 取 blob 再塞 `<img>`。
+
+**沒驗到**：桌面視窗（Tauri）實機——來源信任清單用 curl 帶 `Origin: tauri://localhost`／`Referer: tauri://localhost/` 驗過，沒有真的開桌面版跑一次。
+
+**現場要做**：升級後到「系統設定 → 網頁存取」設密碼、打開「開放外部連線」，路由器把對外埠轉到工控機 18090。`lan_cidrs` 預設含 192.168/16，現場網段不用改。

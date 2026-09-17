@@ -5,6 +5,8 @@ import { toast } from 'vue3-toastify'
 import { useStatusStore } from '@/stores/status'
 import { useUpdater } from '@/composables/useUpdater'
 import { api } from '@/api/http'
+import { isTauriRuntime } from '@/api/runtime'
+import { useWebAuth } from '@/composables/useWebAuth'
 import UpdateDialog from '@/components/UpdateDialog.vue'
 
 defineProps({
@@ -39,6 +41,14 @@ const openRemoteDialog = async () => {
 const copyAddr = async addr => {
   if (!navigator.clipboard) { toast(t('navbar.copyManual'), { type: 'info' }); return }
   try { await navigator.clipboard.writeText(addr); toast(t('navbar.copied'), { type: 'success' }) } catch (e) { toast(e.message, { type: 'error' }) }
+}
+
+// 只有從外網登入的人有「登出」可按；桌面視窗與內網來源沒有登入態，按了也沒有意義
+const { isLan, logout } = useWebAuth()
+const canLogout = computed(() => !isTauriRuntime && !isLan.value)
+const doLogout = async () => {
+  await logout()
+  window.location.hash = '#/login'
 }
 
 const deviceChips = computed(() => [
@@ -80,6 +90,10 @@ const deviceChips = computed(() => [
     <VBtn v-if="updateAvailable" icon size="small" variant="text" color="warning" @click="showUpdateDialog = true">
       <VBadge dot color="warning"><VIcon icon="tabler-download" size="22" /></VBadge>
       <VTooltip activator="parent" location="bottom">{{ $t('updater.available', { version: updateInfo?.version }) }}</VTooltip>
+    </VBtn>
+    <VBtn v-if="canLogout" icon size="small" variant="text" color="default" @click="doLogout">
+      <VIcon icon="tabler-logout" size="22" />
+      <VTooltip activator="parent" location="bottom">{{ $t('navbar.logout') }}</VTooltip>
     </VBtn>
     <UpdateDialog v-model="showUpdateDialog" />
 

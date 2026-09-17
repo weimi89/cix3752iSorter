@@ -35,6 +35,7 @@ const SECTIONS = [
   { id: 'rules', icon: 'tabler-hand-stop', color: 'error' },
   { id: 'print', icon: 'tabler-printer', color: 'secondary' },
   { id: 'buttons', icon: 'tabler-hand-click', color: 'secondary' },
+  { id: 'webAccess', icon: 'tabler-world-www', color: 'info' },
 ]
 const activeSection = ref('general')
 // 捲到段落：目標要停在貼頂區塊下方，所以用貼頂區塊的實際底緣算位移
@@ -53,10 +54,37 @@ const load = async () => {
   errorMsg.value = ''
   try {
     cfg.value = await api.config()
+    lanCidrText.value = (cfg.value.web_access?.lan_cidrs || []).join('\n')
     saved.value = JSON.stringify(cfg.value)
+    try { webPasswordSet.value = (await api.webAuthPassword()).password_set } catch { webPasswordSet.value = false }
   } catch (e) { errorMsg.value = e.message } finally { loading.value = false }
 }
-const discard = () => { cfg.value = JSON.parse(saved.value) }
+
+// ---- 網頁存取 ----
+const webPasswordSet = ref(false)
+const newWebPassword = ref('')
+const showWebPassword = ref(false)
+const savingWebPassword = ref(false)
+/** 網段清單在畫面上以一行一筆呈現，比 JSON 陣列好讀好改 */
+const lanCidrText = ref('')
+const CIDR_RE = /^(\d{1,3}\.){3}\d{1,3}\/\d{1,2}$|^[0-9a-fA-F:]+\/\d{1,3}$/
+const lanCidrList = computed(() => lanCidrText.value.split('\n').map(x => x.trim()).filter(Boolean))
+watch(lanCidrList, list => { if (cfg.value?.web_access) cfg.value.web_access.lan_cidrs = list })
+const cidrError = computed(() => (lanCidrList.value.every(c => CIDR_RE.test(c)) ? '' : t('page.settings.v.cidr')))
+
+const saveWebPassword = async clear => {
+  savingWebPassword.value = true
+  try {
+    const pw = clear ? '' : newWebPassword.value
+    const r = await api.setWebAuthPassword(pw)
+    webPasswordSet.value = !!r.password_set
+    toast(pw ? t('page.settings.webAccess.passwordSaved') : t('page.settings.webAccess.passwordCleared'), { type: 'success' })
+    newWebPassword.value = ''
+  } catch (e) {
+    toast(e.message, { type: 'error' })
+  } finally { savingWebPassword.value = false }
+}
+const discard = () => { cfg.value = JSON.parse(saved.value); lanCidrText.value = (cfg.value.web_access?.lan_cidrs || []).join('\n') }
 
 // ---- 驗證 ----
 const ADDR_RE = /^(\d{1,3}\.){3}\d{1,3}:\d{1,5}$|^[a-zA-Z0-9.-]+:\d{1,5}$/
@@ -71,6 +99,7 @@ const errors = computed(() => {
   if (addrError(cfg.value.server.bind)) list.push(`${t('page.settings.general.bind')}：${t('page.settings.v.addr')}`)
   if (urlError(cfg.value.middleware.base_url)) list.push(`${t('page.settings.mw.baseUrl')}：${t('page.settings.v.url')}`)
   if (!cfg.value.general.default_chute?.trim()) list.push(t('page.settings.v.defaultChute'))
+  if (cidrError.value) list.push(`${t('page.settings.webAccess.lanRanges')}：${t('page.settings.v.cidr')}`)
   for (const b of cfg.value.emergency_buttons) if (b.bit < 0 || b.bit > 7) list.push(`${t('page.settings.buttons.title')}「${b.describe}」：bit 0–7`)
   return list
 })
@@ -379,6 +408,48 @@ onBeforeUnmount(() => window.removeEventListener('beforeunload', beforeUnload))
             <VCol cols="3" md="1"><VLabel class="mb-1 text-body-medium">bit</VLabel><VNumberInput v-model="b.bit" :min="0" :max="7" density="compact" control-variant="hidden" /></VCol>
             <VCol cols="9" md="3"><VLabel class="mb-1 text-body-medium">{{ $t('page.settings.buttons.action') }}</VLabel><VSelect v-model="b.action" :items="[{ value: 'stop', title: $t('page.settings.buttons.stop') }, { value: 'start', title: $t('page.settings.buttons.start') }, { value: 'estop', title: $t('page.settings.buttons.estop') }, { value: 'estop_release', title: $t('page.settings.buttons.estopRelease') }]" density="compact" /></VCol>
             <VCol cols="3" md="1" class="text-end"><VBtn icon variant="text" size="small" color="error" @click="cfg.emergency_buttons.splice(i, 1)"><VIcon icon="tabler-trash" size="20" /></VBtn></VCol>
+          </VRow>
+        </VCardText>
+      </VCard>
+      <!-- 網頁存取 -->
+      <VCard v-if="cfg.web_access" id="sec-webAccess" class="mb-4 card-shadow">
+        <VCardTitle class="d-flex align-center justify-space-between px-4 py-3">
+          <div class="d-flex align-center"><VIcon icon="tabler-world-www" size="22" class="me-2" />{{ $t('page.settings.sec.webAccess') }}</div>
+        </VCardTitle>
+        <VDivider />
+        <VCardText class="pt-4">
+          <div class="text-body-small text-medium-emphasis mb-3">{{ $t('page.settings.webAccess.desc') }}</div>
+          <div class="setting-row mb-3">
+            <div>
+              <div class="text-body-large font-weight-medium">{{ $t('page.settings.webAccess.enable') }}</div>
+              <div class="text-body-small text-medium-emphasis">{{ $t('page.settings.webAccess.enableDesc') }}</div>
+            </div>
+            <VSwitch v-model="cfg.web_access.enabled" class="flex-shrink-0" hide-details color="primary" inset />
+          </div>
+          <VAlert type="warning" variant="tonal" density="compact" class="mb-3" icon="tabler-shield-exclamation">{{ $t('page.settings.webAccess.noEncryptionWarning') }}</VAlert>
+          <VAlert type="info" variant="tonal" density="compact" class="mb-4" icon="tabler-info-circle">{{ $t('page.settings.webAccess.lanOnlyNote') }}</VAlert>
+
+          <VDivider class="mb-4" />
+          <div class="text-body-large font-weight-medium mb-1">{{ $t('page.settings.webAccess.passwordTitle') }}</div>
+          <div class="text-body-small text-medium-emphasis mb-3">{{ webPasswordSet ? $t('page.settings.webAccess.passwordIsSet') : $t('page.settings.webAccess.passwordNotSet') }}</div>
+          <VRow density="compact" align="end">
+            <VCol cols="12" md="5">
+              <VLabel class="mb-1 text-body-medium">{{ $t('page.settings.webAccess.newPassword') }}</VLabel>
+              <VTextField v-model="newWebPassword" :type="showWebPassword ? 'text' : 'password'" :append-inner-icon="showWebPassword ? 'tabler-eye-off' : 'tabler-eye'" autocomplete="new-password" density="compact" @click:append-inner="showWebPassword = !showWebPassword" />
+            </VCol>
+            <VCol cols="12" md="7" class="d-flex ga-2 flex-wrap">
+              <VBtn color="primary" :loading="savingWebPassword" :disabled="newWebPassword.trim().length < 8" @click="saveWebPassword(false)"><VIcon icon="tabler-key" size="16" class="me-1" />{{ $t('page.settings.webAccess.savePassword') }}</VBtn>
+              <VBtn v-if="webPasswordSet" variant="tonal" color="error" :loading="savingWebPassword" @click="saveWebPassword(true)">{{ $t('page.settings.webAccess.clearPassword') }}</VBtn>
+            </VCol>
+          </VRow>
+          <div class="text-body-small text-medium-emphasis mt-1 mb-4">{{ $t('page.settings.webAccess.passwordHint') }}</div>
+
+          <VDivider class="mb-4" />
+          <VRow density="compact">
+            <VCol cols="12" sm="4"><VLabel class="mb-1 text-body-medium">{{ $t('page.settings.webAccess.sessionHours') }}</VLabel><VNumberInput v-model="cfg.web_access.session_hours" :min="1" :max="720" density="compact" :hint="$t('page.settings.webAccess.sessionHoursHint')" persistent-hint /></VCol>
+            <VCol cols="12" sm="4"><VLabel class="mb-1 text-body-medium">{{ $t('page.settings.webAccess.maxFails') }}</VLabel><VNumberInput v-model="cfg.web_access.max_fail_attempts" :min="1" :max="50" density="compact" :hint="$t('page.settings.webAccess.maxFailsHint')" persistent-hint /></VCol>
+            <VCol cols="12" sm="4"><VLabel class="mb-1 text-body-medium">{{ $t('page.settings.webAccess.lockMinutes') }}</VLabel><VNumberInput v-model="cfg.web_access.lock_minutes" :min="1" :max="1440" density="compact" :hint="$t('page.settings.webAccess.lockMinutesHint')" persistent-hint /></VCol>
+            <VCol cols="12"><VLabel class="mb-1 text-body-medium">{{ $t('page.settings.webAccess.lanRanges') }}</VLabel><VTextarea v-model="lanCidrText" rows="4" auto-grow density="compact" :error-messages="cidrError" :hint="$t('page.settings.webAccess.lanRangesHint')" persistent-hint /></VCol>
           </VRow>
         </VCardText>
       </VCard>

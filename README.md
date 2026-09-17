@@ -20,6 +20,22 @@
 | [`docs/handover.md`](docs/handover.md) | 進度與交接 |
 | `cix3752iLabelPrint/docs/local-http-api.md` | 中介機 API 契約（`/api/parcel`、`/api/report`、`/api/device-alert`） |
 
+## 網頁後台的存取控制
+
+同一份畫面在桌面視窗、現場電腦的瀏覽器、手機（`/control` 遙控頁）都能開；**從現場網路以外連進來要輸入共用密碼**（`src-tauri/src/server/auth.rs`）。
+
+| 來源 | 待遇 |
+|---|---|
+| 工控機本機、`web_access.lan_cidrs` 內的網段（預設涵蓋所有私有網段） | 免登入，完整權限 |
+| 其他來源 | 「開放外部連線」關閉時（預設）一律 403，連登入頁都沒有；開啟後要輸入密碼，登入後與現場同權限 |
+
+- 密碼在「系統設定 → 網頁存取」設定，至少 8 個字，argon2 雜湊存 SQLite `app_setting`，**不在** `config.toml`。
+- 改網頁存取設定與換密碼只能在本機或現場網路內做（拿到密碼的人不能把門鎖換掉）。
+- 同一來源密碼連錯 `max_fail_attempts` 次鎖 `lock_minutes` 分鐘；登入成功／失敗／被拒都寫進事件記錄的「security」類。
+- 內外網只認 TCP 對端位址，不看 `X-Forwarded-For`；跨站請求（`Sec-Fetch-Site`／`Origin` 不符）一律擋，桌面視窗的 `tauri://localhost` 例外。
+- **前提是路由器直接 Port Forward 到工控機**。若日後在前面擺反向代理或 tunnel（nginx、Cloudflare Tunnel、VPN 閘道），後端看到的來源會變成代理的位址而被當成內網、整道門失效——要先改 `auth.rs` 只信任該代理覆寫的來源欄位，不可直接部署。
+- **尚未加 TLS**：外網那段是明文，只建議需要時才開。
+
 ## 建置與部署
 
 ```bash

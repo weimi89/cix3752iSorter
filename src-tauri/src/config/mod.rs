@@ -26,6 +26,52 @@ pub struct AppConfig {
     pub ng: NgConfig,
     pub print: PrintConfig,
     pub emergency_buttons: Vec<EmergencyButton>,
+    pub web_access: WebAccessConfig,
+}
+
+/// 網頁後台的對外存取設定。
+///
+/// 內網來源（現場電腦、工控機、手機）一律免登入；**外網來源要輸入共用密碼**，
+/// 通過後與坐在現場有同等權限。密碼雜湊不放這裡 —— 這份設定會被 `GET /api/config`
+/// 整包回給前端，雜湊跟著跑到瀏覽器沒有必要。密碼另存資料庫 `app_setting`。
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct WebAccessConfig {
+    /// 對外存取總開關。關閉時非內網來源一律擋掉，連登入頁都不給 ——
+    /// 預設關閉，要對外開放是明確的決定，不該因為裝了新版就自動生效。
+    pub enabled: bool,
+    /// 視為內網的網段（CIDR）。命中者免登入。
+    ///
+    /// 判斷一律以 TCP 連線的來源位址為準，**不看 X-Forwarded-For** ——
+    /// 這台機器直接對外，標頭是任何人都能偽造的，信了等於整道門形同虛設。
+    pub lan_cidrs: Vec<String>,
+    /// 登入後多久要重新輸入密碼（小時）
+    pub session_hours: u32,
+    /// 同一來源連續失敗幾次就鎖住
+    pub max_fail_attempts: u32,
+    /// 鎖多久（分鐘）
+    pub lock_minutes: u32,
+}
+
+impl Default for WebAccessConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            lan_cidrs: vec![
+                "127.0.0.0/8".into(),
+                "10.0.0.0/8".into(),
+                "172.16.0.0/12".into(),
+                "192.168.0.0/16".into(),
+                "169.254.0.0/16".into(),
+                "::1/128".into(),
+                "fc00::/7".into(),
+                "fe80::/10".into(),
+            ],
+            session_hours: 8,
+            max_fail_attempts: 5,
+            lock_minutes: 15,
+        }
+    }
 }
 
 
@@ -199,6 +245,7 @@ impl Default for AppConfig {
             ng: NgConfig::default(),
             print: PrintConfig::default(),
             emergency_buttons: Vec::new(),
+            web_access: WebAccessConfig::default(),
         }
     }
 }
@@ -386,12 +433,15 @@ impl AppConfig {
 pub struct ConfigHandle {
     path: PathBuf,
     tx: watch::Sender<AppConfig>,
+    /// 更新一律排隊：兩個人同時存檔時，後到的那份是以「拿到鎖之後」的現況為基礎算出來的，
+    /// 不會用過期的快照把別人剛存的蓋回去（外網能不能改門鎖的判斷就靠這一點）
+    write_lock: std::sync::Arc<tokio::sync::Mutex<()>>,
 }
 
 impl ConfigHandle {
     pub fn new(path: PathBuf, cfg: AppConfig) -> Self {
         let (tx, _) = watch::channel(cfg);
-        Self { path, tx }
+        Self { path, tx, write_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())) }
     }
 
     pub fn current(&self) -> AppConfig {
@@ -404,9 +454,22 @@ impl ConfigHandle {
 
     /// 落檔成功才廣播；落檔失敗時記憶體內的值也不變，避免「畫面顯示已存、重啟後不見」。
     pub async fn update(&self, cfg: AppConfig) -> anyhow::Result<()> {
+        self.update_with(|_| cfg).await
+    }
+
+    /// 以「拿到寫入鎖當下的現況」為基礎產生新設定再落檔；要保留現況某些欄位（例如外網來源
+    /// 不得動的 `web_access`）必須走這條，先讀 `current()` 再 `update()` 中間會被別人插隊。
+    pub async fn update_with(&self, f: impl FnOnce(&AppConfig) -> AppConfig) -> anyhow::Result<()> {
+        let _guard = self.write_lock.lock().await;
+        let cfg = f(&self.tx.borrow());
         cfg.save(&self.path).await?;
         self.tx.send_replace(cfg);
         Ok(())
+    }
+
+    /// 不改內容、只讓訂閱者重跑一次（例如格口表換了要狀態機重載）；不落檔、不讀舊值再寫回
+    pub fn touch(&self) {
+        self.tx.send_modify(|_| {});
     }
 }
 
