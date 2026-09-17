@@ -182,7 +182,7 @@ mod tests {
 
     #[test]
     fn 依檔名日期清舊檔() {
-        let dir = std::env::temp_dir().join(format!("sig-{}", ulid::Ulid::new()));
+        let dir = std::env::temp_dir().join(format!("sig-{}", ulid::Ulid::generate()));
         std::fs::create_dir_all(&dir).unwrap();
         let old = (chrono::Local::now() - chrono::Duration::days(20)).format("%Y-%m-%d").to_string();
         let today = chrono::Local::now().format("%Y-%m-%d").to_string();

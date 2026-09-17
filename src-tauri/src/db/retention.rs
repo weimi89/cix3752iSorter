@@ -81,7 +81,7 @@ mod tests {
     use super::*;
 
     async fn test_db() -> DbPool {
-        let dir = std::env::temp_dir().join(format!("ret-{}", ulid::Ulid::new()));
+        let dir = std::env::temp_dir().join(format!("ret-{}", ulid::Ulid::generate()));
         std::fs::create_dir_all(&dir).unwrap();
         crate::db::init(&dir).await.unwrap()
     }
@@ -99,7 +99,7 @@ mod tests {
             sqlx::query("INSERT INTO parcel_events (parcel_id, ts_ms, source, kind) VALUES ((SELECT id FROM parcels WHERE ulid = ?), ?, 'belt', 'P')")
                 .bind(ulid).bind(ms).execute(&db).await.unwrap();
         }
-        let spool = std::env::temp_dir().join(format!("spool-{}.tspl", ulid::Ulid::new()));
+        let spool = std::env::temp_dir().join(format!("spool-{}.tspl", ulid::Ulid::generate()));
         std::fs::write(&spool, b"x").unwrap();
         sqlx::query("INSERT INTO print_jobs (barcode, chute_code, printer_port, tspl_path, status, created_ms) VALUES ('x', 'L1', '1-8.1', ?, 'failed', ?)")
             .bind(spool.to_string_lossy().into_owned()).bind(old_ms).execute(&db).await.unwrap();

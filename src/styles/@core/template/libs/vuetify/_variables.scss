@@ -224,9 +224,6 @@ $typography-body-1-line-height: 1.375rem;
   $slider-thumb-label-font-size: 0.8125rem !default,
   $slider-track-active-size: 6px !default,
 
-  // 👉 select
-  $select-chips-margin-bottom: ("default": 1, "comfortable": 1, "compact": 1) !default,
-
   // 👉 snackbar
   $snackbar-background: rgb(var(--v-tooltip-background)) !default,
   $snackbar-color: rgb(var(--v-theme-surface)) !default,
@@ -243,7 +240,6 @@ $typography-body-1-line-height: 1.375rem;
   $switch-inset-thumb-height: 14px !default,
   $switch-inset-thumb-width: 14px !default,
   $switch-inset-thumb-off-height: 14px !default,
-  $switch-inset-thumb-off-width: 14px !default,
   $switch-thumb-elevation: 2 !default,
   $switch-track-opacity: 1 !default,
   $switch-track-background: rgba(var(--v-theme-on-surface), var(--v-focus-opacity)) !default,

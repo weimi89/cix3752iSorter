@@ -83,7 +83,7 @@ impl PrintService {
     /// 入列並喚醒該埠位的 worker
     pub async fn enqueue(&self, job: NewJob<'_>) -> anyhow::Result<i64> {
         let now = now_ms();
-        let name = format!("{}-{}.tspl", now, ulid::Ulid::new());
+        let name = format!("{}-{}.tspl", now, ulid::Ulid::generate());
         let path = self.spool_dir.join(&name);
         crate::fs_atomic::write_async(&path, job.tspl).await?;
         let row: (i64,) = sqlx::query_as(

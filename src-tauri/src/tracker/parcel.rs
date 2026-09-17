@@ -128,7 +128,7 @@ impl Parcel {
     pub fn new(key: u64, slot: u32, p_ms: i64) -> Self {
         Self {
             key,
-            ulid: ulid::Ulid::new().to_string(),
+            ulid: ulid::Ulid::generate().to_string(),
             barcode: None,
             slot,
             cart: None,
