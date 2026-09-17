@@ -27,12 +27,28 @@ package-lock.json
 .DS_Store
 
 # === 本地備份 ===
-backups/
 
 # === AI 工具工作目錄 ===
-.claude/
-.serena/
 graphify-out/
 
 # === 建置產物（發版由 GHA 產出）===
 /dist-bin/
+
+# AI 協作文件與規則一律放 ../cix3752iBrain，專案內只有符號連結，不入版控、不部署
+CLAUDE.md
+AGENTS.md
+GEMINI.md
+.claude
+.serena
+.codex
+.cursor
+.cursorignore
+.gemini
+.ai
+.bmad-core
+.mcp.json
+boost.json
+openspec
+CLAUDE.local.md
+.agents
+backups/

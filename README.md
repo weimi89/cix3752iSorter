@@ -11,14 +11,16 @@
 
 ## 文件
 
+文件集中在私有的 `cix3752iBrain` repo，不隨本專案發布。
+
 | 文件 | 內容 |
 |---|---|
-| [`docs/legacy-analysis.md`](docs/legacy-analysis.md) | 舊系統組成、已驗證根因、結構性缺陷與對策 |
-| [`docs/protocol-spec.md`](docs/protocol-spec.md) | 皮帶／分揀機／相機／印表機協定與實測時序（由 71 萬行現場日誌逆推） |
-| [`docs/plan.md`](docs/plan.md) | 架構決策、模組切分、資料表、API、里程碑 |
-| [`docs/cutover.md`](docs/cutover.md) | 現場切換與回退步驟（停舊 → 起新、驗證清單、2 分鐘回退） |
-| [`docs/handover.md`](docs/handover.md) | 進度與交接 |
-| `cix3752iLabelPrint/docs/local-http-api.md` | 中介機 API 契約（`/api/parcel`、`/api/report`、`/api/device-alert`） |
+| `../cix3752iBrain/docs/cix3752iSorter/legacy-analysis.md` | 舊系統組成、已驗證根因、結構性缺陷與對策 |
+| `../cix3752iBrain/docs/cix3752iSorter/protocol-spec.md` | 皮帶／分揀機／相機／印表機協定與實測時序（由 71 萬行現場日誌逆推） |
+| `../cix3752iBrain/docs/cix3752iSorter/plan.md` | 架構決策、模組切分、資料表、API、里程碑 |
+| `../cix3752iBrain/docs/cix3752iSorter/cutover.md` | 現場切換與回退步驟（停舊 → 起新、驗證清單、2 分鐘回退） |
+| `../cix3752iBrain/docs/cix3752iSorter/handover.md` | 進度與交接 |
+| `../cix3752iBrain/docs/cix3752iLabelPrint/local-http-api.md` | 中介機 API 契約（`/api/parcel`、`/api/report`、`/api/device-alert`） |
 
 ## 網頁後台的存取控制
 
@@ -53,7 +55,7 @@ yarn tauri build                              # 本機打 macOS 版；Linux 版�
 20.04 那份第一次要自編 webkit（約 1 小時 55 分，之後走 Actions 快取；`warm-focal-cache.yml` 每週兩次刷新快取避免過期）。
 
 工控機上：`tar -xzf cix3752iSorter-<ver>-<distro>.tar.gz && cd cix3752iSorter-<ver>-<distro> && sudo bash install.sh`（只裝不啟動；20.04 會先把 `stack/` 放進 /usr/local），
-切換用 `sorter-switch to-new`、回退 `sorter-switch to-old`（步驟見 `docs/cutover.md`）。之後升級由程式內「發現新版本」處理（Tauri updater 裝 .deb，會要系統密碼）。
+切換用 `sorter-switch to-new`、回退 `sorter-switch to-old`（步驟見 cix3752iBrain 的 `docs/cix3752iSorter/cutover.md`）。之後升級由程式內「發現新版本」處理（Tauri updater 裝 .deb，會要系統密碼）。
 
 設定檔 `config.toml` 與資料在使用者的應用資料夾（`~/.local/share/com.weiminet.cix3752i.sorter/`），首次啟動自動建立。
 `latest.json` 的 `platforms` 鍵帶 distro（`linux-x86_64-ubuntu-20.04`），程式照 `/etc/os-release` 挑自己那筆。
@@ -63,4 +65,4 @@ GitHub repo 的 secrets 要有 `TAURI_SIGNING_PRIVATE_KEY`／`TAURI_SIGNING_PRIV
 
 ## 狀態
 
-里程碑進度與待辦見 `docs/handover.md`；架構與里程碑定義見 `docs/plan.md`。
+里程碑進度與待辦見 cix3752iBrain 的 `docs/cix3752iSorter/handover.md`；架構與里程碑定義見同目錄 `plan.md`。
