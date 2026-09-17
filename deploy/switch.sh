@@ -22,13 +22,15 @@ die()  { printf '\033[1;31m✗\033[0m %s\n' "$*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || die "缺少指令 $1"; }
 need supervisorctl; need curl; need ss; need pgrep
 
-# 自動啟動的 .desktop 檔名是程式顯示名稱（中文），用內容的 Exec 行找比較穩
-autostart_files() { grep -ls 'sorter' "$HOME"/.config/autostart/*.desktop 2>/dev/null || true; }
+# 自動啟動的 .desktop 檔名是程式顯示名稱（中文，含空白），用內容的 Exec 行找比較穩；
+# 輸出用 NUL 分隔，後面一律接 xargs -0——用空白切會把檔名切成兩半、刪不掉
+autostart_files() { grep -lsZ 'sorter' "$HOME"/.config/autostart/*.desktop 2>/dev/null || true; }
 # 管線後面不用 grep -q：它讀到就關管線，前面的指令會吃 SIGPIPE，pipefail 下整個判斷變成假的
 old_running()    { sudo supervisorctl status 2>/dev/null | grep -E "^(main_proj|twfilter) +RUNNING" >/dev/null; }
 new_running()    { pgrep -x sorter >/dev/null; }
 port_listening() { ss -ltn "( sport = :$1 )" 2>/dev/null | tail -n +2 | grep . >/dev/null; }
-device_conns()   { ss -tn 2>/dev/null | grep -cE ':10006 ' || true; }
+# 只數建立中的連線：程式剛結束時 socket 還會在 FIN_WAIT／TIME_WAIT 留一分鐘，算進去會誤判成「還連著」
+device_conns()   { ss -Htn state established '( dport = :10006 )' 2>/dev/null | grep -c . || true; }
 
 # 等到條件成立或逾時；$1 秒數、$2 說明、其餘是要成立的指令
 wait_for() {
@@ -54,15 +56,35 @@ show_status() {
     if port_listening "$p"; then echo "   :$p 有人在聽（$(sudo ss -ltnp "( sport = :$p )" 2>/dev/null | tail -n +2 | grep -o 'users:(("[^"]*"' | head -1 | cut -d'"' -f2)）"; else echo "   :$p 空"; fi
   done
   say "與皮帶／分揀機（10006）的連線數：$(device_conns)"
+  if old_running && new_running; then
+    warn "新舊程式同時在跑，兩邊都在對皮帶／分揀機下指令！立刻決定一邊：sorter-switch to-new 或 sorter-switch to-old"
+  fi
   if [ -n "$(autostart_files)" ]; then say "登入後自動啟動：已登記"; else say "登入後自動啟動：沒有"; fi
   say "舊程式設定檔"
   ls -1 "$OLD_INI_DIR"/main_proj.ini* "$OLD_INI_DIR"/twfilter.ini* 2>/dev/null | sed 's|^|   |' || true
 }
 
+NEW_LAUNCH_LOG="$HOME/.local/share/com.weiminet.cix3752i.sorter/data/logs/sorter-launch.log"
+
+# 借登入中桌面工作階段的顯示環境：從 SSH 或沒有桌面的終端機跑時沒有 DISPLAY，
+# 視窗程式會在還沒寫日誌前就結束，什麼痕跡都不留
+borrow_desktop_env() {
+  local pid
+  pid=$(pgrep -u "$USER" -x gnome-shell | head -1 || true)
+  [ -n "$pid" ] || die "這個終端機沒有 DISPLAY，也找不到 $USER 登入中的桌面：請先在工控機登入桌面，或直接在桌面的終端機執行"
+  while IFS= read -r -d '' kv; do
+    case "$kv" in DISPLAY=*|XAUTHORITY=*|DBUS_SESSION_BUS_ADDRESS=*|XDG_SESSION_TYPE=*|WAYLAND_DISPLAY=*|XDG_RUNTIME_DIR=*) export "$kv" ;; esac
+  done < "/proc/$pid/environ"
+  [ -n "${DISPLAY:-}" ] || die "登入中的桌面（gnome-shell pid $pid）沒有 DISPLAY，無法開視窗"
+  warn "這裡不是桌面終端機，借用登入桌面的顯示環境開視窗（DISPLAY=$DISPLAY）"
+}
+
 start_new() {
   command -v sorter >/dev/null || die "找不到 sorter，先跑 sudo bash install.sh"
-  # 從使用者的桌面工作階段開，關掉這個終端機也不會跟著關
-  setsid nohup sorter >/dev/null 2>&1 < /dev/null &
+  [ -n "${DISPLAY:-}" ] || borrow_desktop_env
+  mkdir -p "$(dirname "$NEW_LAUNCH_LOG")"
+  # 從使用者的桌面工作階段開，關掉這個終端機也不會跟著關；啟動期的輸出留檔，起不來時第 4 步會印出來
+  setsid nohup sorter > "$NEW_LAUNCH_LOG" 2>&1 < /dev/null &
 }
 
 stop_new() {
@@ -72,14 +94,23 @@ stop_new() {
 to_new() {
   if new_running && ! old_running; then say "已經是新程式在跑，不用切"; show_status; return; fi
 
+  # 新程式若已經開著（例如有人先從選單點開來看），舊程式一放手它就會接上皮帶／分揀機，
+  # 下面「裝置連線都放掉」的檢查永遠過不了；先關掉，第 4 步再乾淨地重開
+  if new_running; then
+    say "新程式已在跑，先關掉，等舊程式放手後再重開"
+    stop_new
+    wait_for 20 "新程式結束" bash -c "! pgrep -x sorter >/dev/null" || { warn "新程式沒在 20 秒內結束，強制關閉"; pkill -KILL -x sorter 2>/dev/null || true; sleep 1; }
+  fi
+
   say "1/5 停舊程式"
   # shellcheck disable=SC2086
   sudo supervisorctl stop $OLD_PROGRAMS 2>/dev/null | sed 's|^|   |' || true
 
-  say "2/5 確認相機埠與裝置連線都放掉"
+  say "2/5 確認舊程式結束、相機埠與裝置連線都放掉"
+  # 樣式用 [e] 這種寫法：pgrep -f 會連跑這條檢查的 bash -c 自己的命令列一起比對，寫成純字串會永遠「還在」
+  wait_for 20 "舊程式行程結束" bash -c "! pgrep -f '[e]cs1000|[t]wfilter/app/server.js' >/dev/null" || die "舊程式的行程還在：$(pgrep -fl '[e]cs1000|[t]wfilter/app/server.js' | tr '\n' ' ')；先看 sudo supervisorctl status"
   wait_for 20 "相機埠 :$CAMERA_PORT 釋放" bash -c "! ss -ltn '( sport = :$CAMERA_PORT )' | tail -n +2 | grep -q ." || die "舊 Node 還占著 :$CAMERA_PORT，先看 sudo supervisorctl status"
-  wait_for 20 "分揀機／皮帶連線關閉" bash -c "! ss -tn | grep -qE ':10006 '" || die "舊程式還連著分揀機或皮帶（:10006），先看 pgrep -fl ecs1000"
-  if pgrep -f 'ecs1000|twfilter/app/server.js' >/dev/null; then die "舊程式的行程還在：$(pgrep -fl 'ecs1000|twfilter/app/server.js' | tr '\n' ' ')"; fi
+  wait_for 20 "分揀機／皮帶連線關閉" bash -c "[ \"\$(ss -Htn state established '( dport = :10006 )' | grep -c .)\" -eq 0 ]" || die "還有程式連著分揀機或皮帶（:10006）：$(ss -Htnp state established '( dport = :10006 )' 2>/dev/null | tr '\n' ' ')"
 
   say "3/5 舊程式改成開機不自啟（改副檔名，回退時改回來）"
   for p in $OLD_PROGRAMS; do
@@ -89,7 +120,11 @@ to_new() {
 
   say "4/5 啟動新程式"
   start_new
-  wait_for 40 "新程式網頁服務 :$NEW_PORT" bash -c "curl -sf http://127.0.0.1:$NEW_PORT/api/health >/dev/null" || die "新程式 40 秒內沒起來，看 ~/.local/share/com.weiminet.cix3752i.sorter/data/logs/ 或執行 sorter-switch to-old 回退"
+  wait_for 40 "新程式網頁服務 :$NEW_PORT" bash -c "curl -sf http://127.0.0.1:$NEW_PORT/api/health >/dev/null" || {
+    warn "新程式啟動輸出（$NEW_LAUNCH_LOG）最後幾行："
+    tail -n 15 "$NEW_LAUNCH_LOG" 2>/dev/null | sed 's|^|   |'
+    die "新程式 40 秒內沒起來；看上面的輸出或 ~/.local/share/com.weiminet.cix3752i.sorter/data/logs/，要回退執行 sorter-switch to-old"
+  }
 
   say "5/5 等裝置連上（最多 15 秒）"
   local i=0 st
@@ -110,7 +145,8 @@ to_old() {
   wait_for 20 "新程式放掉埠位" bash -c "! ss -ltn '( sport = :$CAMERA_PORT )' | tail -n +2 | grep -q . && ! pgrep -x sorter >/dev/null" || { warn "新程式沒在 20 秒內結束，強制關閉"; pkill -KILL -x sorter 2>/dev/null || true; sleep 1; }
 
   say "2/4 拿掉新程式的登入後自動啟動（不然重開機又會跳出來搶裝置）"
-  autostart_files | xargs -r rm -f
+  autostart_files | xargs -0 -r rm -f
+  if [ -n "$(autostart_files)" ]; then die "自動啟動檔沒刪掉：$(autostart_files | tr '\0' ' ')；手動刪掉再重開機，否則新程式會再跳出來搶裝置"; fi
 
   say "3/4 舊程式設定改回來並啟動"
   for p in $OLD_PROGRAMS; do
