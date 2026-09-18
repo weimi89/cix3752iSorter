@@ -23,7 +23,7 @@ const loading = ref(false)
 const errorMsg = ref('')
 const searchOpen = ref(0)
 const levelColor = { info: 'info', warn: 'warning', error: 'error' }
-const categories = ['belt', 'sorter', 'camera', 'tracker', 'chute', 'middleware', 'printer', 'server']
+const categories = ['belt', 'sorter', 'camera', 'tracker', 'chute', 'middleware', 'printer', 'server', 'ui']
 const LEVELS = computed(() => [{ value: null, title: t('common.all') }, ...['info', 'warn', 'error'].map(s => ({ value: s, title: t(`log.level.${s}`) }))])
 const CATEGORIES = computed(() => [{ value: null, title: t('common.all') }, ...categories.map(s => ({ value: s, title: t(`log.cat.${s}`) }))])
 

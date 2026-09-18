@@ -28,6 +28,9 @@ let hourlyTimer = null
 const tracker = computed(() => status.tracker)
 const counters = computed(() => tracker.value?.counters || {})
 const inFlight = computed(() => tracker.value?.in_flight || [])
+// 已經過 = 伺服器現在時間 − 包裹進線時間。本機時鐘先加上與伺服器的差,再扣掉快照與本機計時最多半秒的落差,
+// 剛進線的包裹不會閃出負數
+const elapsedMs = p => Math.max(0, now.value + status.serverOffsetMs - p.p_ms)
 const current = computed(() => tracker.value?.current)
 
 const beltState = computed(() => {
@@ -190,7 +193,7 @@ const stats = computed(() => [
               <!-- 定長的欄位（時間、格口、來源、狀態、小車、經過）給固定寬，剩下的留給條碼；
                    表格鎖 table-layout: fixed，條碼欄放不下就截斷（滑鼠停留看全碼），不讓整張表橫向捲動把最後一欄藏掉。
                    在途列只會存在幾秒到幾分鐘，開始時間只顯示時分秒，日期省下的寬度留給條碼 -->
-              <th class="text-center" style="width: 118px;">{{ $t('parcel.startedAt') }}</th><th class="text-center">{{ $t('parcel.barcode') }}</th><th class="text-center" style="width: 56px;">{{ $t('parcel.chute') }}</th><th class="text-center" style="width: 104px;">{{ $t('parcel.source') }}</th><th class="text-center" style="width: 84px;">{{ $t('parcel.status') }}</th><th class="text-center" style="width: 56px;">{{ $t('parcel.cart') }}</th><th class="text-center" style="width: 92px;">{{ $t('page.dashboard.elapsed') }}</th>
+              <th class="text-center" style="width: 144px;">{{ $t('parcel.startedAt') }}</th><th class="text-center">{{ $t('parcel.barcode') }}</th><th class="text-center" style="width: 56px;">{{ $t('parcel.chute') }}</th><th class="text-center" style="width: 104px;">{{ $t('parcel.source') }}</th><th class="text-center" style="width: 84px;">{{ $t('parcel.status') }}</th><th class="text-center" style="width: 56px;">{{ $t('parcel.cart') }}</th><th class="text-center" style="width: 104px;">{{ $t('page.dashboard.elapsed') }}</th>
             </tr></thead>
             <tbody>
               <tr v-if="!inFlight.length"><td colspan="7"><div class="py-2 d-flex align-center justify-center"><VIcon icon="tabler-alert-circle" size="20" class="me-1" /><span class="text-md">{{ $t('common.noData') }}</span></div></td></tr>
@@ -201,7 +204,7 @@ const stats = computed(() => [
                 <td :data-label="$t('parcel.source')" class="text-center"><VChip v-if="p.chute" size="x-small" :color="sourceMeta(p.chute.source).color" variant="tonal" label>{{ $t(sourceMeta(p.chute.source).key) }}</VChip></td>
                 <td :data-label="$t('parcel.status')" class="text-center"><VChip size="x-small" :color="statusMeta(p.status).color" label>{{ $t(statusMeta(p.status).key) }}</VChip></td>
                 <td :data-label="$t('parcel.cart')" class="text-center">{{ p.cart ?? '' }}</td>
-                <td :data-label="$t('page.dashboard.elapsed')" class="text-center text-no-wrap">{{ fmtDuration(now - p.p_ms) }}</td>
+                <td :data-label="$t('page.dashboard.elapsed')" class="text-center text-no-wrap">{{ fmtDuration(elapsedMs(p)) }}</td>
               </tr>
             </tbody>
           </VTable>

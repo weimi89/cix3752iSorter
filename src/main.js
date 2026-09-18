@@ -9,6 +9,7 @@ import i18n from './plugins/i18n'
 import layouts from './plugins/layouts'
 import { initRuntime } from './api/runtime'
 import { setUnauthorizedHandler } from './api/http'
+import { installErrorReporting } from './api/errorReport'
 import { useWebAuth } from './composables/useWebAuth'
 
 // Vuetify 4 layer 順序 + 選擇性 CSS reset，必須排在 vuetify/styles 之前
@@ -33,6 +34,8 @@ setUnauthorizedHandler(() => {
 })
 
 const app = createApp(App)
+// 畫面上的 JavaScript 錯誤送回後端記進事件記錄：正式版桌面沒有開發者工具，元件默默不顯示時才有線索
+installErrorReporting(app, router)
 app.use(createPinia())
 app.use(router)
 i18n(app)

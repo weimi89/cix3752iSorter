@@ -1,6 +1,6 @@
 [package]
 name = "cix3752i-sorter"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 description = "智配通 分揀控制：分揀機工控機上的單一執行檔（皮帶／分揀機／相機／面單列印／網頁後台）"
 default-run = "sorter"
@@ -24,7 +24,9 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 # Tauri（桌面視窗；`--headless` 時不建視窗、只跑服務）
-tauri = { version = "2", features = [] }
+# devtools：正式版也開網頁檢查器（Linux 右鍵「檢查元素」、Windows 亦可開），現場畫面出錯才有辦法看
+# DOM 與主控台；沒有它只能靠事件記錄裡的 `ui` 錯誤回報。只在本機視窗內可用，不對外開放任何埠。
+tauri = { version = "2", features = ["devtools"] }
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
 tauri-plugin-autostart = "2"

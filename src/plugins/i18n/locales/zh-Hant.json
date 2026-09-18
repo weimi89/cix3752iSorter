@@ -153,7 +153,8 @@
       "chute": "格口解析",
       "middleware": "中介機",
       "printer": "印表機",
-      "server": "系統"
+      "server": "系統",
+      "ui": "畫面"
     }
   },
   "page": {
@@ -203,6 +204,9 @@
       "yesterday": "昨日",
       "last7Days": "近 7 天",
       "last30Days": "近 30 天",
+      "lastUpdated": "最後更新 {time}",
+      "autoRefreshOn": "每 {sec} 秒自動更新",
+      "autoRefreshOff": "過往區間不會變動，不自動更新",
       "startDate": "起始日期",
       "endDate": "結束日期",
       "rangeTotal": "區間件數",

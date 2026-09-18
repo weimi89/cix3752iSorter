@@ -83,6 +83,7 @@ pub(super) fn api_router() -> Router<ServerState> {
         .route("/logs/files", get(log_files))
         .route("/logs/files/{name}", get(log_file_download))
         .route("/lan-ips", get(lan_ips))
+        .route("/client-errors", post(client_error))
 }
 
 async fn health() -> Json<serde_json::Value> {
@@ -479,6 +480,68 @@ async fn config_put(
         })
         .await?;
     event_log::log(&state.app.db, Level::Info, "server", "config", String::from("設定已更新"));
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+#[derive(Deserialize)]
+struct ClientErrorBody {
+    message: String,
+    #[serde(default)]
+    stack: String,
+    #[serde(default)]
+    source: String,
+    #[serde(default)]
+    page: String,
+    #[serde(default)]
+    runtime: String,
+    #[serde(default)]
+    ua: String,
+}
+
+/// 前端（桌面視窗或網頁版）把畫面上的 JavaScript 錯誤送回來記進事件記錄。
+///
+/// 正式版桌面沒有開發者工具，元件出錯只會默默不顯示（例如 2026-09-18 現場列印任務頁的
+/// 日期與條碼欄位整個消失），現場回報時完全沒有線索。記成 `ui` 類別的警告，事件記錄頁就查得到
+/// 錯誤訊息、堆疊、出事的頁面與環境。
+///
+/// 只收本機／內網／已登入來源（guard 已擋），欄位一律截斷、每分鐘最多 30 筆——前端若陷入錯誤迴圈，
+/// 不能把事件記錄灌爆。
+async fn client_error(State(state): State<ServerState>, Json(body): Json<ClientErrorBody>) -> ApiResult<serde_json::Value> {
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+    static BUDGET: Mutex<Option<(Instant, u32)>> = Mutex::new(None);
+    const PER_MINUTE: u32 = 30;
+    {
+        let mut b = BUDGET.lock().unwrap_or_else(|e| e.into_inner());
+        let now = Instant::now();
+        let (start, n) = match *b {
+            Some((start, n)) if now.duration_since(start) < Duration::from_secs(60) => (start, n),
+            _ => (now, 0),
+        };
+        if n >= PER_MINUTE {
+            return Ok(Json(serde_json::json!({ "ok": false, "reason": "rate_limited" })));
+        }
+        *b = Some((start, n + 1));
+    }
+    let cut = |s: &str, n: usize| -> String { s.chars().take(n).collect() };
+    let mut message = format!(
+        "[{}] {}：{}",
+        cut(&body.runtime, 16),
+        cut(&body.page, 120),
+        cut(body.message.trim(), 500)
+    );
+    if !body.source.trim().is_empty() {
+        message.push_str(&format!("（{}）", cut(body.source.trim(), 160)));
+    }
+    if !body.stack.trim().is_empty() {
+        message.push('\n');
+        message.push_str(&cut(body.stack.trim(), 2000));
+    }
+    if !body.ua.trim().is_empty() {
+        message.push('\n');
+        message.push_str(&cut(body.ua.trim(), 200));
+    }
+    event_log::log(&state.app.db, Level::Warn, "ui", "error", message);
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 

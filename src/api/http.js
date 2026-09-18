@@ -50,6 +50,8 @@ async function request(method, path, body, { raw = false } = {}) {
 export const api = {
   status: () => request('GET', '/api/status'),
   health: () => request('GET', '/api/health'),
+  // 前端錯誤回報（見 api/errorReport.js）；後端記成事件記錄 `ui` 類別
+  reportClientError: body => request('POST', '/api/client-errors', body),
 
   parcels: params => request('GET', `/api/parcels?${qs(params)}`),
   parcel: id => request('GET', `/api/parcels/${id}`),

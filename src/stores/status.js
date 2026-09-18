@@ -13,6 +13,9 @@ export const useStatusStore = defineStore('status', {
     print: { pending: 0, failed: 0 },
     report: { pending: 0, failed: 0 },
     chuteLatency: null,
+    // 伺服器時鐘 − 本機時鐘(毫秒)。畫面上「已經過」這類跟包裹時間戳相減的數字要加上它,
+    // 否則網頁版從別台電腦開、兩邊時鐘差一兩秒時會算出負數
+    serverOffsetMs: 0,
     sseConnected: false,
     lastRefreshAt: null,
     _unlisten: [],
@@ -28,7 +31,7 @@ export const useStatusStore = defineStore('status', {
         const d = await api.status()
         this.version = d.version
         this.devices = d.devices
-        this.tracker = d.tracker
+        this.setTracker(d.tracker)
         this.print = d.print
         this.report = d.report
         this.chuteLatency = d.chute_latency ?? null
@@ -41,7 +44,7 @@ export const useStatusStore = defineStore('status', {
       if (this._unlisten.length) return
       this.refresh()
       this._unlisten.push(
-        listen('status', ({ payload }) => { this.tracker = payload }),
+        listen('status', ({ payload }) => { this.setTracker(payload) }),
         listen('device-state', ({ payload }) => {
           const slot = this.devices[payload.device]
           if (slot) { slot.connected = payload.connected; slot.since_ms = payload.ts_ms }
@@ -52,6 +55,10 @@ export const useStatusStore = defineStore('status', {
       )
       // 兜底：SSE 掉了也每 10 秒補一次
       this._timer = setInterval(() => this.refresh(), 10000)
+    },
+    setTracker(tracker) {
+      this.tracker = tracker
+      if (Number.isFinite(tracker?.now_ms)) this.serverOffsetMs = tracker.now_ms - Date.now()
     },
     refreshCountsSoon() {
       clearTimeout(this._countsTimer)

@@ -2,7 +2,8 @@
 import { useI18n } from 'vue-i18n'
 import { useTheme } from 'vuetify'
 import { api } from '@/api/http'
-import { fmtDate, fmtDuration, statusMeta, sourceMeta } from '@/composables/useFormat'
+import { onConnection } from '@/api/events'
+import { fmtDate, fmtDuration, fmtTime, statusMeta, sourceMeta } from '@/composables/useFormat'
 import AppHeader from '@/components/AppHeader.vue'
 import AppDatePicker from '@/components/AppDatePicker.vue'
 import PageActions from '@/components/PageActions.vue'
@@ -46,20 +47,60 @@ const isSingleDay = computed(() => startDate.value === endDate.value)
 const data = ref(null)
 const loading = ref(false)
 const errorMsg = ref('')
+const lastLoadedAt = ref(null)
 
-const reload = async () => {
-  loading.value = true
+// 背景自動更新只在區間包含今天時進行（過往區間的數字不會變），且分頁在前景才跑；
+// 自動更新不亮整頁的載入狀態，避免每 30 秒閃一次
+const AUTO_REFRESH_MS = 30_000
+const includesToday = computed(() => endDate.value >= dateOffset(0))
+let inFlight = false
+const load = async (silent = false) => {
+  if (inFlight) return
+  inFlight = true
+  if (!silent) loading.value = true
   errorMsg.value = ''
   try {
     data.value = await api.statsOverview(startDate.value, endDate.value)
+    lastLoadedAt.value = Date.now()
   } catch (e) {
     errorMsg.value = e.message
   } finally {
     loading.value = false
+    inFlight = false
   }
 }
+const reload = () => load(false)
+const autoRefresh = () => {
+  if (document.hidden || !includesToday.value) return
+  load(true)
+}
+// 分頁從背景回到前景時，超過一輪沒更新就立刻補一次
+const onVisibility = () => {
+  if (document.hidden || !includesToday.value) return
+  if (Date.now() - (lastLoadedAt.value || 0) >= AUTO_REFRESH_MS) load(true)
+}
+let autoTimer = null
+let unlistenConnection = null
+let disconnectedAt = null
 watch([startDate, endDate], reload)
-onMounted(reload)
+onMounted(() => {
+  reload()
+  autoTimer = setInterval(autoRefresh, AUTO_REFRESH_MS)
+  document.addEventListener('visibilitychange', onVisibility)
+  // 與後端斷線又接上（後端重啟、網路閃斷）時補一次，不用等下一輪。
+  // 只補「上次載入之後才斷掉」的那種：進頁當下事件串流可能還沒接上，那次接上不是重連，
+  // 首次載入已經拿到最新資料，不能再抓一次
+  unlistenConnection = onConnection(connected => {
+    if (!connected) { disconnectedAt = Date.now(); return }
+    if (disconnectedAt && lastLoadedAt.value && lastLoadedAt.value < disconnectedAt) autoRefresh()
+    disconnectedAt = null
+  })
+})
+onBeforeUnmount(() => {
+  clearInterval(autoTimer)
+  document.removeEventListener('visibilitychange', onVisibility)
+  unlistenConnection?.()
+})
 
 const actions = computed(() => [
   { key: 'reload', label: t('common.reload'), icon: 'tabler-refresh', color: 'primary', variant: 'flat', loading: loading.value, onClick: reload },
@@ -329,6 +370,9 @@ const heatmapOption = computed(() => ({
             <VBtn value="7d" size="small">{{ $t('page.stats.last7Days') }}</VBtn>
             <VBtn value="30d" size="small">{{ $t('page.stats.last30Days') }}</VBtn>
           </VBtnToggle>
+          <div class="text-body-small text-medium-emphasis stats-refresh-note">
+            <template v-if="lastLoadedAt">{{ $t('page.stats.lastUpdated', { time: fmtTime(lastLoadedAt) }) }} · </template>{{ includesToday ? $t('page.stats.autoRefreshOn', { sec: AUTO_REFRESH_MS / 1000 }) : $t('page.stats.autoRefreshOff') }}
+          </div>
           <VSpacer />
           <div class="d-flex align-center gap-4">
             <div class="text-center">

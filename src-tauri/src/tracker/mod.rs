@@ -104,6 +104,9 @@ pub struct TrackerSnapshot {
     pub counters: machine::Counters,
     pub current: Option<Parcel>,
     pub in_flight: Vec<Parcel>,
+    /// 產生這份快照時的伺服器時鐘。前端算「已經過」要用它對齊自己的時鐘,
+    /// 網頁版從別台電腦開時兩邊時鐘常差個一兩秒,直接用瀏覽器時間會算出負數。
+    pub now_ms: i64,
 }
 
 impl TrackerHandle {
@@ -433,6 +436,7 @@ fn snapshot(m: &Machine) -> TrackerSnapshot {
         counters: m.counters.clone(),
         current: m.current.and_then(|k| m.parcels.get(&k).cloned()),
         in_flight: m.in_flight().into_iter().cloned().collect(),
+        now_ms: crate::db::now_ms(),
     }
 }
 
