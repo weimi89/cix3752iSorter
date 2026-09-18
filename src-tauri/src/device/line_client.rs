@@ -31,6 +31,10 @@ pub struct LineOpts {
     pub connect_timeout: Duration,
     /// 多久沒收到任何資料視為斷線；None = 只靠 TCP keepalive
     pub idle_timeout: Option<Duration>,
+    /// 閒置探詢：多久沒收到資料就主動送一句無害的查詢，對方一回話閒置計時就重來。
+    /// 給停線時完全不說話的裝置（分揀機）用，否則每到 `idle_timeout` 就被當斷線重連一次。
+    /// 沒回話會照 `idle_timeout` 的間隔一直問，直到讀逾時把真的斷線抓出來
+    pub idle_probe: Option<(Duration, String)>,
     pub keepalive_time: Duration,
     pub keepalive_interval: Duration,
     /// 連上後立即送出的指令（分揀機 `Kx999;Kk2`、皮帶先停止再重置）；用 watch 讓設定改了下次連線就生效
@@ -44,6 +48,7 @@ impl Default for LineOpts {
         Self {
             connect_timeout: Duration::from_secs(1),
             idle_timeout: Some(Duration::from_secs(300)),
+            idle_probe: None,
             keepalive_time: Duration::from_secs(10),
             keepalive_interval: Duration::from_secs(5),
             on_connect: fixed_on_connect(Vec::new()),
@@ -232,15 +237,31 @@ async fn serve_connection(
         }
     }
 
+    let idle = opts.idle_timeout.unwrap_or(Duration::from_secs(365 * 24 * 3600));
+    // 讀逾時與閒置探詢都以「最後一次收到資料」起算：送指令不算對方有回應，
+    // 否則只要我們自己一直下指令，對方早就死了也永遠抓不到
+    let mut last_rx = tokio::time::Instant::now();
+    let mut next_probe = opts.idle_probe.as_ref().map(|(after, _)| last_rx + *after);
     loop {
-        let idle = opts.idle_timeout.unwrap_or(Duration::from_secs(365 * 24 * 3600));
+        let probe_at = next_probe.unwrap_or_else(|| last_rx + Duration::from_secs(365 * 24 * 3600));
         tokio::select! {
             _ = cancel.cancelled() => return "服務關閉".into(),
             _ = addr_rx.changed() => return "位址變更，重連".into(),
-            r = tokio::time::timeout(idle, lines.next_line()) => match r {
+            _ = tokio::time::sleep_until(probe_at) => {
+                let Some((after, cmd)) = opts.idle_probe.as_ref() else { continue };
+                tracing::debug!(device = name, %cmd, "閒置探詢");
+                signal_log::record(name, Dir::Out, cmd);
+                if let Err(e) = wr.write_all(frame(cmd).as_bytes()).await {
+                    return format!("閒置探詢寫入失敗: {e}");
+                }
+                next_probe = Some(probe_at + *after);
+            }
+            r = tokio::time::timeout_at(last_rx + idle, lines.next_line()) => match r {
                 Err(_) => return format!("{idle:?} 內無任何資料（讀逾時）"),
                 Ok(Ok(None)) => return "對方關閉連線".into(),
                 Ok(Ok(Some(line))) => {
+                    last_rx = tokio::time::Instant::now();
+                    next_probe = opts.idle_probe.as_ref().map(|(after, _)| last_rx + *after);
                     let ts_ms = crate::db::now_ms();
                     let text = line.trim_end_matches(['\n', '\r']).to_string();
                     if !text.trim().is_empty() {
@@ -352,6 +373,58 @@ mod tests {
             LineEvent::Disconnected { reason, .. } => assert!(reason.contains("讀逾時"), "{reason}"),
             other => panic!("{other:?}"),
         }
+        cancel.cancel();
+    }
+}
+
+#[cfg(test)]
+mod probe_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    #[tokio::test]
+    async fn 閒置時主動探詢_對方回話就不算斷線_不回話才讀逾時() {
+        let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap().to_string();
+        let (_addr_tx, addr_rx) = watch::channel(addr);
+        let cancel = CancellationToken::new();
+        let opts = LineOpts {
+            idle_timeout: Some(Duration::from_millis(700)),
+            idle_probe: Some((Duration::from_millis(200), "Kd[".into())),
+            reconnect_min: Duration::from_millis(50),
+            reconnect_max: Duration::from_millis(50),
+            ..Default::default()
+        };
+        let (_client, mut events) = spawn("probe", addr_rx, opts, cancel.clone());
+        let (mut s, _) = l.accept().await.unwrap();
+        assert!(matches!(events.recv().await.unwrap(), LineEvent::Connected { .. }));
+
+        // 200ms 沒資料 → 收到探詢；回一句話 → 閒置計時重來
+        let mut buf = [0u8; 64];
+        let n = tokio::time::timeout(Duration::from_millis(500), s.read(&mut buf)).await.unwrap().unwrap();
+        assert!(String::from_utf8_lossy(&buf[..n]).contains("Kd["), "閒置該送探詢");
+        s.write_all(b"~[00000000]\n").await.unwrap();
+        assert!(matches!(events.recv().await.unwrap(), LineEvent::Line { .. }));
+
+        // 之後裝死：探詢會一直問（每 200ms），700ms 沒回話才判斷線
+        let started = tokio::time::Instant::now();
+        let mut probes = 0;
+        loop {
+            match tokio::time::timeout(Duration::from_millis(1500), events.recv()).await.unwrap().unwrap() {
+                LineEvent::Disconnected { reason, .. } => {
+                    assert!(reason.contains("讀逾時"), "{reason}");
+                    break;
+                }
+                _ => {}
+            }
+        }
+        while let Ok(Ok(n)) = tokio::time::timeout(Duration::from_millis(50), s.read(&mut buf)).await {
+            if n == 0 { break }
+            probes += String::from_utf8_lossy(&buf[..n]).matches("Kd[").count();
+        }
+        assert!(started.elapsed() >= Duration::from_millis(600), "要等滿讀逾時才判斷線");
+        assert!(probes >= 2, "斷線前應該問過好幾次，實際 {probes}");
         cancel.cancel();
     }
 }

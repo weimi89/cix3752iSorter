@@ -19,6 +19,8 @@ pub enum StoreOp {
     Forget(String),
     /// 終態件計入當日統計
     Daily(Parcel),
+    /// 一次堵塞開始（統計用）
+    Jam { ts_ms: i64, cart: u32, pos: i32, ulid: Option<String>, barcode: Option<String>, chute_code: Option<String> },
 }
 
 #[derive(Clone)]
@@ -108,6 +110,25 @@ async fn run(db: DbPool, mut rx: mpsc::Receiver<StoreOp>) {
                     tracing::error!("daily_stats 更新失敗: {e}");
                 }
             }
+            StoreOp::Jam { ts_ms, cart, pos, ulid, barcode, chute_code } => {
+                let parcel_id = ulid.as_ref().and_then(|u| ids.get(u).copied());
+                if let Err(e) = sqlx::query(
+                    "INSERT INTO jam_events (ts_ms, created_at, cart, pos, module, parcel_id, barcode, chute_code) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                )
+                .bind(ts_ms)
+                .bind(local_ts(ts_ms))
+                .bind(cart as i64)
+                .bind(pos)
+                .bind(pos / 10 + 1)
+                .bind(parcel_id)
+                .bind(&barcode)
+                .bind(&chute_code)
+                .execute(&db)
+                .await
+                {
+                    tracing::error!("jam_events 寫入失敗: {e}");
+                }
+            }
         }
     }
 }
@@ -132,12 +153,12 @@ async fn insert(db: &DbPool, p: &Parcel) -> Result<i64, sqlx::Error> {
 
 async fn update(db: &DbPool, p: &Parcel) -> Result<(), sqlx::Error> {
     let now = now_ms();
-    let (code, cid, source, response_id) = match &p.chute {
-        Some(c) => (Some(c.code.clone()), Some(c.cid.0 as i64), serde_json::to_value(c.source).ok().and_then(|v| v.as_str().map(String::from)).unwrap_or_else(|| "pending".into()), c.response_id),
-        None => (None, None, "pending".to_string(), None),
+    let (code, cid, source, response_id, reason) = match &p.chute {
+        Some(c) => (Some(c.code.clone()), Some(c.cid.0 as i64), serde_json::to_value(c.source).ok().and_then(|v| v.as_str().map(String::from)).unwrap_or_else(|| "pending".into()), c.response_id, c.reason.clone()),
+        None => (None, None, "pending".to_string(), None, None),
     };
     sqlx::query(
-        "UPDATE parcels SET barcode = ?, chute_code = ?, chute_cid = ?, chute_source = ?, status = ?, cart = ?,
+        "UPDATE parcels SET barcode = ?, chute_code = ?, chute_cid = ?, chute_source = ?, chute_reason = ?, status = ?, cart = ?,
             ir_length = ?, gap = ?, block_pos = ?, lost_pos = ?, response_id = ?, ended_ms = ?, travel_ms = ?, updated_ms = ?
          WHERE ulid = ?",
     )
@@ -145,6 +166,7 @@ async fn update(db: &DbPool, p: &Parcel) -> Result<(), sqlx::Error> {
     .bind(code)
     .bind(cid)
     .bind(source)
+    .bind(reason)
     .bind(p.status.code())
     .bind(p.cart.map(|c| c as i64))
     .bind(p.ir_length)

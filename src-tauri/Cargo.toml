@@ -1,6 +1,6 @@
 [package]
 name = "cix3752i-sorter"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2024"
 description = "智配通 分揀控制：分揀機工控機上的單一執行檔（皮帶／分揀機／相機／面單列印／網頁後台）"
 default-run = "sorter"

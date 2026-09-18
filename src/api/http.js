@@ -63,6 +63,7 @@ export const api = {
   irBlock: (m2, block) => request('POST', '/api/ir/block', { m2, block }),
   dailyStats: (days = 30) => request('GET', `/api/stats/daily?days=${days}`),
   hourlyStats: (hours = 12) => request('GET', `/api/stats/hourly?hours=${hours}`),
+  statsOverview: (from, to) => request('GET', `/api/stats/overview?${qs({ from, to })}`),
 
   config: () => request('GET', '/api/config'),
   saveConfig: cfg => request('PUT', '/api/config', cfg),

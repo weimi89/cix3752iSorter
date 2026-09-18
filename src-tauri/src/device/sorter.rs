@@ -14,7 +14,13 @@ pub fn spawn(
     cancel: CancellationToken,
 ) -> LineClient {
     let addr_rx = super::derive_addr(cfg_rx, |c| c.sorter.addr.clone(), cancel.clone());
-    let opts = LineOpts { on_connect: line_client::fixed_on_connect(vec![command::reset_sorter().to_string()]), ..Default::default() };
+    // 分揀機停線時一句話都不說，沒有探詢會每到讀逾時（5 分鐘）就被當斷線重連一次，
+    // 整晚重連幾百次、每次還重置分揀機與亮告警燈。閒置 60 秒就送光電狀態查詢（唯讀，回 ~[…]）當心跳
+    let opts = LineOpts {
+        on_connect: line_client::fixed_on_connect(vec![command::reset_sorter().to_string()]),
+        idle_probe: Some((std::time::Duration::from_secs(60), crate::protocol::ir::query_status().to_string())),
+        ..Default::default()
+    };
     let (client, mut events) = line_client::spawn("sorter", addr_rx, opts, cancel.clone());
 
     tokio::spawn(async move {

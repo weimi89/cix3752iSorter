@@ -36,6 +36,13 @@ export function fmtMs(ms) {
   return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}.${String(d.getMilliseconds()).padStart(3, '0')}`
 }
 
+/** epoch 毫秒 → `HH:mm:ss.SSS`（不帶日期；給只會存在幾秒到幾分鐘的在途列用） */
+export function fmtTimeMs(ms) {
+  if (!ms) return ''
+  const d = new Date(ms)
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}.${String(d.getMilliseconds()).padStart(3, '0')}`
+}
+
 export function fmtDuration(ms) {
   if (ms == null) return ''
   if (ms < 1000) return `${ms} ms`

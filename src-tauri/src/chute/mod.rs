@@ -94,6 +94,8 @@ pub struct Decision {
     pub response_id: Option<i64>,
     pub label: Option<LabelInfo>,
     pub note: Option<String>,
+    /// 統計用的原因代碼（見 migration 0003）；正常給格口為 None
+    pub reason: Option<String>,
 }
 
 /// 純函式：把中介機回應對到格口表（可單元測試）
@@ -105,11 +107,14 @@ pub fn decide(resp: &ParcelResp, chutes: &HashMap<String, ChuteRow>, default_cod
         is_error_label: resp.is_error_label,
     });
 
-    if resp.error_code.as_deref().is_some_and(|c| c.eq_ignore_ascii_case("NOREAD")) {
-        return Decision { code: default_code.into(), cid: default_cid, source: ChuteSource::NoRead, response_id: None, label: None, note: None };
+    // 中介機的錯誤碼原樣當原因代碼（大寫），兩邊統計才對得起來
+    let error_code = resp.error_code.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(str::to_uppercase);
+    if error_code.as_deref() == Some("NOREAD") {
+        return Decision { code: default_code.into(), cid: default_cid, source: ChuteSource::NoRead, response_id: None, label: None, note: None, reason: Some("NOREAD".into()) };
     }
     match resp.channel_code.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         Some(code) => match chutes.get(code) {
+            // 有格口但帶錯誤碼 = 錯誤提示面單：包裹照分，原因記下來
             Some(row) if row.enabled => Decision {
                 code: row.code.clone(),
                 cid: row.cid,
@@ -117,6 +122,7 @@ pub fn decide(resp: &ParcelResp, chutes: &HashMap<String, ChuteRow>, default_cod
                 response_id: resp.response_id,
                 label,
                 note: resp.error_code.clone().map(|e| format!("{e}: {}", resp.message.clone().unwrap_or_default())),
+                reason: error_code,
             },
             Some(_) => Decision {
                 code: default_code.into(),
@@ -125,6 +131,7 @@ pub fn decide(resp: &ParcelResp, chutes: &HashMap<String, ChuteRow>, default_cod
                 response_id: resp.response_id,
                 label,
                 note: Some(format!("格口 {code} 已停用")),
+                reason: Some("CHUTE_DISABLED".into()),
             },
             None => Decision {
                 code: default_code.into(),
@@ -133,6 +140,7 @@ pub fn decide(resp: &ParcelResp, chutes: &HashMap<String, ChuteRow>, default_cod
                 response_id: resp.response_id,
                 label,
                 note: Some(format!("格口 {code} 不在對照表")),
+                reason: Some("CHUTE_UNKNOWN".into()),
             },
         },
         None => Decision {
@@ -142,6 +150,7 @@ pub fn decide(resp: &ParcelResp, chutes: &HashMap<String, ChuteRow>, default_cod
             response_id: resp.response_id,
             label,
             note: resp.error_code.clone().map(|e| format!("{e}: {}", resp.message.clone().unwrap_or_default())).or(Some("中介機未給格口".into())),
+            reason: error_code.or(Some("NO_CHANNEL".into())),
         },
     }
 }
@@ -198,7 +207,7 @@ impl ChuteResolver {
                 let chutes = self.chutes.read().unwrap();
                 decide(resp, &chutes, &default_code)
             }
-            Err(e) => self.fallback(&default_code, e.to_string()),
+            Err(e) => self.fallback(&default_code, e.to_string(), "MW_UNREACHABLE"),
         };
         // 面單先抓下來才算決定；抓不到就改走預設口、不回報、不印（對齊舊版）。
         // 目標格口沒接印表機（L5／R5／直通口）就不需要面單，不抓、也不因圖片服務故障被拖去異常口
@@ -210,7 +219,7 @@ impl ChuteResolver {
         if let Some(info) = decision.label.take() {
             match self.fetch(&info.label_path).await {
                 Ok(bytes) => payload = Some(LabelPayload { bytes, print_profile: info.print_profile, is_error_label: info.is_error_label }),
-                Err(e) => decision = self.fallback(&default_code, format!("面單下載失敗（{}ms）：{e}", started.elapsed().as_millis())),
+                Err(e) => decision = self.fallback(&default_code, format!("面單下載失敗（{}ms）：{e}", started.elapsed().as_millis()), "LABEL_FETCH_FAILED"),
             }
         }
         let elapsed = started.elapsed().as_millis() as i64;
@@ -221,14 +230,14 @@ impl ChuteResolver {
             tracing::info!(%barcode, chute = %decision.code, elapsed, label = payload.is_some(), "格口");
         }
         event_bus::emit("chute-resolved", serde_json::json!({ "key": key, "barcode": barcode, "chute": decision.code, "source": decision.source, "elapsed_ms": elapsed, "note": decision.note }));
-        self.tracker.chute_result(key, decision.code, decision.cid, decision.source, decision.response_id, payload);
+        self.tracker.chute_result(key, decision.code, decision.cid, decision.source, decision.response_id, decision.reason, payload);
     }
 
     /// 走預設口、不回報、不印
-    fn fallback(&self, default_code: &str, note: String) -> Decision {
+    fn fallback(&self, default_code: &str, note: String, reason: &str) -> Decision {
         let chutes = self.chutes.read().unwrap();
         let cid = chutes.get(default_code).map(|r| r.cid).unwrap_or(Cid(1007301));
-        Decision { code: default_code.to_string(), cid, source: ChuteSource::Default, response_id: None, label: None, note: Some(note) }
+        Decision { code: default_code.to_string(), cid, source: ChuteSource::Default, response_id: None, label: None, note: Some(note), reason: Some(reason.into()) }
     }
 
     /// 面單來源：`http(s)://` 向中介機抓，其餘當本機路徑（同一台機器上的 `direct_print` 模式）
@@ -297,6 +306,7 @@ mod tests {
         let d = decide(&resp, &chutes(), "RS");
         assert_eq!((d.code.as_str(), d.source), ("RS", ChuteSource::Default));
         assert!(d.note.unwrap().contains("STORE_CLOSED"));
+        assert_eq!(d.reason.as_deref(), Some("STORE_CLOSED"), "原因代碼要跟中介機的錯誤碼一樣，兩邊統計才對得起來");
     }
 
     #[test]
@@ -305,6 +315,7 @@ mod tests {
         let d = decide(&resp, &chutes(), "RS");
         assert_eq!((d.code.as_str(), d.source, d.response_id), ("L1", ChuteSource::Api, Some(-3)));
         assert!(d.label.unwrap().is_error_label);
+        assert_eq!(d.reason.as_deref(), Some("NOT_FOUND"), "錯誤提示面單雖然照分，原因也要記");
     }
 
     #[test]
@@ -316,5 +327,6 @@ mod tests {
         let d = decide(&resp, &chutes(), "RS");
         assert_eq!(d.code, "RS");
         assert!(d.note.unwrap().contains("不在對照表"));
+        assert_eq!(d.reason.as_deref(), Some("CHUTE_UNKNOWN"));
     }
 }

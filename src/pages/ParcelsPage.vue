@@ -2,7 +2,7 @@
 import { useI18n } from 'vue-i18n'
 import { api } from '@/api/http'
 import { listen } from '@/api/events'
-import { fmtDuration, statusMeta, sourceMeta, STATUS, SOURCE, fmtDate } from '@/composables/useFormat'
+import { fmtDuration, statusMeta, sourceMeta, STATUS, SOURCE } from '@/composables/useFormat'
 import AppHeader from '@/components/AppHeader.vue'
 import PageActions from '@/components/PageActions.vue'
 import TablePagination from '@/components/TablePagination.vue'
@@ -12,9 +12,8 @@ import MultiNoField from '@/components/MultiNoField.vue'
 import { toast } from 'vue3-toastify'
 
 const { t } = useI18n()
-const today = fmtDate(new Date())
 // 日期用日曆選；送後端時起日 00:00、迄日 23:59:59.999（整天）
-const filters = reactive({ startDate: today, endDate: today, barcode: '', chute: '', status: null, source: null })
+const filters = reactive({ startDate: '', endDate: '', barcode: '', chute: '', status: null, source: null })
 const startAt = () => filters.startDate ? `${filters.startDate} 00:00:00` : ''
 const endAt = () => filters.endDate ? `${filters.endDate} 23:59:59.999` : ''
 const page = ref(1)
@@ -43,7 +42,7 @@ const load = async () => {
   } catch (e) { errorMsg.value = e.message } finally { loading.value = false }
 }
 const search = () => { page.value = 1; load() }
-const resetSearch = () => { Object.assign(filters, { startDate: today, endDate: today, barcode: '', chute: '', status: null, source: null }); search() }
+const resetSearch = () => { Object.assign(filters, { startDate: '', endDate: '', barcode: '', chute: '', status: null, source: null }); search() }
 const open = id => { detailId.value = id; detailOpen.value = true }
 const exportNow = () => window.open(api.parcelsExportUrl(params()), '_blank')
 

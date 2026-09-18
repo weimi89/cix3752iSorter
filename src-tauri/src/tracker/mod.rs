@@ -119,9 +119,9 @@ impl TrackerHandle {
     pub async fn sorter_raw(&self, cmd: String) {
         let _ = self.tx.send(Input::SorterRaw(cmd)).await;
     }
-    pub fn chute_result(&self, key: u64, code: String, cid: Cid, source: ChuteSource, response_id: Option<i64>, label: Option<LabelPayload>) {
+    pub fn chute_result(&self, key: u64, code: String, cid: Cid, source: ChuteSource, response_id: Option<i64>, reason: Option<String>, label: Option<LabelPayload>) {
         // 送不進去只會讓那件在 ~O 時走預設口，但要留下痕跡，現場才查得到「面單其實抓到了」
-        if self.tx.try_send(Input::Chute { key, code: code.clone(), cid, source, response_id, label }).is_err() {
+        if self.tx.try_send(Input::Chute { key, code: code.clone(), cid, source, response_id, reason, label }).is_err() {
             tracing::error!(key, %code, "狀態機佇列滿，格口結果丟棄（該件將走預設口）");
         }
     }
@@ -141,7 +141,7 @@ impl TrackerHandle {
         self.ensure_sorter()?;
         let (tx, rx) = oneshot::channel();
         self.ir.pending.lock().unwrap().kd = Some(tx);
-        self.sorter.send("Kd[");
+        self.sorter.send(crate::protocol::ir::query_status());
         match tokio::time::timeout(IR_REPLY_TIMEOUT, rx).await {
             Ok(Ok(body)) => Ok(body),
             _ => {
@@ -302,6 +302,16 @@ impl machine::Outputs for LiveOutputs {
         if let Some(chute_no) = self.jam.on_signal(pos, crate::db::now_ms()) {
             let _ = self.jam_tx.try_send(chute_no);
         }
+    }
+    fn store_jam(&mut self, ts_ms: i64, cart: u32, pos: i32, parcel: Option<&Parcel>) {
+        self.store.send(store::StoreOp::Jam {
+            ts_ms,
+            cart,
+            pos,
+            ulid: parcel.map(|p| p.ulid.clone()),
+            barcode: parcel.map(|p| p.barcode_or_noread().to_string()),
+            chute_code: parcel.and_then(|p| p.chute.as_ref().map(|c| c.code.clone())),
+        });
     }
     fn chute_decided(&mut self, p: &Parcel) {
         event_bus::emit("chute-decided", p);

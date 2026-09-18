@@ -42,7 +42,7 @@ export default defineConfig({
     strictPort: true,
     host: host || false,
     hmr: host ? { protocol: 'ws', host, port: 5181 } : undefined,
-    proxy: Object.fromEntries(['/api', '/events'].map(p => [p, { target: BACKEND, changeOrigin: false }])),
+    proxy: Object.fromEntries(['/api', '/auth', '/events'].map(p => [p, { target: BACKEND, changeOrigin: false }])),
   },
   build: {
     // 工控機瀏覽器可能是舊版 Chromium；分揀線現場也會用手機開

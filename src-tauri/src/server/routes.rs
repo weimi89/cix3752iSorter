@@ -60,6 +60,7 @@ pub(super) fn api_router() -> Router<ServerState> {
         .route("/parcels/{id}", get(parcel_detail))
         .route("/stats/daily", get(stats_daily))
         .route("/stats/hourly", get(stats_hourly))
+        .route("/stats/overview", get(stats_overview))
         .route("/config", get(config_get).put(config_put))
         .route("/web-auth/password", get(web_auth_password_get).put(web_auth_password_put))
         .route("/chutes", get(chutes_get).put(chutes_put))
@@ -154,6 +155,7 @@ struct ParcelRow {
     chute_code: Option<String>,
     chute_cid: Option<i64>,
     chute_source: String,
+    chute_reason: Option<String>,
     status: i64,
     belt_slot: Option<i64>,
     cart: Option<i64>,
@@ -221,7 +223,7 @@ fn parcels_filter(q: &ParcelsQuery) -> (String, Vec<String>) {
     (where_sql, binds)
 }
 
-const PARCEL_COLS: &str = "id, ulid, barcode, chute_code, chute_cid, chute_source, status, belt_slot, cart, ir_length, gap, block_pos, lost_pos, response_id, started_at, started_ms, ended_ms, travel_ms";
+const PARCEL_COLS: &str = "id, ulid, barcode, chute_code, chute_cid, chute_source, chute_reason, status, belt_slot, cart, ir_length, gap, block_pos, lost_pos, response_id, started_at, started_ms, ended_ms, travel_ms";
 
 async fn parcels_list(State(state): State<ServerState>, Query(q): Query<ParcelsQuery>) -> ApiResult<serde_json::Value> {
     let (where_sql, binds) = parcels_filter(&q);
@@ -411,6 +413,23 @@ async fn stats_hourly(State(state): State<ServerState>, Query(q): Query<HoursQue
         }
     }
     Ok(Json(out))
+}
+
+#[derive(Deserialize)]
+struct RangeQuery {
+    from: Option<String>,
+    to: Option<String>,
+}
+
+/// 統計綜合頁：區間內所有口徑一次算齊（見 `stats.rs`）。日期缺省為今天；格式或區間不合法回 400
+async fn stats_overview(State(state): State<ServerState>, Query(q): Query<RangeQuery>) -> ApiResult<super::stats::Overview> {
+    let from = super::stats::parse_day(q.from.as_deref()).map_err(bad)?;
+    let to = super::stats::parse_day(q.to.as_deref()).map_err(bad)?;
+    let retention_days = state.app.config.current().general.retention_days;
+    let overview = super::stats::overview(&state.app.db, retention_days, from, to)
+        .await
+        .map_err(|e| bad(e.to_string()))?;
+    Ok(Json(overview))
 }
 
 // ---------- 設定 ----------

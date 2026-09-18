@@ -88,6 +88,8 @@ pub struct ChuteDecision {
     pub source: ChuteSource,
     pub response_id: Option<i64>,
     pub decided_ms: i64,
+    /// 走預設口／帶錯誤面單的原因代碼（見 migration 0003）；正常給格口為 None
+    pub reason: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]

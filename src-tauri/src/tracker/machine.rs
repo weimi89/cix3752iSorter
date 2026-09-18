@@ -49,6 +49,8 @@ pub trait Outputs {
     fn log(&mut self, level: crate::event_log::Level, category: &'static str, action: &'static str, msg: String);
     fn jam_alert(&mut self, pos: i32);
     fn chute_decided(&mut self, p: &Parcel);
+    /// 一次堵塞開始：記一筆卡件事件（統計用）。`parcel` 是當時綁在那台小車上的包裹，可能沒有
+    fn store_jam(&mut self, _ts_ms: i64, _cart: u32, _pos: i32, _parcel: Option<&Parcel>) {}
 }
 
 /// 格口對照（來自 `chutes` 表）
@@ -64,7 +66,7 @@ pub struct ChuteRow {
 pub enum Input {
     Device(DeviceEvent),
     /// 格口解析結果（面單已下載好才算結果；下載失敗的解析器會改回預設口）
-    Chute { key: u64, code: String, cid: Cid, source: ChuteSource, response_id: Option<i64>, label: Option<LabelPayload> },
+    Chute { key: u64, code: String, cid: Cid, source: ChuteSource, response_id: Option<i64>, reason: Option<String>, label: Option<LabelPayload> },
     Tick { now_ms: i64 },
     /// 網頁手動控制皮帶
     BeltStart,
@@ -174,7 +176,7 @@ impl Machine {
     pub fn handle<O: Outputs>(&mut self, input: Input, out: &mut O) {
         match input {
             Input::Device(ev) => self.on_device(ev, out),
-            Input::Chute { key, code, cid, source, response_id, label } => self.on_chute(key, code, cid, source, response_id, label, out),
+            Input::Chute { key, code, cid, source, response_id, reason, label } => self.on_chute(key, code, cid, source, response_id, reason, label, out),
             Input::Tick { now_ms } => self.on_tick(now_ms, out),
             Input::BeltStart => self.belt_start(out, "網頁啟動"),
             Input::BeltStop => self.belt_stop(out, "網頁停止"),
@@ -406,8 +408,16 @@ impl Machine {
                 }
                 // 每個 ~k 都送出去，同格口的節流與「安靜 5 秒後重置」由外層決定（對齊舊 Node）
                 out.jam_alert(pos);
+                // 堵塞持續時 ~k 會一直來：有包裹的只在它第一個 ~k 記一筆卡件；
+                // 對不到包裹的（小車空車卡住）只在堵塞狀態剛開始時記一筆
+                let episode_start = self.block_until.is_none();
                 self.block_until = Some(ts + BLOCK_CLEAR_MS);
-                let Some(key) = self.by_cart.get(&cart).copied() else { return };
+                let Some(key) = self.by_cart.get(&cart).copied() else {
+                    if episode_start {
+                        out.store_jam(ts, cart, pos, None);
+                    }
+                    return;
+                };
                 if let Some(p) = self.parcels.get_mut(&key) {
                     if p.k_ms.is_none() {
                         p.k_ms = Some(ts);
@@ -419,6 +429,7 @@ impl Machine {
                         out.store_event(p, ts, "sorter", "k", Some(raw));
                         out.store_update(p);
                         out.parcel_changed(p);
+                        out.store_jam(ts, cart, pos, Some(p));
                     }
                 }
             }
@@ -545,19 +556,24 @@ impl Machine {
         }
         if noread {
             let (dcode, dcid) = self.default_chute();
-            self.on_chute(key, dcode, dcid, ChuteSource::NoRead, None, None, out);
+            self.on_chute(key, dcode, dcid, ChuteSource::NoRead, None, Some("NOREAD".into()), None, out);
         }
         if let Some(p) = self.parcels.get(&key) {
             out.request_chute(p);
         }
     }
 
-    fn on_chute<O: Outputs>(&mut self, key: u64, code: String, cid: Cid, source: ChuteSource, response_id: Option<i64>, label: Option<LabelPayload>, out: &mut O) {
+    fn on_chute<O: Outputs>(&mut self, key: u64, code: String, cid: Cid, source: ChuteSource, response_id: Option<i64>, reason: Option<String>, label: Option<LabelPayload>, out: &mut O) {
         let ts = self.now_ms;
         let Some(p) = self.parcels.get_mut(&key) else { return };
         if p.kn_ms.is_some() {
             // 指令已下，回覆太晚：留紀錄但不改決定（老日誌的「返回超時,貨物已下發分揀指令」）
             out.store_event(p, ts, "api", "chute_late", Some(&format!("{code} {cid} {source:?} rid={response_id:?}")));
+            // 原因從「逾時」改成「回覆太晚」：統計上要分得出中介機是完全沒回、還是回了但太慢
+            if let Some(c) = p.chute.as_mut().filter(|c| c.source == ChuteSource::Timeout) {
+                c.reason = Some("LATE".into());
+                out.store_update(p);
+            }
             out.log(
                 crate::event_log::Level::Warn,
                 "chute",
@@ -570,7 +586,7 @@ impl Machine {
             // 已決定（重複回覆）：不改決定也不印
             return;
         }
-        p.chute = Some(ChuteDecision { code: code.clone(), cid, source, response_id, decided_ms: ts });
+        p.chute = Some(ChuteDecision { code: code.clone(), cid, source, response_id, decided_ms: ts, reason });
         out.store_event(p, ts, "api", "chute", Some(&format!("{code} {cid} {source:?} rid={response_id:?} label={}", label.is_some())));
         out.store_update(p);
         out.parcel_changed(p);
@@ -609,7 +625,8 @@ impl Machine {
                     (code, cid)
                 };
                 let source = if p.barcode.is_none() { ChuteSource::NoRead } else { ChuteSource::Timeout };
-                p.chute = Some(ChuteDecision { code, cid, source, response_id: None, decided_ms: ts });
+                let reason = Some(if source == ChuteSource::NoRead { "NOREAD" } else { "TIMEOUT" }.to_string());
+                p.chute = Some(ChuteDecision { code, cid, source, response_id: None, decided_ms: ts, reason });
                 out.store_event(p, ts, "tracker", "chute_default", Some(&format!("{source:?}")));
             }
             let cid = p.chute.as_ref().map(|c| c.cid).unwrap();

@@ -36,6 +36,11 @@ pub fn parse_p1(lines: &[String], ir_num: usize) -> Vec<Option<bool>> {
     (0..ir_num).map(|i| values.get(i).map(|v| *v < 1000)).collect()
 }
 
+/// 查詢每台的光電總狀態（回 `~[…]`）。唯讀、不影響分揀，也拿來當閒置心跳
+pub fn query_status() -> &'static str {
+    "Kd["
+}
+
 pub fn enter_maintenance() -> &'static str {
     "_1{9"
 }

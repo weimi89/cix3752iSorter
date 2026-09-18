@@ -3,7 +3,7 @@ import { useI18n } from 'vue-i18n'
 import { useStatusStore } from '@/stores/status'
 import { api } from '@/api/http'
 import { listen } from '@/api/events'
-import { fmtMs, fmtDuration, statusMeta, sourceMeta } from '@/composables/useFormat'
+import { fmtMs, fmtTimeMs, fmtDuration, statusMeta, sourceMeta } from '@/composables/useFormat'
 import AppHeader from '@/components/AppHeader.vue'
 import PageActions from '@/components/PageActions.vue'
 import { toast } from 'vue3-toastify'
@@ -168,12 +168,10 @@ const stats = computed(() => [
             <VCardTitle>{{ $t('page.dashboard.current') }}</VCardTitle>
             <VCardSubtitle>{{ $t('page.dashboard.currentHint') }}</VCardSubtitle>
           </VCardItem>
-          <!-- 有無包裹都固定同一高度；條碼過長截斷、滑鼠停留看全碼，避免版面隨內容跳動 -->
-          <VCardText v-if="current" class="pt-0 d-flex align-center gap-6 current-body">
-            <div class="current-barcode"><div class="text-body-small text-medium-emphasis">{{ $t('parcel.barcode') }}</div><div class="text-title-large selectable text-truncate" :title="current.barcode || 'NoRead'">{{ current.barcode || 'NoRead' }}</div></div>
-            <div class="flex-shrink-0"><div class="text-body-small text-medium-emphasis">{{ $t('parcel.chute') }}</div><div class="text-title-large">{{ current.chute?.code || '—' }}</div></div>
-            <div class="flex-shrink-0"><div class="text-body-small text-medium-emphasis">{{ $t('parcel.status') }}</div><VChip :color="statusMeta(current.status).color" size="small" label>{{ $t(statusMeta(current.status).key) }}</VChip></div>
-            <div class="flex-shrink-0"><div class="text-body-small text-medium-emphasis">{{ $t('parcel.cart') }}</div><div class="text-title-large">{{ current.cart ?? '—' }}</div></div>
+          <!-- 只放條碼：格口、狀態、小車在下方在途表都有，這裡重複列反而讓各欄位高度對不齊。
+               有無包裹都固定同一高度；條碼過長截斷、滑鼠停留看全碼，避免版面隨內容跳動 -->
+          <VCardText v-if="current" class="pt-0 d-flex align-center current-body">
+            <div class="text-headline-small font-weight-medium selectable text-truncate" :title="current.barcode || 'NoRead'">{{ current.barcode || 'NoRead' }}</div>
           </VCardText>
           <VCardText v-else class="pt-0 d-flex align-center text-medium-emphasis current-body">{{ $t('page.dashboard.noCurrent') }}</VCardText>
         </VCard>
@@ -187,20 +185,23 @@ const stats = computed(() => [
             <template #append><span class="text-title-large font-weight-bold text-info">{{ inFlight.length }}</span></template>
           </VCardItem>
           <VDivider />
-          <VTable hover class="table-cards">
+          <VTable hover class="table-cards inflight-table">
             <thead><tr>
-              <th class="text-center">{{ $t('parcel.startedAt') }}</th><th class="text-center">{{ $t('parcel.barcode') }}</th><th class="text-center">{{ $t('parcel.chute') }}</th><th class="text-center">{{ $t('parcel.source') }}</th><th class="text-center">{{ $t('parcel.status') }}</th><th class="text-center">{{ $t('parcel.cart') }}</th><th class="text-center">{{ $t('page.dashboard.elapsed') }}</th>
+              <!-- 定長的欄位（時間、格口、來源、狀態、小車、經過）給固定寬，剩下的留給條碼；
+                   表格鎖 table-layout: fixed，條碼欄放不下就截斷（滑鼠停留看全碼），不讓整張表橫向捲動把最後一欄藏掉。
+                   在途列只會存在幾秒到幾分鐘，開始時間只顯示時分秒，日期省下的寬度留給條碼 -->
+              <th class="text-center" style="width: 118px;">{{ $t('parcel.startedAt') }}</th><th class="text-center">{{ $t('parcel.barcode') }}</th><th class="text-center" style="width: 56px;">{{ $t('parcel.chute') }}</th><th class="text-center" style="width: 104px;">{{ $t('parcel.source') }}</th><th class="text-center" style="width: 84px;">{{ $t('parcel.status') }}</th><th class="text-center" style="width: 56px;">{{ $t('parcel.cart') }}</th><th class="text-center" style="width: 92px;">{{ $t('page.dashboard.elapsed') }}</th>
             </tr></thead>
             <tbody>
               <tr v-if="!inFlight.length"><td colspan="7"><div class="py-2 d-flex align-center justify-center"><VIcon icon="tabler-alert-circle" size="20" class="me-1" /><span class="text-md">{{ $t('common.noData') }}</span></div></td></tr>
               <tr v-for="p in inFlight" :key="p.key">
-                <td :data-label="$t('parcel.startedAt')" class="text-center text-no-wrap">{{ fmtMs(p.p_ms) }}</td>
+                <td :data-label="$t('parcel.startedAt')" class="text-center text-no-wrap">{{ fmtTimeMs(p.p_ms) }}</td>
                 <td :data-label="$t('parcel.barcode')" class="text-center"><div class="barcode-cell selectable text-truncate mx-auto" :title="p.barcode || ''">{{ p.barcode || '—' }}</div></td>
                 <td :data-label="$t('parcel.chute')" class="text-center">{{ p.chute?.code || '—' }}</td>
                 <td :data-label="$t('parcel.source')" class="text-center"><VChip v-if="p.chute" size="x-small" :color="sourceMeta(p.chute.source).color" variant="tonal" label>{{ $t(sourceMeta(p.chute.source).key) }}</VChip></td>
                 <td :data-label="$t('parcel.status')" class="text-center"><VChip size="x-small" :color="statusMeta(p.status).color" label>{{ $t(statusMeta(p.status).key) }}</VChip></td>
                 <td :data-label="$t('parcel.cart')" class="text-center">{{ p.cart ?? '' }}</td>
-                <td :data-label="$t('page.dashboard.elapsed')" class="text-center">{{ fmtDuration(now - p.p_ms) }}</td>
+                <td :data-label="$t('page.dashboard.elapsed')" class="text-center text-no-wrap">{{ fmtDuration(now - p.p_ms) }}</td>
               </tr>
             </tbody>
           </VTable>
@@ -256,7 +257,9 @@ const stats = computed(() => [
 <style scoped>
 /* 「目前處理中」有無包裹都撐同一高度，內容變動不影響下方表格位置 */
 .current-body { min-height: 64px; }
-/* 條碼欄寬度封頂，超長條碼截斷不撐開版面 */
-.current-barcode { min-width: 0; max-width: 240px; }
 .barcode-cell { max-width: 160px; }
+/* 欄寬照表頭指定，不隨內容撐開；手機卡片式（table-cards）會改成 block，這條不影響 */
+@media (min-width: 640px) {
+  .inflight-table :deep(table) { table-layout: fixed; inline-size: 100%; }
+}
 </style>

@@ -8,16 +8,14 @@ import PageActions from '@/components/PageActions.vue'
 import TablePagination from '@/components/TablePagination.vue'
 import MultiNoField from '@/components/MultiNoField.vue'
 import AppDatePicker from '@/components/AppDatePicker.vue'
-import { fmtDate } from '@/composables/useFormat'
 import { toast } from 'vue3-toastify'
 
 const { t } = useI18n()
-const today = fmtDate(new Date())
 const status = ref(null)
 const q = ref('')
 const barcode = ref('')
-const startDate = ref(today)
-const endDate = ref(today)
+const startDate = ref('')
+const endDate = ref('')
 const chute = ref('')
 const chutes = ref([])
 const chuteItems = computed(() => [{ value: '', title: t('common.all') }, ...chutes.value.map(c => ({ value: c, title: c }))])
@@ -41,7 +39,7 @@ const load = async () => {
   } catch (e) { errorMsg.value = e.message } finally { loading.value = false }
 }
 const search = () => { page.value = 1; load() }
-const resetSearch = () => { status.value = null; q.value = ''; barcode.value = ''; startDate.value = today; endDate.value = today; chute.value = ''; search() }
+const resetSearch = () => { status.value = null; q.value = ''; barcode.value = ''; startDate.value = ''; endDate.value = ''; chute.value = ''; search() }
 const retry = async id => {
   try { await api.printJobRetry(id); toast(t('common.done'), { type: 'success' }); load() } catch (e) { toast(e.message, { type: 'error' }) }
 }
@@ -96,7 +94,7 @@ onBeforeUnmount(() => { unlisten?.(); clearTimeout(timer) })
       <VDivider />
       <VTable hover class="table-cards">
         <thead><tr>
-          <th class="text-center" style="width: 170px;">{{ $t('print.createdAt') }}</th><th class="text-center">{{ $t('parcel.barcode') }}</th><th class="text-center" style="width: 80px;">{{ $t('parcel.chute') }}</th><th class="text-center" style="width: 100px;">{{ $t('print.printer') }}</th><th class="text-center">{{ $t('print.profile') }}</th><th class="text-center" style="width: 100px;">{{ $t('print.status') }}</th><th class="text-center" style="width: 70px;">{{ $t('print.attempts') }}</th><th class="text-center">{{ $t('print.error') }}</th><th style="width: 90px;"></th>
+          <th class="text-center" style="width: 170px;">{{ $t('print.createdAt') }}</th><th class="text-center">{{ $t('parcel.barcode') }}</th><th class="text-center" style="width: 80px;">{{ $t('parcel.chute') }}</th><th class="text-center" style="width: 100px;">{{ $t('print.printer') }}</th><th class="text-center">{{ $t('print.profile') }}</th><th class="text-center" style="width: 100px;">{{ $t('print.status') }}</th><th class="text-center" style="width: 70px;">{{ $t('print.attempts') }}</th><th class="text-center">{{ $t('print.error') }}</th><th class="text-center" style="width: 90px;">{{ $t('common.actions') }}</th>
         </tr></thead>
         <tbody>
           <tr v-if="!list.length"><td colspan="9"><div class="py-2 d-flex align-center justify-center"><VIcon icon="tabler-alert-circle" size="20" class="me-1" /><span class="text-md">{{ $t('common.noResults') }}</span></div></td></tr>
@@ -109,7 +107,7 @@ onBeforeUnmount(() => { unlisten?.(); clearTimeout(timer) })
             <td :data-label="$t('print.status')" class="text-center"><VChip size="x-small" :color="statusColor[j.status]" label>{{ $t(`print.s.${j.status}`) }}</VChip></td>
             <td :data-label="$t('print.attempts')" class="text-center">{{ j.attempts }}</td>
             <td :data-label="$t('print.error')" class="text-center text-error">{{ j.last_error }}</td>
-            <td class="text-center text-no-wrap">
+            <td :data-label="$t('common.actions')" class="text-center text-no-wrap">
               <VBtn v-if="j.status !== 'done'" size="small" variant="text" class="me-1" @click="openPreview(j)"><VIcon icon="tabler-eye" size="16" class="me-1" />{{ $t('print.preview') }}</VBtn>
               <VBtn v-if="j.status !== 'done'" size="small" variant="tonal" @click="retry(j.id)">{{ $t('common.retry') }}</VBtn>
             </td>

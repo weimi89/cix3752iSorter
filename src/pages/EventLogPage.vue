@@ -8,15 +8,13 @@ import { toast } from 'vue3-toastify'
 import TablePagination from '@/components/TablePagination.vue'
 import MultiNoField from '@/components/MultiNoField.vue'
 import AppDatePicker from '@/components/AppDatePicker.vue'
-import { fmtDate } from '@/composables/useFormat'
 
 const { t } = useI18n()
-const today = fmtDate(new Date())
 const level = ref(null)
 const category = ref(null)
 const q = ref('')
-const startDate = ref(today)
-const endDate = ref(today)
+const startDate = ref('')
+const endDate = ref('')
 const page = ref(1)
 const pageSize = ref(25)
 const total = ref(0)
@@ -39,7 +37,7 @@ const load = async () => {
   } catch (e) { errorMsg.value = e.message } finally { loading.value = false }
 }
 const search = () => { page.value = 1; load() }
-const resetSearch = () => { level.value = null; category.value = null; q.value = ''; startDate.value = today; endDate.value = today; search() }
+const resetSearch = () => { level.value = null; category.value = null; q.value = ''; startDate.value = ''; endDate.value = ''; search() }
 const actions = computed(() => [{ key: 'reload', label: t('common.reload'), icon: 'tabler-refresh', loading: loading.value, onClick: load }])
 
 // 日誌檔：程式日誌與裝置原始訊號逐日一檔，直接從網頁下載，不用 SSH 進工控機撈

@@ -53,6 +53,8 @@ pub async fn purge(db: &DbPool, days: u32) -> Result<Purged, sqlx::Error> {
     // parcel_events 隨 parcels 級聯刪除
     let parcels = sqlx::query("DELETE FROM parcels WHERE started_at < ?").bind(&cutoff_ts).execute(db).await?.rows_affected();
     let events = sqlx::query("DELETE FROM event_log WHERE created_at < ?").bind(&cutoff_ts).execute(db).await?.rows_affected();
+    // 卡件事件跟包裹同一個保留期
+    sqlx::query("DELETE FROM jam_events WHERE created_at < ?").bind(&cutoff_ts).execute(db).await?;
     Ok(Purged { parcels, print_jobs, reports, events })
 }
 

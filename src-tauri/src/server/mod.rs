@@ -6,6 +6,7 @@ mod assets;
 mod auth;
 mod events;
 mod routes;
+mod stats;
 
 use std::net::SocketAddr;
 

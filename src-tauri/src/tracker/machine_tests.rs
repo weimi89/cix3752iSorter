@@ -21,6 +21,8 @@ struct Fake {
     decided: Vec<(String, String)>,
     forgotten: Vec<String>,
     printed: Vec<(String, String, Option<String>)>,
+    /// (cart, pos, 有沒有對到包裹)
+    jam_records: Vec<(u32, i32, bool)>,
 }
 
 impl Outputs for Fake {
@@ -60,6 +62,9 @@ impl Outputs for Fake {
     }
     fn print_label(&mut self, p: &super::parcel::Parcel, printer_port: Option<String>, _label: super::parcel::LabelPayload) {
         self.printed.push((p.barcode_or_noread().to_string(), p.chute.as_ref().unwrap().code.clone(), printer_port));
+    }
+    fn store_jam(&mut self, _ts: i64, cart: u32, pos: i32, parcel: Option<&super::parcel::Parcel>) {
+        self.jam_records.push((cart, pos, parcel.is_some()));
     }
 }
 
@@ -108,7 +113,7 @@ impl Sim {
 
     fn chute(&mut self, key: u64, code: &str) -> &mut Self {
         let cid = chutes()[code].cid;
-        self.m.handle(Input::Chute { key, code: code.into(), cid, source: ChuteSource::Api, response_id: Some(99), label: None }, &mut self.out);
+        self.m.handle(Input::Chute { key, code: code.into(), cid, source: ChuteSource::Api, response_id: Some(99), reason: None, label: None }, &mut self.out);
         self
     }
 
@@ -116,7 +121,7 @@ impl Sim {
     fn chute_with_label(&mut self, key: u64, code: &str) -> &mut Self {
         let cid = chutes()[code].cid;
         let label = super::parcel::LabelPayload { bytes: vec![1, 2, 3], print_profile: Some("PAPER-01#100*150".into()), is_error_label: false };
-        self.m.handle(Input::Chute { key, code: code.into(), cid, source: ChuteSource::Api, response_id: Some(99), label: Some(label) }, &mut self.out);
+        self.m.handle(Input::Chute { key, code: code.into(), cid, source: ChuteSource::Api, response_id: Some(99), reason: None, label: Some(label) }, &mut self.out);
         self
     }
 
@@ -175,8 +180,10 @@ fn 格口回覆太晚_走預設口_回覆只記錄() {
     s.at(1100).belt("~O5 1");
     assert_eq!(s.out.sorter, vec!["Kn 101 01 73 100 1 1"], "預設口 RS=1007301");
     assert_eq!(s.parcel(1).chute.as_ref().unwrap().source, ChuteSource::Timeout);
+    assert_eq!(s.parcel(1).chute.as_ref().unwrap().reason.as_deref(), Some("TIMEOUT"), "沒回覆就下指令 → 原因是逾時");
     s.at(50).chute(1, "L1");
     assert_eq!(s.parcel(1).chute.as_ref().unwrap().code, "RS", "已下指令，不改");
+    assert_eq!(s.parcel(1).chute.as_ref().unwrap().reason.as_deref(), Some("LATE"), "回覆到了但太晚 → 原因改成回覆太晚，統計才分得出中介機是沒回還是回太慢");
     assert!(s.out.logs.iter().any(|l| l.starts_with("late:")));
     assert!(s.out.events.iter().any(|(_, k)| k == "chute_late"));
 }
@@ -188,7 +195,7 @@ fn noread_本機立刻走預設口_仍通知中介機存證() {
     // 中介機要拍照與計數，所以照樣送請求
     assert_eq!(s.out.chute_requests, vec![(1, "NoRead".to_string())]);
     let c = s.parcel(1).chute.as_ref().unwrap();
-    assert_eq!((c.code.as_str(), c.source), ("RS", ChuteSource::NoRead));
+    assert_eq!((c.code.as_str(), c.source, c.reason.as_deref()), ("RS", ChuteSource::NoRead, Some("NOREAD")));
     // 中介機就算回了東西（含面單）也不改決定、不印
     s.chute_with_label(1, "L1");
     assert_eq!(s.parcel(1).chute.as_ref().unwrap().code, "RS");
@@ -250,6 +257,7 @@ fn 堵塞_停線_紅燈_告警_兩秒後恢復() {
     assert_eq!(s.parcel(1).status, Status::Blocked);
     s.at(500).sorter("~k2 73 73");
     assert_eq!(s.out.jams, vec![73, 73], "每個 ~k 都交給外層節流（JamThrottle 另有測試）");
+    assert_eq!(s.out.jam_records, vec![(2, 73, true)], "同一件持續堵塞只記一筆卡件事件");
     s.at(1800);
     assert_eq!(s.out.belt.len(), 1, "距最後一次 ~k 未滿 2 秒");
     s.at(300);
@@ -423,4 +431,16 @@ fn 急停互鎖_按住時恢復無效_放開後才能啟動() {
     s.belt("~v0 0"); // 全放開
     s.belt("~v0 16"); // 只按恢復 → 啟動
     assert_eq!(s.out.belt, vec!["KM998 1", "KM998 3"]);
+}
+
+#[test]
+fn 空車卡件_對不到包裹_只在堵塞開始記一筆() {
+    let mut s = Sim::new();
+    // 沒有任何包裹綁在 9 號小車上
+    s.sorter("~k9 25 25");
+    s.at(500).sorter("~k9 25 25");
+    assert_eq!(s.out.jam_records, vec![(9, 25, false)], "堵塞持續的 ~k 不重複記");
+    // 安靜超過 2 秒堵塞解除，再卡就是新的一次
+    s.at(2500).sorter("~k9 25 25");
+    assert_eq!(s.out.jam_records.len(), 2);
 }
