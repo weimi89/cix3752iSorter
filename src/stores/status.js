@@ -13,6 +13,10 @@ export const useStatusStore = defineStore('status', {
     print: { pending: 0, failed: 0 },
     report: { pending: 0, failed: 0 },
     chuteLatency: null,
+    // 近一小時 { total, noread }，看板讀碼失敗卡用來標紅
+    noread1h: { total: 0, noread: 0 },
+    // 異常口待處理 { count, oldest_ms }
+    abnormalPending: { count: 0, oldest_ms: null },
     // 伺服器時鐘 − 本機時鐘(毫秒)。畫面上「已經過」這類跟包裹時間戳相減的數字要加上它,
     // 否則網頁版從別台電腦開、兩邊時鐘差一兩秒時會算出負數
     serverOffsetMs: 0,
@@ -35,6 +39,8 @@ export const useStatusStore = defineStore('status', {
         this.print = d.print
         this.report = d.report
         this.chuteLatency = d.chute_latency ?? null
+        this.noread1h = d.noread_1h ?? { total: 0, noread: 0 }
+        this.abnormalPending = d.abnormal_pending ?? { count: 0, oldest_ms: null }
         this.lastRefreshAt = Date.now()
       } catch (e) {
         console.warn('狀態載入失敗', e)

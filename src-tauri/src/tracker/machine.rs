@@ -51,6 +51,10 @@ pub trait Outputs {
     fn chute_decided(&mut self, p: &Parcel);
     /// 一次堵塞開始：記一筆卡件事件（統計用）。`parcel` 是當時綁在那台小車上的包裹，可能沒有
     fn store_jam(&mut self, _ts_ms: i64, _cart: u32, _pos: i32, _parcel: Option<&Parcel>) {}
+    /// 某袋開／關，寫 chute_bags
+    fn store_bag(&mut self, _op: BagOp) {}
+    /// 本袋達到上限（到上限那一件、之後每多 5 件再提醒一次）
+    fn bag_full(&mut self, _code: &str, _seq: u32, _count: u32, _limit: u32) {}
 }
 
 /// 格口對照（來自 `chutes` 表）
@@ -60,6 +64,37 @@ pub struct ChuteRow {
     pub cid: Cid,
     pub printer_port: Option<String>,
     pub enabled: bool,
+    pub label: String,
+    pub sort_order: i64,
+    /// 每袋上限（0 = 不限、不提醒換袋）
+    pub bag_limit: u32,
+}
+
+/// 某格口現在這袋
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct BagState {
+    /// 當天第幾袋
+    pub seq: u32,
+    pub started_ms: i64,
+    pub count: u32,
+}
+
+/// 看板用：每個啟用中的格口一列
+#[derive(Clone, Debug, serde::Serialize, PartialEq)]
+pub struct BagInfo {
+    pub code: String,
+    pub label: String,
+    pub seq: u32,
+    pub started_ms: i64,
+    pub count: u32,
+    pub limit: u32,
+}
+
+/// 袋子開關的持久化操作（交給 store 寫 chute_bags）
+#[derive(Clone, Debug, PartialEq)]
+pub enum BagOp {
+    Open { code: String, seq: u32, started_ms: i64 },
+    Close { code: String, seq: u32, ended_ms: i64, count: u32, closed_by: String },
 }
 
 #[derive(Clone, Debug)]
@@ -75,6 +110,8 @@ pub enum Input {
     SorterReset,
     /// 網頁：直接送一條分揀機指令（燈控、光電查詢）
     SorterRaw(String),
+    /// 換袋：關掉某格口現在這袋、開下一袋。`by` 記是誰換的（web / desktop）
+    NewBag { code: String, by: String },
 }
 
 #[derive(Clone, Debug, Default, serde::Serialize)]
@@ -117,6 +154,8 @@ pub struct Machine {
     pub today_count: u64,
     pub current: Option<u64>,
     now_ms: i64,
+    /// 各格口現在這袋（沒落過件的格口還沒有，第一件落下時才開）
+    bags: HashMap<String, BagState>,
 }
 
 impl Machine {
@@ -147,7 +186,67 @@ impl Machine {
             today_count,
             current: None,
             now_ms,
+            bags: HashMap::new(),
         }
+    }
+
+    /// 啟動時把 DB 裡還開著的袋（含算好的件數）灌進來
+    pub fn set_bags(&mut self, bags: HashMap<String, BagState>) {
+        self.bags = bags;
+    }
+
+    /// 看板用：啟用中的格口照順序，每格一列；還沒開袋的顯示第 1 袋 0 件
+    pub fn bags_view(&self) -> Vec<BagInfo> {
+        let mut rows: Vec<&ChuteRow> = self.chutes.values().filter(|c| c.enabled).collect();
+        rows.sort_by(|a, b| a.sort_order.cmp(&b.sort_order).then_with(|| a.code.cmp(&b.code)));
+        rows.into_iter()
+            .map(|c| {
+                let b = self.bags.get(&c.code).cloned().unwrap_or(BagState { seq: 1, started_ms: 0, count: 0 });
+                BagInfo { code: c.code.clone(), label: c.label.clone(), seq: b.seq, started_ms: b.started_ms, count: b.count, limit: c.bag_limit }
+            })
+            .collect()
+    }
+
+    /// 一件落格完成 → 本袋 +1；到上限那一件提醒，之後每多 5 件再提醒（袋子還沒換就一直有人在投）
+    fn on_landed<O: Outputs>(&mut self, code: &str, ts: i64, out: &mut O) {
+        let limit = self.chutes.get(code).map(|c| c.bag_limit).unwrap_or(0);
+        let bag = match self.bags.get_mut(code) {
+            Some(b) => b,
+            None => {
+                out.store_bag(BagOp::Open { code: code.to_string(), seq: 1, started_ms: ts });
+                self.bags.entry(code.to_string()).or_insert(BagState { seq: 1, started_ms: ts, count: 0 })
+            }
+        };
+        bag.count += 1;
+        let (seq, count) = (bag.seq, bag.count);
+        if limit > 0 && count >= limit && (count == limit || (count - limit) % 5 == 0) {
+            out.bag_full(code, seq, count, limit);
+        }
+    }
+
+    /// 換袋：關現在這袋（定版件數）、開下一袋
+    fn new_bag<O: Outputs>(&mut self, code: &str, by: &str, ts: i64, out: &mut O) {
+        if !self.chutes.contains_key(code) {
+            out.log(crate::event_log::Level::Warn, "chute", "new_bag", format!("換袋失敗：沒有格口 {code}"));
+            return;
+        }
+        let prev = self.bags.get(code).cloned();
+        let (next_seq, prev_count) = match &prev {
+            Some(b) => {
+                out.store_bag(BagOp::Close { code: code.to_string(), seq: b.seq, ended_ms: ts, count: b.count, closed_by: by.to_string() });
+                (b.seq + 1, b.count)
+            }
+            None => (1, 0),
+        };
+        out.store_bag(BagOp::Open { code: code.to_string(), seq: next_seq, started_ms: ts });
+        self.bags.insert(code.to_string(), BagState { seq: next_seq, started_ms: ts, count: 0 });
+        let label = self.chutes.get(code).map(|c| c.label.clone()).unwrap_or_default();
+        out.log(
+            crate::event_log::Level::Info,
+            "chute",
+            "new_bag",
+            format!("格口 {code} {label} 換袋：第 {next_seq} 袋開始（上一袋 {prev_count} 件，{by}）"),
+        );
     }
 
     pub fn set_config(&mut self, cfg: AppConfig) {
@@ -177,6 +276,10 @@ impl Machine {
         match input {
             Input::Device(ev) => self.on_device(ev, out),
             Input::Chute { key, code, cid, source, response_id, reason, label } => self.on_chute(key, code, cid, source, response_id, reason, label, out),
+            Input::NewBag { code, by } => {
+                let ts = self.now_ms;
+                self.new_bag(&code, &by, ts, out);
+            }
             Input::Tick { now_ms } => self.on_tick(now_ms, out),
             Input::BeltStart => self.belt_start(out, "網頁啟動"),
             Input::BeltStop => self.belt_stop(out, "網頁停止"),
@@ -447,6 +550,16 @@ impl Machine {
                         p.u_ms = Some(ts);
                         p.lost_pos = Some(pos);
                         out.store_event(p, ts, "sorter", "u", Some(raw));
+                        // 剛上車就在入口不見（2026-09-18 遺失 29 件有 9 件在位置 1）：多半是人工拿走或雙件重疊，
+                        // 跟後段掉件不同，單獨標出來現場才知道要去看入口
+                        if pos <= 1 {
+                            out.log(
+                                crate::event_log::Level::Warn,
+                                "tracker",
+                                "lost_entry",
+                                format!("包裹 {} 剛進分揀機就在入口（位置 {pos}）遺失，請確認入口光電或是否被人工取走", p.barcode_or_noread()),
+                            );
+                        }
                         if !p.is_ended() {
                             status = Some(if self.cfg.sorter.u_as_done {
                                 Status::Done
@@ -683,6 +796,10 @@ impl Machine {
         out.parcel_changed(p);
         if matches!(status, Status::Lost | Status::Cancelled) && reason != "u" {
             out.log(crate::event_log::Level::Warn, "tracker", "end", format!("包裹 {} → {}（{reason}）", p.barcode_or_noread(), status.label()));
+        }
+        let landed = (status == Status::Done).then(|| p.chute.as_ref().map(|c| c.code.clone())).flatten();
+        if let Some(code) = landed {
+            self.on_landed(&code, ts, out);
         }
         self.unbound.retain(|&k| k != key);
         if self.head_current == Some(key) {

@@ -276,6 +276,22 @@ const noreadPoints = computed(() => {
   const rows = isSingleDay.value ? d.hourly.map(h => ({ label: String(h.hour).padStart(2, '0'), total: h.total, noread: h.noread })) : d.daily.map(r => ({ label: r.day.slice(5), total: r.total, noread: r.noread }))
   return rows.map(r => ({ ...r, rate: r.total ? Math.round((r.noread / r.total) * 1000) / 10 : null }))
 })
+// 讀碼失敗依包裹長度（光電長度單位）：短件失敗率高得多，現場調讀碼站後拿這張圖對照
+const lengthRows = computed(() => (data.value?.noread_by_length || []).map(b => ({ ...b, rate: b.total ? Math.round((b.noread / b.total) * 1000) / 10 : null })))
+const noreadLengthOption = computed(() => ({
+  tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' }, formatter: ps => ps.map(p => `${p.marker}${p.seriesName}：${p.value ?? '—'}${p.seriesIndex === 1 ? '%' : ''}`).join('<br>') },
+  legend: { top: 0, data: [t('page.stats.lengthTotalSeries'), t('page.stats.noreadRateSeries')], textStyle: { color: hexToRgba(color('on-surface'), 0.7) } },
+  grid: { left: 44, right: 44, top: 36, bottom: 28 },
+  xAxis: { type: 'category', data: lengthRows.value.map(r => r.bucket), ...axisStyle() },
+  yAxis: [
+    { type: 'value', ...axisStyle(), splitLine: { lineStyle: { color: hexToRgba(color('on-surface'), 0.08) } } },
+    { type: 'value', ...axisStyle(), axisLabel: { formatter: '{value}%', color: hexToRgba(color('on-surface'), 0.6) }, splitLine: { show: false } },
+  ],
+  series: [
+    { name: t('page.stats.lengthTotalSeries'), type: 'bar', data: lengthRows.value.map(r => r.total), itemStyle: { color: hexToRgba(color('info'), 0.5) } },
+    { name: t('page.stats.noreadRateSeries'), type: 'bar', yAxisIndex: 1, data: lengthRows.value.map(r => r.rate), itemStyle: { color: color('warning') } },
+  ],
+}))
 const noreadOption = computed(() => ({
   tooltip: { trigger: 'axis' },
   legend: { top: 0, data: [t('page.stats.noreadCountSeries'), t('page.stats.noreadRateSeries')], textStyle: { color: hexToRgba(color('on-surface'), 0.7) } },
@@ -772,6 +788,16 @@ const heatmapOption = computed(() => ({
             <VCardSubtitle>{{ $t('page.stats.noreadRateHint') }}</VCardSubtitle>
           </VCardItem>
           <VCardText class="pt-0"><VChart :option="noreadOption" autoresize style="height: 240px" /></VCardText>
+        </VCard>
+      </VCol>
+      <VCol cols="12" md="6">
+        <VCard class="card-shadow h-100">
+          <VCardItem>
+            <template #prepend><VAvatar color="warning" variant="tonal"><VIcon icon="tabler-ruler-measure" /></VAvatar></template>
+            <VCardTitle>{{ $t('page.stats.noreadByLength') }}</VCardTitle>
+            <VCardSubtitle>{{ $t('page.stats.noreadByLengthHint') }}</VCardSubtitle>
+          </VCardItem>
+          <VCardText class="pt-0"><VChart :option="noreadLengthOption" autoresize style="height: 240px" /></VCardText>
         </VCard>
       </VCol>
       <VCol cols="12" md="6">

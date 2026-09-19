@@ -58,6 +58,14 @@ pub struct CartCount {
     pub abnormal: i64,
 }
 
+/// 讀碼失敗依包裹長度（光電量到的長度單位）分桶：短件讀不到的比率高得多，現場調整讀碼站後可對照
+#[derive(Serialize, Debug, PartialEq)]
+pub struct LengthBucket {
+    pub bucket: &'static str,
+    pub total: i64,
+    pub noread: i64,
+}
+
 #[derive(Serialize)]
 pub struct HeatCell {
     /// 0 = 週日 … 6 = 週六（SQLite `%w`）
@@ -235,6 +243,7 @@ pub struct Overview {
     pub duplicates: DuplicateStats,
     /// 各小車（分揀機載具）的件數與異常數，看有沒有某台特別會出事
     pub by_cart: Vec<CartCount>,
+    pub noread_by_length: Vec<LengthBucket>,
     /// 這台有沒有印過任何面單。現場面單由中介機印時格口表雖然填了埠位、列印任務永遠是 0，
     /// 統計頁的列印卡就不顯示（看埠位有沒有設不準，所以看的是有沒有任務）
     pub printing_used: bool,
@@ -314,6 +323,7 @@ pub async fn overview(db: &DbPool, retention_days: u32, from: NaiveDate, to: Nai
     let devices = device_stats(db, &ts_from, &ts_to, ms_to.min(crate::db::now_ms())).await?;
     let duplicates = duplicate_stats(db, &ts_from, &ts_to).await?;
     let by_cart = cart_counts(db, &ts_from, &ts_to).await?;
+    let noread_by_length = length_buckets(db, &ts_from, &ts_to).await?;
     let printing_used: i64 = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM print_jobs)").fetch_one(db).await?;
 
     Ok(Overview {
@@ -340,6 +350,7 @@ pub async fn overview(db: &DbPool, retention_days: u32, from: NaiveDate, to: Nai
         devices,
         duplicates,
         by_cart,
+        noread_by_length,
         printing_used: printing_used > 0,
     })
 }
@@ -802,6 +813,39 @@ async fn cart_counts(db: &DbPool, ts_from: &str, ts_to: &str) -> anyhow::Result<
         .collect()
 }
 
+/// 讀碼失敗依包裹長度分桶；沒量到長度的（`~L` 沒來）不算
+pub const LENGTH_BUCKETS: [&str; 4] = ["<15", "15-24", "25-34", ">=35"];
+
+fn length_bucket(len: i64) -> &'static str {
+    match len {
+        l if l < 15 => LENGTH_BUCKETS[0],
+        l if l < 25 => LENGTH_BUCKETS[1],
+        l if l < 35 => LENGTH_BUCKETS[2],
+        _ => LENGTH_BUCKETS[3],
+    }
+}
+
+async fn length_buckets(db: &DbPool, ts_from: &str, ts_to: &str) -> anyhow::Result<Vec<LengthBucket>> {
+    let rows = sqlx::query(
+        "SELECT ir_length AS len, COUNT(*) AS n, COALESCE(SUM(barcode = 'NoRead'), 0) AS nr FROM parcels
+          WHERE started_at >= ? AND started_at < ? AND ir_length IS NOT NULL AND ir_length > 0
+          GROUP BY ir_length",
+    )
+    .bind(ts_from)
+    .bind(ts_to)
+    .fetch_all(db)
+    .await?;
+    let mut out: Vec<LengthBucket> = LENGTH_BUCKETS.iter().map(|b| LengthBucket { bucket: b, total: 0, noread: 0 }).collect();
+    for r in rows {
+        let len: i64 = r.try_get("len")?;
+        let b = length_bucket(len);
+        let slot = out.iter_mut().find(|o| o.bucket == b).expect("分桶名稱來自同一張表");
+        slot.total += r.try_get::<i64, _>("n")?;
+        slot.noread += r.try_get::<i64, _>("nr")?;
+    }
+    Ok(out)
+}
+
 /// 同一條碼在區間內上線 2 次以上（回流、重掃）
 async fn duplicate_stats(db: &DbPool, ts_from: &str, ts_to: &str) -> anyhow::Result<DuplicateStats> {
     let rows = sqlx::query(
@@ -1052,4 +1096,15 @@ mod tests {
         assert_eq!(parse_day(Some("2026-13-01")).unwrap_err().contains("日期格式錯誤"), true);
         assert_eq!(parse_day(Some("")).unwrap(), today);
     }
+    #[test]
+    fn 包裹長度分桶邊界() {
+        assert_eq!(length_bucket(0), "<15");
+        assert_eq!(length_bucket(14), "<15");
+        assert_eq!(length_bucket(15), "15-24");
+        assert_eq!(length_bucket(24), "15-24");
+        assert_eq!(length_bucket(25), "25-34");
+        assert_eq!(length_bucket(35), ">=35");
+        assert_eq!(length_bucket(300), ">=35");
+    }
+
 }

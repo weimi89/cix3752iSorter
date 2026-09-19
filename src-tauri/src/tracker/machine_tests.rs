@@ -23,6 +23,9 @@ struct Fake {
     printed: Vec<(String, String, Option<String>)>,
     /// (cart, pos, 有沒有對到包裹)
     jam_records: Vec<(u32, i32, bool)>,
+    bag_ops: Vec<super::machine::BagOp>,
+    /// (code, seq, count, limit)
+    bag_full: Vec<(String, u32, u32, u32)>,
 }
 
 impl Outputs for Fake {
@@ -66,12 +69,18 @@ impl Outputs for Fake {
     fn store_jam(&mut self, _ts: i64, cart: u32, pos: i32, parcel: Option<&super::parcel::Parcel>) {
         self.jam_records.push((cart, pos, parcel.is_some()));
     }
+    fn store_bag(&mut self, op: super::machine::BagOp) {
+        self.bag_ops.push(op);
+    }
+    fn bag_full(&mut self, code: &str, seq: u32, count: u32, limit: u32) {
+        self.bag_full.push((code.to_string(), seq, count, limit));
+    }
 }
 
 fn chutes() -> HashMap<String, ChuteRow> {
     let mut m = HashMap::new();
     for (code, cid, port) in [("L1", 1000323, Some("1-8.1")), ("R3", 1003324, None), ("RS", 1007301, None), ("LS", 1007323, None)] {
-        m.insert(code.to_string(), ChuteRow { code: code.into(), cid: Cid(cid), printer_port: port.map(String::from), enabled: true });
+        m.insert(code.to_string(), ChuteRow { code: code.into(), cid: Cid(cid), printer_port: port.map(String::from), enabled: true, label: code.into(), sort_order: 0, bag_limit: 0 });
     }
     m
 }
@@ -443,4 +452,90 @@ fn 空車卡件_對不到包裹_只在堵塞開始記一筆() {
     // 安靜超過 2 秒堵塞解除，再卡就是新的一次
     s.at(2500).sorter("~k9 25 25");
     assert_eq!(s.out.jam_records.len(), 2);
+}
+
+/// 走完一件到落格完成（R3），回傳這件的 key
+fn land_one(s: &mut Sim, slot: u32, cart: u32, barcode: &str) -> u64 {
+    s.belt(&format!("~P{slot} 1"));
+    let key = s.m.parcels.keys().copied().max().expect("~P 後一定有這件");
+    s.at(200).barcode(barcode);
+    s.at(300).chute(key, "R3");
+    s.at(100).belt(&format!("~L{slot} 25 111"));
+    s.at(900).belt(&format!("~O{slot} 1"));
+    s.at(14).sorter(&format!("~c{cart} {cart} 410 1"));
+    s.at(12).sorter(&format!("~j{cart} 1"));
+    s.at(400).sorter(&format!("~g{cart} -1 1"));
+    s.at(300).belt(&format!("~E{slot} 1"));
+    s.at(700).sorter(&format!("~e{cart}"));
+    assert_eq!(s.parcel(key).status, Status::Done);
+    s.at(400);
+    key
+}
+
+#[test]
+fn 落格件數累計_到上限提醒_之後每五件再提醒() {
+    use super::machine::BagOp;
+    let mut s = Sim::new();
+    let mut ch = chutes();
+    ch.get_mut("R3").unwrap().bag_limit = 2;
+    s.m.set_chutes(ch);
+    land_one(&mut s, 1, 7, "A1");
+    assert!(matches!(s.out.bag_ops.as_slice(), [BagOp::Open { code, seq: 1, .. }] if code == "R3"), "第一件落下才開第一袋: {:?}", s.out.bag_ops);
+    assert!(s.out.bag_full.is_empty());
+    land_one(&mut s, 2, 8, "A2");
+    assert_eq!(s.out.bag_full, vec![("R3".to_string(), 1, 2, 2)], "第 2 件到上限就提醒");
+    for (i, (slot, cart)) in [(3u32, 9u32), (4, 10), (5, 11), (6, 12)].iter().enumerate() {
+        land_one(&mut s, *slot, *cart, &format!("B{i}"));
+    }
+    assert_eq!(s.out.bag_full.len(), 1, "3～6 件（超過上限 1～4 件）不再提醒");
+    land_one(&mut s, 7, 13, "C7");
+    assert_eq!(s.out.bag_full.last().unwrap(), &("R3".to_string(), 1, 7, 2), "超過上限 5 件再提醒一次");
+    let view = s.m.bags_view();
+    let r3 = view.iter().find(|b| b.code == "R3").unwrap();
+    assert_eq!((r3.seq, r3.count, r3.limit), (1, 7, 2));
+    let l1 = view.iter().find(|b| b.code == "L1").unwrap();
+    assert_eq!((l1.seq, l1.count), (1, 0), "沒落過件的格口顯示第 1 袋 0 件");
+}
+
+#[test]
+fn 換袋_關上一袋定版件數_開下一袋歸零() {
+    use super::machine::BagOp;
+    let mut s = Sim::new();
+    land_one(&mut s, 1, 7, "A1");
+    land_one(&mut s, 2, 8, "A2");
+    s.out.bag_ops.clear();
+    let ts = s.now;
+    s.m.handle(Input::NewBag { code: "R3".into(), by: "web".into() }, &mut s.out);
+    assert_eq!(
+        s.out.bag_ops,
+        vec![
+            BagOp::Close { code: "R3".into(), seq: 1, ended_ms: ts, count: 2, closed_by: "web".into() },
+            BagOp::Open { code: "R3".into(), seq: 2, started_ms: ts },
+        ]
+    );
+    let r3 = s.m.bags_view().into_iter().find(|b| b.code == "R3").unwrap();
+    assert_eq!((r3.seq, r3.count), (2, 0));
+    assert!(s.out.logs.iter().any(|l| l.contains("換袋") && l.contains("第 2 袋") && l.contains("上一袋 2 件")), "logs={:?}", s.out.logs);
+    land_one(&mut s, 3, 9, "A3");
+    assert_eq!(s.m.bags_view().into_iter().find(|b| b.code == "R3").unwrap().count, 1, "新袋從 0 開始數");
+    // 沒落過件的格口直接換袋：只開第 1 袋
+    s.out.bag_ops.clear();
+    s.m.handle(Input::NewBag { code: "L1".into(), by: "web".into() }, &mut s.out);
+    assert_eq!(s.out.bag_ops, vec![BagOp::Open { code: "L1".into(), seq: 1, started_ms: s.now }]);
+    // 不存在的格口：不動、只記警告
+    s.out.bag_ops.clear();
+    s.m.handle(Input::NewBag { code: "ZZ".into(), by: "web".into() }, &mut s.out);
+    assert!(s.out.bag_ops.is_empty());
+}
+
+#[test]
+fn 啟動時灌入既有袋子_接著數() {
+    let mut s = Sim::new();
+    let mut bags = HashMap::new();
+    bags.insert("R3".to_string(), super::machine::BagState { seq: 3, started_ms: 5, count: 40 });
+    s.m.set_bags(bags);
+    land_one(&mut s, 1, 7, "A1");
+    let r3 = s.m.bags_view().into_iter().find(|b| b.code == "R3").unwrap();
+    assert_eq!((r3.seq, r3.count), (3, 41));
+    assert!(s.out.bag_ops.is_empty(), "已有袋子不再開新袋");
 }

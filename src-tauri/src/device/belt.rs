@@ -16,7 +16,10 @@ pub fn spawn(
 ) -> LineClient {
     let addr_rx = super::derive_addr(cfg_rx.clone(), |c| c.belt.addr.clone(), cancel.clone());
     let on_connect = super::derive(cfg_rx, |c| vec![c.belt.cmd.stop.clone(), c.belt.cmd.reset.clone()], cancel.clone());
-    let opts = LineOpts { on_connect, ..Default::default() };
+    // 皮帶線沒有件時整段不說話（運轉中也一樣），又沒有唯讀查詢可當心跳；照 300 秒讀逾時會把閒置當斷線，
+    // 重連時的「先停止再重置」還會真的把皮帶停下來（2026-09-18 19:50 現場就是這樣停的）。
+    // 斷線只靠 TCP keepalive（10 秒沒回 ACK 開始探、5 秒一次）抓：控制器活著就不會被誤判
+    let opts = LineOpts { on_connect, idle_timeout: None, ..Default::default() };
     let (client, mut events) = line_client::spawn("belt", addr_rx, opts, cancel.clone());
 
     tokio::spawn(async move {

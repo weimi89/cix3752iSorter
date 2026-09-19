@@ -107,9 +107,16 @@ pub struct TrackerSnapshot {
     /// 產生這份快照時的伺服器時鐘。前端算「已經過」要用它對齊自己的時鐘,
     /// 網頁版從別台電腦開時兩邊時鐘常差個一兩秒,直接用瀏覽器時間會算出負數。
     pub now_ms: i64,
+    /// 各格口現在這袋的件數與上限（看板換袋管理用）
+    pub bags: Vec<machine::BagInfo>,
 }
 
 impl TrackerHandle {
+    /// 換袋（網頁按鈕）
+    pub async fn new_bag(&self, code: String, by: String) {
+        let _ = self.tx.send(Input::NewBag { code, by }).await;
+    }
+
     pub async fn belt_start(&self) {
         let _ = self.tx.send(Input::BeltStart).await;
     }
@@ -190,13 +197,28 @@ impl TrackerHandle {
 }
 
 pub async fn load_chutes(db: &crate::db::DbPool) -> anyhow::Result<HashMap<String, ChuteRow>> {
-    let rows: Vec<(String, i64, Option<String>, i64)> =
-        sqlx::query_as("SELECT code, cid, printer_port, enabled FROM chutes").fetch_all(db).await?;
+    let rows: Vec<(String, i64, Option<String>, i64, String, i64, i64)> =
+        sqlx::query_as("SELECT code, cid, printer_port, enabled, label, sort_order, bag_limit FROM chutes").fetch_all(db).await?;
     Ok(rows
         .into_iter()
-        .map(|(code, cid, printer_port, enabled)| {
-            (code.clone(), ChuteRow { code, cid: Cid(cid as u32), printer_port, enabled: enabled != 0 })
+        .map(|(code, cid, printer_port, enabled, label, sort_order, bag_limit)| {
+            (code.clone(), ChuteRow { code, cid: Cid(cid as u32), printer_port, enabled: enabled != 0, label, sort_order, bag_limit: bag_limit.max(0) as u32 })
         })
+        .collect())
+}
+
+/// 啟動時：每個格口還開著的那袋，件數從 parcels 算（關袋前不存 count，重啟不會算錯）
+pub async fn load_open_bags(db: &crate::db::DbPool) -> anyhow::Result<HashMap<String, machine::BagState>> {
+    let rows: Vec<(String, i64, i64, i64)> = sqlx::query_as(
+        "SELECT b.chute_code, b.seq, b.started_ms,
+                (SELECT COUNT(*) FROM parcels p WHERE p.chute_code = b.chute_code AND p.status = 3 AND p.ended_ms >= b.started_ms) AS cnt
+           FROM chute_bags b WHERE b.ended_ms IS NULL",
+    )
+    .fetch_all(db)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(code, seq, started_ms, cnt)| (code, machine::BagState { seq: seq.max(1) as u32, started_ms, count: cnt.max(0) as u32 }))
         .collect())
 }
 
@@ -219,7 +241,53 @@ struct LiveOutputs {
     label_tx: mpsc::Sender<LabelJob>,
     led_via_sorter: bool,
     jam: JamThrottle,
-    jam_tx: mpsc::Sender<i32>,
+    jam_hot: JamHotspot,
+    jam_tx: mpsc::Sender<JamAlert>,
+}
+
+/// 要請中介機出聲的現場告警：卡件單次（照舊 Node 節流）、卡件熱點、袋滿
+#[derive(Debug, Clone, PartialEq)]
+pub enum JamAlert {
+    Chute(i32),
+    Hotspot { module: i32, count: usize },
+    BagFull { code: String, seq: u32, count: u32, limit: u32 },
+}
+
+/// 卡件熱點：同一模組在 `window_ms` 內累積到 `min_count` 次就提示「請檢查機構」，
+/// 提示過後 `realert_ms` 內不再重複。2026-09-18 模組 3 一天卡 11 次（全天 25 次），
+/// 單次告警每次都響、沒人看得出是同一個地方一直卡
+pub struct JamHotspot {
+    window_ms: i64,
+    min_count: usize,
+    realert_ms: i64,
+    hits: HashMap<i32, std::collections::VecDeque<i64>>,
+    last_alert: HashMap<i32, i64>,
+}
+
+impl JamHotspot {
+    pub fn new(window_ms: i64, min_count: usize, realert_ms: i64) -> Self {
+        Self { window_ms, min_count, realert_ms, hits: HashMap::new(), last_alert: HashMap::new() }
+    }
+
+    /// `~k` 的 pos → 模組（`pos/10+1`，與 JamThrottle 同算法）；回 Some((模組, 一小時內次數)) 表示要提示
+    pub fn on_jam(&mut self, pos: i32, now: i64) -> Option<(i32, usize)> {
+        let module = pos / 10 + 1;
+        let q = self.hits.entry(module).or_default();
+        q.push_back(now);
+        while q.front().is_some_and(|&t| now - t > self.window_ms) {
+            q.pop_front();
+        }
+        let count = q.len();
+        if count < self.min_count {
+            return None;
+        }
+        let last = self.last_alert.get(&module).copied().unwrap_or(i64::MIN / 2);
+        if now - last < self.realert_ms {
+            return None;
+        }
+        self.last_alert.insert(module, now);
+        Some((module, count))
+    }
 }
 
 /// 卡件告警節流（對齊舊 Node）：同一格口 `throttle_ms` 內只報一次；
@@ -303,10 +371,21 @@ impl machine::Outputs for LiveOutputs {
     }
     fn jam_alert(&mut self, pos: i32) {
         if let Some(chute_no) = self.jam.on_signal(pos, crate::db::now_ms()) {
-            let _ = self.jam_tx.try_send(chute_no);
+            let _ = self.jam_tx.try_send(JamAlert::Chute(chute_no));
         }
     }
+    fn store_bag(&mut self, op: machine::BagOp) {
+        self.store.send(store::StoreOp::Bag(op));
+    }
+    fn bag_full(&mut self, code: &str, seq: u32, count: u32, limit: u32) {
+        // 格口名稱由消費端（app.rs）查 chutes 表補上，這裡只送代碼
+        let _ = self.jam_tx.try_send(JamAlert::BagFull { code: code.to_string(), seq, count, limit });
+    }
     fn store_jam(&mut self, ts_ms: i64, cart: u32, pos: i32, parcel: Option<&Parcel>) {
+        // 每次堵塞開始只記一筆（machine 已去重），熱點就在這裡數
+        if let Some((module, count)) = self.jam_hot.on_jam(pos, ts_ms) {
+            let _ = self.jam_tx.try_send(JamAlert::Hotspot { module, count });
+        }
         self.store.send(store::StoreOp::Jam {
             ts_ms,
             cart,
@@ -335,8 +414,8 @@ impl machine::Outputs for LiveOutputs {
 pub struct TrackerPorts {
     /// 格口查詢請求（M3 的中介機 client 接這裡）
     pub chute_rx: mpsc::Receiver<ChuteRequest>,
-    /// 卡件告警（格口號）
-    pub jam_rx: mpsc::Receiver<i32>,
+    /// 卡件告警（單次格口號 / 熱點）
+    pub jam_rx: mpsc::Receiver<JamAlert>,
 }
 
 pub async fn spawn(
@@ -357,7 +436,7 @@ pub async fn spawn(
     let (tx, mut in_rx) = mpsc::channel::<Input>(1024);
     let (query_tx, mut query_rx) = mpsc::channel::<oneshot::Sender<TrackerSnapshot>>(16);
     let (chute_tx, chute_rx) = mpsc::channel::<ChuteRequest>(256);
-    let (jam_tx, jam_rx) = mpsc::channel::<i32>(64);
+    let (jam_tx, jam_rx) = mpsc::channel::<JamAlert>(64);
     let ir = Arc::new(IrChannel { op: tokio::sync::Mutex::new(()), pending: std::sync::Mutex::new(IrPending::default()) });
     let handle = TrackerHandle { tx, query_tx, sorter: devices.sorter.clone(), ir: ir.clone() };
 
@@ -370,9 +449,14 @@ pub async fn spawn(
         label_tx,
         led_via_sorter: cfg.sysled.via != "belt",
         jam: JamThrottle::new(cfg.middleware.jam_alert_throttle_ms as i64, cfg.middleware.jam_alert_reset_ms as i64),
+        jam_hot: JamHotspot::new(3_600_000, 3, 1_800_000),
         jam_tx,
     };
     let mut machine = Machine::new(cfg, chutes, today, crate::db::now_ms());
+    match load_open_bags(&app.db).await {
+        Ok(bags) => machine.set_bags(bags),
+        Err(e) => event_log::log(&app.db, Level::Warn, "chute", "bags", format!("讀取各格口目前袋子失敗，件數從 0 起算：{e}")),
+    }
     let mut cfg_rx = app.config.subscribe();
 
     tokio::spawn(async move {
@@ -437,6 +521,33 @@ fn snapshot(m: &Machine) -> TrackerSnapshot {
         current: m.current.and_then(|k| m.parcels.get(&k).cloned()),
         in_flight: m.in_flight().into_iter().cloned().collect(),
         now_ms: crate::db::now_ms(),
+        bags: m.bags_view(),
+    }
+}
+
+#[cfg(test)]
+mod jam_hotspot_tests {
+    use super::JamHotspot;
+
+    #[test]
+    fn 同模組一小時內第三次才提示_之後半小時不重複() {
+        let mut h = JamHotspot::new(3_600_000, 3, 1_800_000);
+        assert_eq!(h.on_jam(22, 0), None); // 模組 3
+        assert_eq!(h.on_jam(25, 60_000), None);
+        assert_eq!(h.on_jam(21, 120_000), Some((3, 3)));
+        assert_eq!(h.on_jam(22, 180_000), None, "剛提示過半小時內不再響");
+        assert_eq!(h.on_jam(22, 180_000 + 1_800_000), Some((3, 5)), "半小時後還在卡就再提示，次數累計");
+    }
+
+    #[test]
+    fn 超過一小時的舊卡件不算_不同模組各自算() {
+        let mut h = JamHotspot::new(3_600_000, 3, 1_800_000);
+        h.on_jam(2, 0); // 模組 1
+        h.on_jam(3, 1_000);
+        assert_eq!(h.on_jam(5, 3_700_000), None, "前兩次已超過一小時，只剩這一次");
+        h.on_jam(33, 3_700_000); // 模組 4
+        h.on_jam(35, 3_700_001);
+        assert_eq!(h.on_jam(31, 3_700_002), Some((4, 3)));
     }
 }
 

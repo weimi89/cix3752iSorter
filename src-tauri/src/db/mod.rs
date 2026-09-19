@@ -35,6 +35,17 @@ pub async fn init(data_dir: &Path) -> anyhow::Result<DbPool> {
 }
 
 /// 現在的 epoch 毫秒
+/// 本地時區今天 00:00 的 epoch 毫秒（「今天的前科」這類查詢用）
+pub fn today_start_ms() -> i64 {
+    use chrono::TimeZone;
+    let today = chrono::Local::now().date_naive();
+    chrono::Local
+        .from_local_datetime(&today.and_hms_opt(0, 0, 0).expect("00:00:00 必定合法"))
+        .single()
+        .map(|t| t.timestamp_millis())
+        .unwrap_or_else(now_ms)
+}
+
 pub fn now_ms() -> i64 {
     chrono::Local::now().timestamp_millis()
 }

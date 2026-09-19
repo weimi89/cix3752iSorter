@@ -52,6 +52,12 @@ export const api = {
   health: () => request('GET', '/api/health'),
   // 前端錯誤回報（見 api/errorReport.js）；後端記成事件記錄 `ui` 類別
   reportClientError: body => request('POST', '/api/client-errors', body),
+  // 異常口處理清單
+  abnormalList: params => request('GET', `/api/abnormal?${qs(params)}`),
+  abnormalHandle: (id, state) => request('POST', `/api/abnormal/${id}/handle`, { state }),
+  abnormalReopen: id => request('POST', `/api/abnormal/${id}/reopen`),
+  // 換袋：本袋件數歸零、上一袋定版
+  newBag: code => request('POST', `/api/chutes/${encodeURIComponent(code)}/new-bag`),
 
   parcels: params => request('GET', `/api/parcels?${qs(params)}`),
   parcel: id => request('GET', `/api/parcels/${id}`),

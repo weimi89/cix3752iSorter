@@ -59,9 +59,26 @@ pub async fn bootstrap(config_path: &Path, data_dir: &Path, cancel: Cancellation
         let mw = mw.clone();
         let mut jam_rx = ports.jam_rx;
         tokio::spawn(async move {
-            while let Some(chute_no) = jam_rx.recv().await {
-                event_log::log(&db, event_log::Level::Warn, "sorter", "jam", format!("M{chute_no} 卡件"));
-                mw.device_alert("PARCEL_JAM", &format!("M{chute_no} 卡件")).await;
+            while let Some(alert) = jam_rx.recv().await {
+                match alert {
+                    tracker::JamAlert::Chute(chute_no) => {
+                        event_log::log(&db, event_log::Level::Warn, "sorter", "jam", format!("M{chute_no} 卡件"));
+                        mw.device_alert("PARCEL_JAM", &format!("M{chute_no} 卡件")).await;
+                    }
+                    tracker::JamAlert::BagFull { code, seq, count, limit } => {
+                        let label: Option<String> = sqlx::query_scalar("SELECT label FROM chutes WHERE code = ?").bind(&code).fetch_optional(&db).await.ok().flatten();
+                        let msg = format!("格口 {code} {} 第 {seq} 袋已 {count} 件（上限 {limit}），請換袋", label.unwrap_or_default());
+                        event_log::log(&db, event_log::Level::Warn, "chute", "bag_full", msg.clone());
+                        crate::event_bus::emit("parcel-alert", serde_json::json!({ "kind": "bag_full", "code": code, "seq": seq, "count": count, "limit": limit, "message": msg }));
+                        mw.device_alert("BAG_FULL", &msg).await;
+                    }
+                    tracker::JamAlert::Hotspot { module, count } => {
+                        let msg = format!("模組 M{module} 一小時內第 {count} 次卡件，請檢查該段分流機構");
+                        event_log::log(&db, event_log::Level::Warn, "sorter", "jam_hotspot", msg.clone());
+                        crate::event_bus::emit("parcel-alert", serde_json::json!({ "kind": "jam_hotspot", "module": module, "count": count, "message": msg }));
+                        mw.device_alert("JAM_HOTSPOT", &msg).await;
+                    }
+                }
             }
         });
     }

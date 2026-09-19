@@ -3,6 +3,7 @@ export const navItems = [
   { heading: 'nav.section.live' },
   { title: 'nav.dashboard', icon: { icon: 'tabler-layout-dashboard' }, to: { name: 'dashboard' } },
   { title: 'nav.stats', icon: { icon: 'tabler-chart-pie' }, to: { name: 'stats' } },
+  { title: 'nav.abnormal', icon: { icon: 'tabler-alert-triangle' }, to: { name: 'abnormal' } },
   { title: 'nav.parcels', icon: { icon: 'tabler-packages' }, to: { name: 'parcels' } },
 
   { heading: 'nav.section.queues' },

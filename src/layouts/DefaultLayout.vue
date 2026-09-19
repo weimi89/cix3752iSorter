@@ -19,6 +19,7 @@ const { t } = useI18n()
 
 let unlistenAlert = null
 let unlistenMsg = null
+let unlistenParcel = null
 
 onMounted(() => {
   status.start()
@@ -29,12 +30,17 @@ onMounted(() => {
   unlistenMsg = listen('system-message', ({ payload }) => {
     if (payload.level === 'error') toast(payload.message, { type: 'error', autoClose: 6000 })
   })
+  // 包裹層級的現場提示：同一件反覆走異常口、已完成卻又進線、同模組反覆卡件——要停留久一點讓人看到條碼
+  unlistenParcel = listen('parcel-alert', ({ payload }) => {
+    toast(payload.message, { type: 'warning', autoClose: 12000 })
+  })
 })
 
 onBeforeUnmount(() => {
   status.stop()
   unlistenAlert?.()
   unlistenMsg?.()
+  unlistenParcel?.()
 })
 </script>
 

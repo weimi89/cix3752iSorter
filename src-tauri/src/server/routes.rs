@@ -64,6 +64,10 @@ pub(super) fn api_router() -> Router<ServerState> {
         .route("/config", get(config_get).put(config_put))
         .route("/web-auth/password", get(web_auth_password_get).put(web_auth_password_put))
         .route("/chutes", get(chutes_get).put(chutes_put))
+        .route("/chutes/{code}/new-bag", post(chute_new_bag))
+        .route("/abnormal", get(abnormal_list))
+        .route("/abnormal/{id}/handle", post(abnormal_handle))
+        .route("/abnormal/{id}/reopen", post(abnormal_reopen))
         .route("/belt/start", post(belt_start))
         .route("/belt/stop", post(belt_stop))
         .route("/sorter/reset", post(sorter_reset))
@@ -108,9 +112,30 @@ async fn status(State(state): State<ServerState>) -> ApiResult<serde_json::Value
     .fetch_one(&state.app.db)
     .await
     .unwrap_or((0, 0));
+    // 近一小時讀碼失敗率：看板即時顯示，超過門檻標紅（2026-09-18 讀碼失敗率一晚從 1.9% 爬到 3.6% 沒人發現）
+    let (noread_total, noread_count): (i64, i64) = sqlx::query_as(
+        "SELECT COUNT(*), COALESCE(SUM(barcode = 'NoRead'), 0) FROM parcels WHERE started_ms >= ?",
+    )
+    .bind(crate::db::now_ms() - 3_600_000)
+    .fetch_one(&state.app.db)
+    .await
+    .unwrap_or((0, 0));
+    // 異常口待處理件：看板要看得到有幾件沒人理、最久等了多久
+    let default_chute = state.app.config.current().general.default_chute;
+    let (abn_pending, abn_oldest): (i64, Option<i64>) = sqlx::query_as(
+        "SELECT COUNT(*), MIN(p.ended_ms) FROM parcels p LEFT JOIN abnormal_handling h ON h.parcel_id = p.id
+          WHERE p.chute_code = ? AND p.status = 3 AND p.started_ms >= ? AND h.state IS NULL",
+    )
+    .bind(&default_chute)
+    .bind(crate::db::today_start_ms())
+    .fetch_one(&state.app.db)
+    .await
+    .unwrap_or((0, None));
     Ok(Json(serde_json::json!({
         "version": env!("CARGO_PKG_VERSION"),
         "uptime_secs": state.app.started_at.elapsed().as_secs(),
+        "noread_1h": { "total": noread_total, "noread": noread_count },
+        "abnormal_pending": { "count": abn_pending, "oldest_ms": abn_oldest },
         "devices": { "belt": rt.belt, "sorter": rt.sorter, "camera": rt.camera },
         "tracker": tracker,
         "chute_latency": state.app.resolver.get().map(|r| r.latency_stats()),
@@ -590,13 +615,134 @@ struct ChuteApi {
     printer_port: Option<String>,
     enabled: bool,
     sort_order: i64,
+    /// 每袋上限（0 = 不限）
+    #[serde(default)]
+    bag_limit: i64,
 }
 
 async fn chutes_get(State(state): State<ServerState>) -> ApiResult<Vec<ChuteApi>> {
-    let rows = sqlx::query_as::<_, ChuteApi>("SELECT code, label, cid, printer_port, enabled, sort_order FROM chutes ORDER BY sort_order, code")
+    let rows = sqlx::query_as::<_, ChuteApi>("SELECT code, label, cid, printer_port, enabled, sort_order, bag_limit FROM chutes ORDER BY sort_order, code")
         .fetch_all(&state.app.db)
         .await?;
     Ok(Json(rows))
+}
+
+// ---------- 異常口處理清單 ----------
+
+#[derive(Deserialize)]
+struct AbnormalQuery {
+    /// pending / handled / all（預設 pending）
+    #[serde(default)]
+    state: String,
+    #[serde(default = "default_abnormal_limit")]
+    limit: i64,
+}
+fn default_abnormal_limit() -> i64 {
+    200
+}
+
+#[derive(serde::Serialize, sqlx::FromRow)]
+struct AbnormalRow {
+    id: i64,
+    barcode: String,
+    started_at: String,
+    ended_ms: Option<i64>,
+    chute_code: Option<String>,
+    chute_source: Option<String>,
+    chute_reason: Option<String>,
+    cart: Option<i64>,
+    state: Option<String>,
+    handled_ms: Option<i64>,
+    handled_by: Option<String>,
+}
+
+/// 今天落到異常口（預設格口）的件；待處理的最舊排前面，已處理的最近處理排前面
+async fn abnormal_list(State(state): State<ServerState>, Query(q): Query<AbnormalQuery>) -> ApiResult<serde_json::Value> {
+    let default_chute = state.app.config.current().general.default_chute;
+    let since = crate::db::today_start_ms();
+    let (filter, order) = match q.state.as_str() {
+        "handled" => ("AND h.state IS NOT NULL", "h.handled_ms DESC"),
+        "all" => ("", "(h.state IS NULL) DESC, p.ended_ms DESC"),
+        _ => ("AND h.state IS NULL", "p.ended_ms ASC"),
+    };
+    let sql = format!(
+        "SELECT p.id, p.barcode, p.started_at, p.ended_ms, p.chute_code, p.chute_source, p.chute_reason, p.cart,
+                h.state, h.handled_ms, h.handled_by
+           FROM parcels p LEFT JOIN abnormal_handling h ON h.parcel_id = p.id
+          WHERE p.chute_code = ? AND p.status = 3 AND p.started_ms >= ? {filter}
+          ORDER BY {order} LIMIT ?"
+    );
+    let rows = sqlx::query_as::<_, AbnormalRow>(sqlx::AssertSqlSafe(sql))
+        .bind(&default_chute)
+        .bind(since)
+        .bind(q.limit.clamp(1, 1000))
+        .fetch_all(&state.app.db)
+        .await?;
+    let pending: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM parcels p LEFT JOIN abnormal_handling h ON h.parcel_id = p.id
+          WHERE p.chute_code = ? AND p.status = 3 AND p.started_ms >= ? AND h.state IS NULL",
+    )
+    .bind(&default_chute)
+    .bind(since)
+    .fetch_one(&state.app.db)
+    .await?;
+    Ok(Json(serde_json::json!({ "list": rows, "pending": pending, "now_ms": crate::db::now_ms() })))
+}
+
+#[derive(Deserialize)]
+struct HandleBody {
+    /// removed（已下架）/ refed（已重投）
+    state: String,
+}
+
+async fn abnormal_handle(State(state): State<ServerState>, Path(id): Path<i64>, Json(body): Json<HandleBody>) -> ApiResult<serde_json::Value> {
+    if !matches!(body.state.as_str(), "removed" | "refed") {
+        return Err(bad("處理狀態只能是 removed（已下架）或 refed（已重投）"));
+    }
+    let default_chute = state.app.config.current().general.default_chute;
+    let barcode: Option<String> = sqlx::query_scalar("SELECT barcode FROM parcels WHERE id = ? AND chute_code = ? AND status = 3")
+        .bind(id)
+        .bind(&default_chute)
+        .fetch_optional(&state.app.db)
+        .await?;
+    let Some(barcode) = barcode else {
+        return Err(ApiError(StatusCode::NOT_FOUND, "找不到這件異常口包裹".into()));
+    };
+    let now = crate::db::now_ms();
+    sqlx::query("INSERT INTO abnormal_handling (parcel_id, state, handled_ms, handled_by) VALUES (?, ?, ?, 'web')
+                 ON CONFLICT(parcel_id) DO UPDATE SET state = excluded.state, handled_ms = excluded.handled_ms, handled_by = excluded.handled_by")
+        .bind(id)
+        .bind(&body.state)
+        .bind(now)
+        .execute(&state.app.db)
+        .await?;
+    let what = if body.state == "removed" { "已下架" } else { "已重投" };
+    event_log::log(&state.app.db, Level::Info, "chute", "abnormal_handled", format!("異常件 {barcode} {what}（網頁）"));
+    crate::event_bus::emit("abnormal-updated", serde_json::json!({ "id": id, "state": body.state }));
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// 按錯了：取消處理紀錄，回到待處理
+async fn abnormal_reopen(State(state): State<ServerState>, Path(id): Path<i64>) -> ApiResult<serde_json::Value> {
+    let n = sqlx::query("DELETE FROM abnormal_handling WHERE parcel_id = ?").bind(id).execute(&state.app.db).await?.rows_affected();
+    if n == 0 {
+        return Err(ApiError(StatusCode::NOT_FOUND, "這件沒有處理紀錄".into()));
+    }
+    crate::event_bus::emit("abnormal-updated", serde_json::json!({ "id": id, "state": null }));
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// 換袋：現場把某格口的袋子換掉後按一下，本袋件數歸零、上一袋定版
+async fn chute_new_bag(State(state): State<ServerState>, Path(code): Path<String>) -> ApiResult<serde_json::Value> {
+    let exists: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM chutes WHERE code = ?").bind(&code).fetch_one(&state.app.db).await?;
+    if exists == 0 {
+        return Err(bad(format!("沒有格口 {code}")));
+    }
+    let Some(h) = state.app.tracker.get() else {
+        return Err(ApiError(StatusCode::SERVICE_UNAVAILABLE, "狀態機尚未啟動".into()));
+    };
+    h.new_bag(code, "web".into()).await;
+    Ok(Json(serde_json::json!({ "ok": true })))
 }
 
 async fn chutes_put(State(state): State<ServerState>, Json(list): Json<Vec<ChuteApi>>) -> ApiResult<serde_json::Value> {
@@ -615,13 +761,14 @@ async fn chutes_put(State(state): State<ServerState>, Json(list): Json<Vec<Chute
     let mut tx = state.app.db.begin().await?;
     sqlx::query("DELETE FROM chutes").execute(&mut *tx).await?;
     for c in &list {
-        sqlx::query("INSERT INTO chutes (code, label, cid, printer_port, enabled, sort_order) VALUES (?, ?, ?, ?, ?, ?)")
+        sqlx::query("INSERT INTO chutes (code, label, cid, printer_port, enabled, sort_order, bag_limit) VALUES (?, ?, ?, ?, ?, ?, ?)")
             .bind(c.code.trim())
             .bind(&c.label)
             .bind(c.cid)
             .bind(c.printer_port.as_ref().filter(|p| !p.trim().is_empty()))
             .bind(c.enabled as i64)
             .bind(c.sort_order)
+            .bind(c.bag_limit.max(0))
             .execute(&mut *tx)
             .await?;
     }

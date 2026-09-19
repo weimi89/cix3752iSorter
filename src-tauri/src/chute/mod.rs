@@ -98,6 +98,109 @@ pub struct Decision {
     pub reason: Option<String>,
 }
 
+/// 今天同一條碼的一筆前科（`history_verdict` 的輸入，從 parcels 表撈）
+#[derive(Debug, Clone)]
+pub struct PriorParcel {
+    pub status: i64,
+    pub chute_code: Option<String>,
+    pub chute_source: Option<String>,
+    pub chute_reason: Option<String>,
+    pub started_ms: i64,
+}
+
+impl PriorParcel {
+    /// 上次真的分到正常格口並完成：走異常口的件狀態也是「完成」，那是重投迴圈的常態，不算
+    fn completed_normally(&self) -> bool {
+        self.status == 3 && self.chute_reason.is_none() && matches!(self.chute_source.as_deref(), Some("api") | Some("manual"))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum HistoryAlert {
+    /// 這件又因同一原因走異常口；`count` 含這一次
+    RepeatDefault { count: usize, reason: String },
+    /// 之前已完成分揀，現在又進線
+    ReEntry { prev_chute: String, prev_started_ms: i64 },
+}
+
+/// 同條碼今天落到異常口（`default_chute`）且還沒處理的件，全部記成「已重投（auto）」；回記了幾件。
+/// 失敗只記警告——這是清單狀態，不能影響分揀
+pub async fn mark_refed(db: &crate::db::DbPool, barcode: &str, ulid: &str, since_ms: i64, default_chute: &str) -> u64 {
+    let r = sqlx::query(
+        "INSERT INTO abnormal_handling (parcel_id, state, handled_ms, handled_by)
+         SELECT p.id, 'refed', ?, 'auto' FROM parcels p
+          WHERE p.barcode = ? AND p.ulid <> ? AND p.started_ms >= ? AND p.chute_code = ? AND p.status = 3
+            AND NOT EXISTS (SELECT 1 FROM abnormal_handling h WHERE h.parcel_id = p.id)",
+    )
+    .bind(crate::db::now_ms())
+    .bind(barcode)
+    .bind(ulid)
+    .bind(since_ms)
+    .bind(default_chute)
+    .execute(db)
+    .await;
+    match r {
+        Ok(r) => r.rows_affected(),
+        Err(e) => {
+            tracing::warn!(%barcode, "異常件自動結案失敗: {e}");
+            0
+        }
+    }
+}
+
+/// 同一條碼從 `since_ms` 起的其他包裹（排除自己），新的在前。查詢失敗回空——這是提示，不能影響分揀
+pub async fn load_prior(db: &crate::db::DbPool, barcode: &str, ulid: &str, since_ms: i64) -> Vec<PriorParcel> {
+    let rows: Vec<(i64, Option<String>, Option<String>, Option<String>, i64)> = sqlx::query_as(
+        "SELECT status, chute_code, chute_source, chute_reason, started_ms FROM parcels
+          WHERE barcode = ? AND ulid <> ? AND started_ms >= ? ORDER BY started_ms DESC LIMIT 10",
+    )
+    .bind(barcode)
+    .bind(ulid)
+    .bind(since_ms)
+    .fetch_all(db)
+    .await
+    .unwrap_or_default();
+    rows.into_iter()
+        .map(|(status, chute_code, chute_source, chute_reason, started_ms)| PriorParcel { status, chute_code, chute_source, chute_reason, started_ms })
+        .collect()
+}
+
+/// 純函式：依前科決定要不要提示。同原因重複走異常口優先於「已完成又進線」——
+/// 關轉件每次都是異常口，若先看「曾完成」永遠不會命中；反過來一件完成過的包裹再進線後走異常口，
+/// 也是值得提示「又來了」而不是「格口滿」
+pub fn history_verdict(prior: &[PriorParcel], source: ChuteSource, reason: Option<&str>) -> Option<HistoryAlert> {
+    if prior.is_empty() {
+        return None;
+    }
+    if source == ChuteSource::Default {
+        if let Some(reason) = reason {
+            let same = prior.iter().filter(|p| p.chute_reason.as_deref() == Some(reason)).count();
+            if same >= 1 {
+                return Some(HistoryAlert::RepeatDefault { count: same + 1, reason: reason.to_string() });
+            }
+        }
+    }
+    prior
+        .iter()
+        .find(|p| p.completed_normally())
+        .map(|p| HistoryAlert::ReEntry { prev_chute: p.chute_code.clone().unwrap_or_else(|| "?".into()), prev_started_ms: p.started_ms })
+}
+
+/// 原因代碼的現場說法（提示訊息與語音用；統計頁另有 i18n）
+pub fn reason_label(code: &str) -> &str {
+    match code {
+        "STORE_CLOSED" => "門市關轉",
+        "NOT_FOUND" => "查無訂單",
+        "UNCONFIRMED" => "訂單未確認",
+        "NO_CHANNEL" => "中介機未給格口",
+        "CHUTE_DISABLED" => "格口已停用",
+        "CHUTE_UNKNOWN" => "格口不在對照表",
+        "MW_UNREACHABLE" => "中介機連不上",
+        "LABEL_FETCH_FAILED" => "面單下載失敗",
+        other => other,
+    }
+}
+
 /// 純函式：把中介機回應對到格口表（可單元測試）
 pub fn decide(resp: &ParcelResp, chutes: &HashMap<String, ChuteRow>, default_code: &str) -> Decision {
     let default_cid = chutes.get(default_code).map(|r| r.cid).unwrap_or(Cid(1007301));
@@ -189,7 +292,7 @@ impl ChuteResolver {
     }
 
     async fn resolve(&self, req: ChuteRequest) {
-        let ChuteRequest { key, ulid: _, barcode, notify_only } = req;
+        let ChuteRequest { key, ulid, barcode, notify_only } = req;
         let started = std::time::Instant::now();
         let default_code = self.app.config.current().general.default_chute;
         let result = self.mw.query_parcel(&barcode).await;
@@ -230,7 +333,44 @@ impl ChuteResolver {
             tracing::info!(%barcode, chute = %decision.code, elapsed, label = payload.is_some(), "格口");
         }
         event_bus::emit("chute-resolved", serde_json::json!({ "key": key, "barcode": barcode, "chute": decision.code, "source": decision.source, "elapsed_ms": elapsed, "note": decision.note }));
-        self.tracker.chute_result(key, decision.code, decision.cid, decision.source, decision.response_id, decision.reason, payload);
+        self.tracker.chute_result(key, decision.code, decision.cid, decision.source, decision.response_id, decision.reason.clone(), payload);
+        // 決定先送出去，前科查詢另外跑：它要查 DB、可能還要通知中介機，不能拖住分揀
+        let this = self.clone();
+        let (source, reason) = (decision.source, decision.reason);
+        tokio::spawn(async move {
+            if source == ChuteSource::Api {
+                // 同條碼今天走過異常口、現在中介機正常給格口 → 那些異常件視為「已重投」自動結案
+                let db = this.app.db.clone();
+                let n = mark_refed(&db, &barcode, &ulid, crate::db::today_start_ms(), &default_code).await;
+                if n > 0 {
+                    event_bus::emit("abnormal-updated", serde_json::json!({ "barcode": barcode, "auto": n }));
+                }
+            }
+            this.history_alert(&ulid, &barcode, source, reason.as_deref()).await
+        });
+    }
+
+    /// 同一條碼今天的前科：反覆因同一原因走異常口（門市關轉件被一投再投，今天有一件投了 4 次），
+    /// 或已完成卻又進線（格口滿溢彈回皮帶／人工重投）。只看今天、排除這一件自己；
+    /// 查不到（DB 忙）就當沒有——這是提示，不能影響分揀。
+    async fn history_alert(&self, ulid: &str, barcode: &str, source: ChuteSource, reason: Option<&str>) {
+        let prior = load_prior(&self.app.db, barcode, ulid, crate::db::today_start_ms()).await;
+        let Some(alert) = history_verdict(&prior, source, reason) else { return };
+        match alert {
+            HistoryAlert::RepeatDefault { count, reason } => {
+                let msg = format!("條碼 {barcode} 今天第 {count} 次因「{}」走異常口，請下架不要再投", reason_label(&reason));
+                event_log::log(&self.app.db, Level::Warn, "chute", "repeat_default", msg.clone());
+                event_bus::emit("parcel-alert", serde_json::json!({ "kind": "repeat_default", "barcode": barcode, "count": count, "reason": reason, "message": msg }));
+                // 中介機端會出聲（自訂類別走通用語音）＋ toast，現場才聽得到
+                self.mw.device_alert("REPEAT_DEFAULT", &msg).await;
+            }
+            HistoryAlert::ReEntry { prev_chute, prev_started_ms } => {
+                let at = chrono::DateTime::from_timestamp_millis(prev_started_ms).map(|t| t.with_timezone(&chrono::Local).format("%H:%M:%S").to_string()).unwrap_or_default();
+                let msg = format!("條碼 {barcode} 已於 {at} 落 {prev_chute} 完成，卻再次進線；請檢查該格口是否已滿或包裹被退回", );
+                event_log::log(&self.app.db, Level::Warn, "chute", "re_entry", msg.clone());
+                event_bus::emit("parcel-alert", serde_json::json!({ "kind": "re_entry", "barcode": barcode, "prev_chute": prev_chute, "message": msg }));
+            }
+        }
     }
 
     /// 走預設口、不回報、不印
@@ -272,7 +412,7 @@ mod tests {
     fn chutes() -> HashMap<String, ChuteRow> {
         let mut m = HashMap::new();
         for (code, cid, enabled) in [("L1", 1000323, true), ("R5", 1006324, false), ("RS", 1007301, true), ("LS", 1007323, true)] {
-            m.insert(code.to_string(), ChuteRow { code: code.into(), cid: Cid(cid), printer_port: None, enabled });
+            m.insert(code.to_string(), ChuteRow { code: code.into(), cid: Cid(cid), printer_port: None, enabled, label: code.into(), sort_order: 0, bag_limit: 0 });
         }
         m
     }
@@ -329,4 +469,92 @@ mod tests {
         assert!(d.note.unwrap().contains("不在對照表"));
         assert_eq!(d.reason.as_deref(), Some("CHUTE_UNKNOWN"));
     }
+    fn prior(status: i64, chute: &str, reason: Option<&str>, started_ms: i64) -> PriorParcel {
+        // 有原因代碼的都是走異常口（default），沒有的是中介機正常給格口（api）
+        let source = if reason.is_some() { "default" } else { "api" };
+        PriorParcel { status, chute_code: Some(chute.into()), chute_source: Some(source.into()), chute_reason: reason.map(String::from), started_ms }
+    }
+
+    #[test]
+    fn 同原因再走異常口_提示第幾次() {
+        let p = vec![prior(3, "RS", Some("STORE_CLOSED"), 1000), prior(3, "RS", Some("STORE_CLOSED"), 500)];
+        assert_eq!(
+            history_verdict(&p, ChuteSource::Default, Some("STORE_CLOSED")),
+            Some(HistoryAlert::RepeatDefault { count: 3, reason: "STORE_CLOSED".into() })
+        );
+        // 原因不同不算重複（上次逾時、這次關轉）；上次走異常口雖然狀態也是「完成」，那是重投的常態，不算「已完成又進線」
+        assert_eq!(
+            history_verdict(&[prior(3, "RS", Some("TIMEOUT"), 1000)], ChuteSource::Default, Some("STORE_CLOSED")),
+            None
+        );
+        assert_eq!(history_verdict(&[prior(3, "RS", Some("NOREAD"), 1000)], ChuteSource::Api, None), None);
+    }
+
+    #[test]
+    fn 已完成又進線_提示上次落哪() {
+        let p = vec![prior(4, "L2", None, 2000), prior(3, "L5", None, 1000)];
+        assert_eq!(
+            history_verdict(&p, ChuteSource::Api, None),
+            Some(HistoryAlert::ReEntry { prev_chute: "L5".into(), prev_started_ms: 1000 })
+        );
+        // 上次遺失、沒完成過 → 不提示
+        assert_eq!(history_verdict(&[prior(4, "L2", None, 2000)], ChuteSource::Api, None), None);
+        // 沒前科
+        assert_eq!(history_verdict(&[], ChuteSource::Api, None), None);
+    }
+
+    #[test]
+    fn 完成過的包裹再進線後走異常口_算重複異常不算格口滿() {
+        let p = vec![prior(3, "RS", Some("STORE_CLOSED"), 1000), prior(3, "L1", None, 500)];
+        assert!(matches!(history_verdict(&p, ChuteSource::Default, Some("STORE_CLOSED")), Some(HistoryAlert::RepeatDefault { count: 2, .. })));
+    }
+
+    #[tokio::test]
+    async fn 前科查詢_只看同條碼_排除自己_只看起點之後() {
+        let dir = std::env::temp_dir().join(format!("chute-prior-{}", ulid::Ulid::generate()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = crate::db::init(&dir).await.unwrap();
+        let ins = |ulid: &str, barcode: &str, source: &str, reason: Option<&str>, status: i64, ms: i64| {
+            let (ulid, barcode, source, reason) = (ulid.to_string(), barcode.to_string(), source.to_string(), reason.map(String::from));
+            let db = db.clone();
+            async move {
+                sqlx::query("INSERT INTO parcels (ulid, barcode, chute_code, chute_source, chute_reason, status, started_at, started_ms, updated_ms) VALUES (?, ?, 'RS', ?, ?, ?, '2026-09-18 19:00:00.000', ?, ?)")
+                    .bind(ulid).bind(barcode).bind(source).bind(reason).bind(status).bind(ms).bind(ms)
+                    .execute(&db).await.unwrap();
+            }
+        };
+        ins("A", "X1", "default", Some("STORE_CLOSED"), 3, 1_000).await;
+        ins("B", "X1", "default", Some("STORE_CLOSED"), 3, 2_000).await;
+        ins("C", "X1", "default", Some("STORE_CLOSED"), 1, 3_000).await; // 這一件自己
+        ins("D", "X2", "api", None, 3, 2_500).await; // 別的條碼
+        ins("E", "X1", "default", Some("STORE_CLOSED"), 3, 500).await; // 起點之前（昨天）
+        let prior = load_prior(&db, "X1", "C", 1_000).await;
+        assert_eq!(prior.iter().map(|p| p.started_ms).collect::<Vec<_>>(), vec![2_000, 1_000], "新的在前、排除自己與昨天");
+        assert!(matches!(history_verdict(&prior, ChuteSource::Default, Some("STORE_CLOSED")), Some(HistoryAlert::RepeatDefault { count: 3, .. })));
+    }
+
+    #[tokio::test]
+    async fn 再進線且正常給格口_今天走過異常口的同條碼自動結案() {
+        let dir = std::env::temp_dir().join(format!("chute-refed-{}", ulid::Ulid::generate()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = crate::db::init(&dir).await.unwrap();
+        let ins = |ulid: &str, barcode: &str, chute: &str, status: i64, ms: i64| {
+            let (ulid, barcode, chute) = (ulid.to_string(), barcode.to_string(), chute.to_string());
+            let db = db.clone();
+            async move {
+                sqlx::query("INSERT INTO parcels (ulid, barcode, chute_code, chute_source, status, started_at, started_ms, updated_ms) VALUES (?, ?, ?, 'default', ?, '2026-09-18 19:00:00.000', ?, ?)")
+                    .bind(ulid).bind(barcode).bind(chute).bind(status).bind(ms).bind(ms).execute(&db).await.unwrap();
+            }
+        };
+        ins("A", "X1", "RS", 3, 1_000).await; // 今天走異常口、完成 → 該結案
+        ins("B", "X1", "RS", 4, 1_500).await; // 遺失的不在清單，不動
+        ins("C", "X1", "L2", 3, 2_000).await; // 正常格口，不是異常件
+        ins("D", "X1", "RS", 3, 500).await; // 起點之前（昨天）
+        ins("E", "X1", "RS", 1, 3_000).await; // 這一件自己（還在途）
+        assert_eq!(mark_refed(&db, "X1", "E", 1_000, "RS").await, 1);
+        assert_eq!(mark_refed(&db, "X1", "E", 1_000, "RS").await, 0, "已結案的不重複記");
+        let (state, by): (String, String) = sqlx::query_as("SELECT state, handled_by FROM abnormal_handling h JOIN parcels p ON p.id = h.parcel_id WHERE p.ulid = 'A'").fetch_one(&db).await.unwrap();
+        assert_eq!((state.as_str(), by.as_str()), ("refed", "auto"));
+    }
+
 }

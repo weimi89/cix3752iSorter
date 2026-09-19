@@ -6,6 +6,7 @@ import { useWebAuth } from '@/composables/useWebAuth'
 const routes = [
   { path: '/', name: 'dashboard', component: () => import('@/pages/DashboardPage.vue'), meta: { title: 'nav.dashboard' } },
   { path: '/stats', name: 'stats', component: () => import('@/pages/StatsPage.vue'), meta: { title: 'nav.stats' } },
+  { path: '/abnormal', name: 'abnormal', component: () => import('@/pages/AbnormalPage.vue'), meta: { title: 'nav.abnormal' } },
   { path: '/parcels', name: 'parcels', component: () => import('@/pages/ParcelsPage.vue'), meta: { title: 'nav.parcels' } },
   { path: '/print-jobs', name: 'print-jobs', component: () => import('@/pages/PrintJobsPage.vue'), meta: { title: 'nav.printJobs' } },
   { path: '/report-queue', name: 'report-queue', component: () => import('@/pages/ReportQueuePage.vue'), meta: { title: 'nav.reportQueue' } },

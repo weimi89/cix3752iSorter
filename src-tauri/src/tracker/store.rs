@@ -21,6 +21,8 @@ pub enum StoreOp {
     Daily(Parcel),
     /// 一次堵塞開始（統計用）
     Jam { ts_ms: i64, cart: u32, pos: i32, ulid: Option<String>, barcode: Option<String>, chute_code: Option<String> },
+    /// 某格口開袋／關袋
+    Bag(super::machine::BagOp),
 }
 
 #[derive(Clone)]
@@ -108,6 +110,30 @@ async fn run(db: DbPool, mut rx: mpsc::Receiver<StoreOp>) {
             StoreOp::Daily(p) => {
                 if let Err(e) = daily(&db, &p).await {
                     tracing::error!("daily_stats 更新失敗: {e}");
+                }
+            }
+            StoreOp::Bag(super::machine::BagOp::Open { code, seq, started_ms }) => {
+                if let Err(e) = sqlx::query("INSERT INTO chute_bags (chute_code, seq, started_ms) VALUES (?, ?, ?)")
+                    .bind(&code)
+                    .bind(seq as i64)
+                    .bind(started_ms)
+                    .execute(&db)
+                    .await
+                {
+                    tracing::error!("chute_bags 開袋寫入失敗: {e}");
+                }
+            }
+            StoreOp::Bag(super::machine::BagOp::Close { code, seq, ended_ms, count, closed_by }) => {
+                if let Err(e) = sqlx::query("UPDATE chute_bags SET ended_ms = ?, count = ?, closed_by = ? WHERE chute_code = ? AND seq = ? AND ended_ms IS NULL")
+                    .bind(ended_ms)
+                    .bind(count as i64)
+                    .bind(&closed_by)
+                    .bind(&code)
+                    .bind(seq as i64)
+                    .execute(&db)
+                    .await
+                {
+                    tracing::error!("chute_bags 關袋寫入失敗: {e}");
                 }
             }
             StoreOp::Jam { ts_ms, cart, pos, ulid, barcode, chute_code } => {

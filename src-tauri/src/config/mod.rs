@@ -173,7 +173,9 @@ pub struct CameraConfig {
 pub struct MiddlewareConfig {
     /// cix3752iLabelPrint 的本地 HTTP server
     pub base_url: String,
-    /// `GET /api/parcel` 逾時；超過就走預設口
+    /// `GET /api/parcel` 逾時；超過就走預設口。
+    /// 真正的截止點是包裹到交接點（`~O`，中位 1.3 秒、皮帶停過會更久）：到那時還沒回覆才用預設口，
+    /// 之後才到的回覆只記「回覆太晚」。所以這個值只是保底，不必卡在 1.2 秒把還來得及的回覆砍掉
     pub parcel_timeout_ms: u64,
     pub label_timeout_ms: u64,
     pub report_timeout_ms: u64,
@@ -346,7 +348,7 @@ impl Default for MiddlewareConfig {
     fn default() -> Self {
         Self {
             base_url: "http://192.168.0.37:18080/".into(),
-            parcel_timeout_ms: 1200,
+            parcel_timeout_ms: 2500,
             label_timeout_ms: 1200,
             report_timeout_ms: 5000,
             alert_timeout_ms: 3000,

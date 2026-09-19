@@ -28,6 +28,26 @@ let hourlyTimer = null
 const tracker = computed(() => status.tracker)
 const counters = computed(() => tracker.value?.counters || {})
 const inFlight = computed(() => tracker.value?.in_flight || [])
+// 各格口本袋件數：有上限的到 80% 轉黃、到上限轉紅；換袋要確認，按錯會把件數歸零
+const bags = computed(() => tracker.value?.bags || [])
+const bagPct = b => (b.limit ? Math.min(100, Math.round((b.count / b.limit) * 100)) : 0)
+const bagColor = b => (!b.limit ? 'info' : b.count >= b.limit ? 'error' : b.count >= b.limit * 0.8 ? 'warning' : 'success')
+const bagToChange = ref(null)
+const changingBag = ref(false)
+const confirmNewBag = async () => {
+  const b = bagToChange.value
+  if (!b) return
+  changingBag.value = true
+  try {
+    await api.newBag(b.code)
+    toast(t('page.dashboard.bagChanged', { code: b.code, seq: b.seq + 1 }), { type: 'success', autoClose: 4000 })
+    bagToChange.value = null
+  } catch (e) {
+    toast(e.message, { type: 'error' })
+  } finally {
+    changingBag.value = false
+  }
+}
 // 已經過 = 伺服器現在時間 − 包裹進線時間。本機時鐘先加上與伺服器的差,再扣掉快照與本機計時最多半秒的落差,
 // 剛進線的包裹不會閃出負數
 const elapsedMs = p => Math.max(0, now.value + status.serverOffsetMs - p.p_ms)
@@ -103,11 +123,38 @@ const latencyColor = computed(() => {
   if (l.p90_ms > l.budget_ms * 0.7) return 'warning'
   return 'success'
 })
+// 近一小時讀碼失敗率超過 3% 就把卡片標紅：讀碼站照明／角度變差是慢慢發生的，只看累計數字看不出來
+const NOREAD_ALERT_PCT = 3
+const noread1hPct = computed(() => {
+  const n = status.noread1h
+  return n?.total ? Math.round((n.noread / n.total) * 1000) / 10 : null
+})
+// 等待多久：不到 1 小時給分鐘，超過給「幾小時幾分」
+const fmtWait = ms => {
+  const m = Math.max(0, Math.floor(ms / 60000))
+  return m < 60 ? t('page.abnormal.minutes', { n: m }) : t('page.abnormal.hours', { h: Math.floor(m / 60), m: m % 60 })
+}
 const stats = computed(() => [
   { key: 'today', icon: 'tabler-packages', color: 'primary', value: status.todayCount, label: t('page.dashboard.today'), hint: t('page.dashboard.todayHint') },
   { key: 'done', icon: 'tabler-circle-check', color: 'success', value: counters.value.done || 0, label: t('page.dashboard.doneSinceStart') },
-  { key: 'abnormal', icon: 'tabler-alert-circle', color: 'error', value: counters.value.abnormal || 0, label: t('page.dashboard.abnormal') },
-  { key: 'noread', icon: 'tabler-barcode-off', color: 'warning', value: counters.value.noread || 0, label: t('page.dashboard.noread') },
+  {
+    key: 'abnormal',
+    icon: 'tabler-alert-circle',
+    color: 'error',
+    value: counters.value.abnormal || 0,
+    label: t('page.dashboard.abnormal'),
+    // 異常口還有幾件沒人處理、最久等多久；點卡片進處理清單
+    sub: status.abnormalPending.count ? t('page.dashboard.abnormalPending', { n: status.abnormalPending.count, age: fmtWait(now.value + status.serverOffsetMs - status.abnormalPending.oldest_ms) }) : '',
+    to: { name: 'abnormal' },
+  },
+  {
+    key: 'noread',
+    icon: 'tabler-barcode-off',
+    color: noread1hPct.value !== null && noread1hPct.value >= NOREAD_ALERT_PCT ? 'error' : 'warning',
+    value: counters.value.noread || 0,
+    label: noread1hPct.value === null ? t('page.dashboard.noread') : t('page.dashboard.noread1h', { pct: noread1hPct.value }),
+    hint: t('page.dashboard.noread1hHint', { pct: NOREAD_ALERT_PCT }),
+  },
   { key: 'defaulted', icon: 'tabler-arrow-bear-right', color: 'warning', value: counters.value.defaulted || 0, label: t('page.dashboard.defaulted') },
 ])
 </script>
@@ -140,11 +187,12 @@ const stats = computed(() => [
     <!-- 件數 -->
     <VRow density="compact" class="mt-1">
       <VCol v-for="s in stats" :key="s.key" cols="6" md="4" lg="2">
-        <VCard class="card-shadow h-100">
+        <VCard class="card-shadow h-100" :class="{ 'cursor-pointer': s.to }" :to="s.to" :link="!!s.to">
           <VCardItem>
             <template #prepend><VAvatar :color="s.color" variant="tonal"><VIcon :icon="s.icon" /></VAvatar></template>
             <VCardTitle>{{ s.value }}</VCardTitle>
             <VCardSubtitle>{{ s.label }}<VTooltip v-if="s.hint" activator="parent" location="bottom">{{ s.hint }}</VTooltip></VCardSubtitle>
+            <div v-if="s.sub" class="text-body-small text-error mt-1">{{ s.sub }}</div>
           </VCardItem>
         </VCard>
       </VCol>
@@ -161,6 +209,50 @@ const stats = computed(() => [
         </VCard>
       </VCol>
     </VRow>
+
+    <!-- 格口袋況：每格一塊，件數 / 上限 進度條；到上限整塊標紅並有語音提示，換完袋按一下歸零 -->
+    <VRow density="compact" class="mt-1">
+      <VCol cols="12">
+        <VCard class="card-shadow">
+          <VCardItem>
+            <template #prepend><VAvatar :color="bags.some(b => b.limit && b.count >= b.limit) ? 'error' : 'primary'" variant="tonal"><VIcon icon="tabler-shopping-bag" /></VAvatar></template>
+            <VCardTitle>{{ $t('page.dashboard.bags') }}</VCardTitle>
+            <VCardSubtitle>{{ $t('page.dashboard.bagsHint') }}</VCardSubtitle>
+          </VCardItem>
+          <VCardText class="pt-0">
+            <div v-if="!bags.length" class="text-medium-emphasis text-body-small">{{ $t('common.noData') }}</div>
+            <div v-else class="bag-grid">
+              <div v-for="b in bags" :key="b.code" class="bag-cell" :class="`bag-cell--${bagColor(b)}`">
+                <div class="d-flex align-center justify-space-between">
+                  <div class="text-title-medium font-weight-bold">{{ b.code }}<span class="text-body-small text-medium-emphasis ms-1">{{ b.label }}</span></div>
+                  <VBtn size="x-small" variant="tonal" :color="bagColor(b)" :title="$t('page.dashboard.newBag')" @click="bagToChange = b"><VIcon icon="tabler-refresh" size="14" class="me-1" />{{ $t('page.dashboard.newBag') }}</VBtn>
+                </div>
+                <div class="d-flex align-baseline mt-1">
+                  <span class="text-headline-small font-weight-bold" :class="`text-${bagColor(b)}`">{{ b.count }}</span>
+                  <span v-if="b.limit" class="text-body-small text-medium-emphasis ms-1">/ {{ b.limit }}</span>
+                  <VSpacer />
+                  <span class="text-body-small text-medium-emphasis">{{ $t('page.dashboard.bagSeq', { seq: b.seq }) }}</span>
+                </div>
+                <VProgressLinear v-if="b.limit" :model-value="bagPct(b)" :color="bagColor(b)" height="6" rounded class="mt-1" />
+                <div v-else class="text-body-small text-medium-emphasis mt-1">{{ $t('page.dashboard.bagNoLimit') }}</div>
+              </div>
+            </div>
+          </VCardText>
+        </VCard>
+      </VCol>
+    </VRow>
+
+    <VDialog :model-value="!!bagToChange" max-width="360" @update:model-value="v => { if (!v) bagToChange = null }">
+      <VCard v-if="bagToChange">
+        <VCardTitle class="text-title-large">{{ $t('page.dashboard.newBagConfirmTitle', { code: bagToChange.code }) }}</VCardTitle>
+        <VCardText>{{ $t('page.dashboard.newBagConfirmText', { count: bagToChange.count, seq: bagToChange.seq }) }}</VCardText>
+        <VCardActions>
+          <VSpacer />
+          <VBtn variant="text" @click="bagToChange = null">{{ $t('common.cancel') }}</VBtn>
+          <VBtn color="primary" variant="flat" :loading="changingBag" @click="confirmNewBag">{{ $t('page.dashboard.newBag') }}</VBtn>
+        </VCardActions>
+      </VCard>
+    </VDialog>
 
     <VRow density="compact" class="mt-1">
       <VCol cols="12" lg="7">
@@ -261,6 +353,11 @@ const stats = computed(() => [
 /* 「目前處理中」有無包裹都撐同一高度，內容變動不影響下方表格位置 */
 .current-body { min-height: 64px; }
 .barcode-cell { max-width: 160px; }
+/* 格口袋況：一格一塊，寬度隨螢幕排，最少 150px */
+.bag-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; }
+.bag-cell { border: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); border-radius: 8px; padding: 8px 10px; }
+.bag-cell--warning { border-color: rgb(var(--v-theme-warning)); background: rgba(var(--v-theme-warning), 0.06); }
+.bag-cell--error { border-color: rgb(var(--v-theme-error)); background: rgba(var(--v-theme-error), 0.08); }
 /* 欄寬照表頭指定，不隨內容撐開；手機卡片式（table-cards）會改成 block，這條不影響 */
 @media (min-width: 640px) {
   .inflight-table :deep(table) { table-layout: fixed; inline-size: 100%; }
