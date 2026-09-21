@@ -28,12 +28,18 @@ const CONTROL_IDLE: Duration = Duration::from_secs(300);
 /// 資料連線建立與傳輸中的閒置上限
 const DATA_TIMEOUT: Duration = Duration::from_secs(60);
 
-pub fn spawn(db: DbPool, images_dir: PathBuf, cfg_rx: watch::Receiver<AppConfig>, cancel: CancellationToken) {
-    let ftp_rx = super::derive(cfg_rx, |c| c.camera_ftp.clone(), cancel.clone());
-    tokio::spawn(run(db, images_dir, ftp_rx, cancel));
+/// 照片存放目錄：設定填了絕對路徑就用它，否則資料目錄下的 `images`
+pub fn images_dir(cfg: &CameraFtpConfig, data_dir: &Path) -> PathBuf {
+    let custom = cfg.images_dir.trim();
+    if custom.is_empty() { data_dir.join("images") } else { PathBuf::from(custom) }
 }
 
-async fn run(db: DbPool, images_dir: PathBuf, mut cfg_rx: watch::Receiver<CameraFtpConfig>, cancel: CancellationToken) {
+pub fn spawn(db: DbPool, data_dir: PathBuf, cfg_rx: watch::Receiver<AppConfig>, cancel: CancellationToken) {
+    let ftp_rx = super::derive(cfg_rx, |c| c.camera_ftp.clone(), cancel.clone());
+    tokio::spawn(run(db, data_dir, ftp_rx, cancel));
+}
+
+async fn run(db: DbPool, data_dir: PathBuf, mut cfg_rx: watch::Receiver<CameraFtpConfig>, cancel: CancellationToken) {
     loop {
         if cancel.is_cancelled() {
             return;
@@ -67,10 +73,11 @@ async fn run(db: DbPool, images_dir: PathBuf, mut cfg_rx: watch::Receiver<Camera
                 _ = cfg_rx.changed() => { tracing::info!("讀碼站照片 FTP 設定變更，重開"); conn_cancel.cancel(); break; }
                 r = listener.accept() => match r {
                     Ok((stream, peer)) => {
+                        let cfg = cfg_rx.borrow().clone();
                         let session = Session {
                             db: db.clone(),
-                            images_dir: images_dir.clone(),
-                            cfg: cfg_rx.borrow().clone(),
+                            images_dir: images_dir(&cfg, &data_dir),
+                            cfg,
                             peer,
                             authed: false,
                             user: String::new(),

@@ -322,7 +322,7 @@ async fn parcel_image_file(State(state): State<ServerState>, Path(id): Path<i64>
     let row: Option<(String, Option<String>)> = sqlx::query_as("SELECT rel_path, orig_path FROM parcel_images WHERE id = ?").bind(id).fetch_optional(&state.app.db).await?;
     let (rel, orig) = row.ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "找不到這張照片".into()))?;
     let rel = if q.orig == 1 { orig.ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "這件沒有保留原圖".into()))? } else { rel };
-    let path = state.app.data_dir.join("images").join(&rel);
+    let path = crate::device::camera_ftp::images_dir(&state.app.config.current().camera_ftp, &state.app.data_dir).join(&rel);
     let data = tokio::fs::read(&path).await.map_err(|_| ApiError(StatusCode::NOT_FOUND, "照片檔案已不存在".into()))?;
     let mime = mime_guess::from_path(&rel).first_or_octet_stream().to_string();
     Ok(([(header::CONTENT_TYPE, mime), (header::CACHE_CONTROL, "private, max-age=86400".to_string())], data).into_response())
@@ -533,6 +533,15 @@ async fn config_put(
     }
     if f.retention_days > 3650 {
         return Err(bad("照片保留天數最多 3650"));
+    }
+    let dir = f.images_dir.trim();
+    if !dir.is_empty() {
+        let p = std::path::Path::new(dir);
+        if !p.is_absolute() {
+            return Err(bad("照片存放目錄要填絕對路徑（例如 /mnt/photos），空白 = 資料目錄下的 images"));
+        }
+        // 換目錄不搬舊圖，但目錄至少要建得出來，否則相機一上傳就全數失敗
+        std::fs::create_dir_all(p).map_err(|e| bad(format!("照片存放目錄建立失敗：{e}")))?;
     }
     let w = &cfg.web_access;
     if !(1..=720).contains(&w.session_hours) {

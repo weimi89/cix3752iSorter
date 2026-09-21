@@ -4,6 +4,7 @@ import { api, parcelImageUrl } from '@/api/http'
 import { fmtMs, fmtDuration, statusMeta, sourceMeta } from '@/composables/useFormat'
 import { toast } from 'vue3-toastify'
 import { useI18n } from 'vue-i18n'
+import ProtectedImg from '@/components/ProtectedImg.vue'
 
 const props = defineProps({ modelValue: Boolean, parcelId: { type: Number, default: null } })
 const emit = defineEmits(['update:modelValue'])
@@ -28,6 +29,8 @@ watch(() => [props.modelValue, props.parcelId], async ([open, id]) => {
 const rel = ts => data.value ? ts - data.value.parcel.started_ms : 0
 // 讀碼站照片：點縮圖放大看；讀碼失敗件另有原圖可開
 const viewImage = ref(null)
+const viewOriginal = ref(false)
+const openImage = img => { viewImage.value = img; viewOriginal.value = false }
 const fmtKb = n => `${Math.round(n / 1024)} KB`
 const sourceColor = { belt: 'primary', sorter: 'info', camera: 'secondary', api: 'success', tracker: 'warning', printer: 'secondary' }
 
@@ -78,9 +81,8 @@ const anomalies = computed(() => {
             <h4 class="mb-2">{{ $t('parcel.images') }}</h4>
             <div class="d-flex flex-wrap ga-3 mb-4">
               <div v-for="img in data.images" :key="img.id" class="parcel-image">
-                <img :src="parcelImageUrl(img.id)" :alt="img.file_name" class="parcel-image__thumb" @click="viewImage = img">
+                <ProtectedImg :src="parcelImageUrl(img.id)" :alt="img.file_name" class="parcel-image__thumb" @click="openImage(img)" />
                 <div class="text-body-small text-medium-emphasis mt-1">{{ img.received_at.slice(11, 19) }} · {{ fmtKb(img.size) }}</div>
-                <a v-if="img.has_orig" :href="parcelImageUrl(img.id, true)" target="_blank" rel="noopener" class="text-body-small">{{ $t('parcel.imageOriginal') }}</a>
               </div>
             </div>
           </template>
@@ -126,10 +128,13 @@ const anomalies = computed(() => {
       <VCardTitle class="d-flex align-center text-body-large">
         <span class="selectable">{{ viewImage.file_name }}</span>
         <VSpacer />
-        <a v-if="viewImage.has_orig" :href="parcelImageUrl(viewImage.id, true)" target="_blank" rel="noopener" class="me-3 text-body-medium">{{ $t('parcel.imageOriginal') }}</a>
+        <VBtnToggle v-if="viewImage.has_orig" v-model="viewOriginal" density="compact" variant="outlined" mandatory class="me-3">
+          <VBtn :value="false" size="small">{{ $t('parcel.imageEvidence') }}</VBtn>
+          <VBtn :value="true" size="small">{{ $t('parcel.imageOriginal') }}</VBtn>
+        </VBtnToggle>
         <VBtn icon variant="text" @click="viewImage = null"><VIcon icon="tabler-x" /></VBtn>
       </VCardTitle>
-      <VCardText class="pa-0"><img :src="parcelImageUrl(viewImage.id)" :alt="viewImage.file_name" class="parcel-image__full"></VCardText>
+      <VCardText class="pa-0"><ProtectedImg :src="parcelImageUrl(viewImage.id, viewOriginal)" :alt="viewImage.file_name" class="parcel-image__full" /></VCardText>
     </VCard>
   </VDialog>
 </template>

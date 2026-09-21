@@ -23,7 +23,7 @@ pub async fn bootstrap(config_path: &Path, data_dir: &Path, cancel: Cancellation
     crate::log::attach_file(&logs_dir);
     device::signal_log::init(logs_dir, config.subscribe());
     let db = db::init(data_dir).await?;
-    db::retention::start(db.clone(), data_dir.join("images"), config.subscribe(), cancel.clone());
+    db::retention::start(db.clone(), data_dir.to_path_buf(), config.subscribe(), cancel.clone());
 
     let app = AppState {
         config: config.clone(),
@@ -43,7 +43,7 @@ pub async fn bootstrap(config_path: &Path, data_dir: &Path, cancel: Cancellation
     let sorter = device::sorter::spawn(config.subscribe(), dev_tx.clone(), cancel.clone());
     device::camera::spawn(config.subscribe(), dev_tx.clone(), cancel.clone());
     // 讀碼站照片：讀碼器用 FTP 上傳每件的圖，本程式收下當收件證據
-    device::camera_ftp::spawn(db.clone(), data_dir.join("images"), config.subscribe(), cancel.clone());
+    device::camera_ftp::spawn(db.clone(), data_dir.to_path_buf(), config.subscribe(), cancel.clone());
     drop(dev_tx);
     // 面單通道：狀態機接受格口決定後才把面單丟進來，列印端另一頭收
     let (label_tx, label_rx) = tokio::sync::mpsc::channel::<label::LabelJob>(256);

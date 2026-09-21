@@ -327,6 +327,7 @@ onBeforeUnmount(() => window.removeEventListener('beforeunload', beforeUnload))
             <VCol cols="6" md="3"><VLabel class="mb-1 text-body-medium">{{ $t('page.settings.cameraFtp.maxEdge') }}（px）</VLabel><VNumberInput v-model="cfg.camera_ftp.max_edge_px" :min="0" :max="8000" :step="100" /></VCol>
             <VCol cols="6" md="3"><VLabel class="mb-1 text-body-medium">{{ $t('page.settings.cameraFtp.quality') }}</VLabel><VNumberInput v-model="cfg.camera_ftp.jpeg_quality" :min="1" :max="100" :step="5" /></VCol>
             <VCol cols="6" md="3"><VLabel class="mb-1 text-body-medium">{{ $t('page.settings.cameraFtp.window') }}（ms）</VLabel><VNumberInput v-model="cfg.camera_ftp.match_window_ms" :min="500" :max="60000" :step="500" /></VCol>
+            <VCol cols="12" md="6"><VLabel class="mb-1 text-body-medium">{{ $t('page.settings.cameraFtp.imagesDir') }}</VLabel><VTextField v-model="cfg.camera_ftp.images_dir" :placeholder="$t('page.settings.cameraFtp.imagesDirPlaceholder')" /></VCol>
             <VCol cols="6" md="3"><VLabel class="mb-1 text-body-medium">{{ $t('page.settings.cameraFtp.retention') }}</VLabel><VNumberInput v-model="cfg.camera_ftp.retention_days" :min="0" :max="3650" :step="1" /></VCol>
           </VRow>
           <div class="setting-row mt-3">

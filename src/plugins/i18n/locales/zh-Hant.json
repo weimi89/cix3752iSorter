@@ -110,7 +110,9 @@
     "image": "照片",
     "hasImage": "有讀碼站照片",
     "noImage": "沒有讀碼站照片（讀碼器未上傳，或照片對不到這件）",
-    "imageOriginal": "看原圖"
+    "imageOriginal": "看原圖",
+    "imageEvidence": "證據圖",
+    "noImageShort": "沒有照片"
   },
   "print": {
     "printer": "印表機",
@@ -624,7 +626,9 @@
         "enableDesc": "關閉後不開 FTP 埠；讀碼器那邊也要一併關掉 FTP，否則它會一直重試連線。",
         "keepOriginalNoreadDesc": "縮圖看不出為什麼讀不到；原圖一張 2–3 MB，只留讀碼失敗的件。",
         "passiveMin": "被動模式埠（起）",
-        "passiveMax": "被動模式埠（迄）"
+        "passiveMax": "被動模式埠（迄）",
+        "imagesDir": "照片存放目錄",
+        "imagesDirPlaceholder": "空白 = 資料目錄下的 images；要另放一顆硬碟就填絕對路徑，例如 /mnt/photos"
       }
     },
     "login": {

@@ -195,6 +195,8 @@ pub struct CameraFtpConfig {
     pub keep_original_noread: bool,
     /// 照片保留天數；0 = 不清理。與包裹資料的保留天數分開——證據要留得比訊號久
     pub retention_days: u32,
+    /// 照片存放目錄（絕對路徑）；空白 = 資料目錄下的 `images`。要把圖檔跟資料庫分開放（另一顆硬碟）就填這裡
+    pub images_dir: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -388,6 +390,7 @@ impl Default for CameraFtpConfig {
             jpeg_quality: 80,
             keep_original_noread: true,
             retention_days: 90,
+            images_dir: String::new(),
         }
     }
 }

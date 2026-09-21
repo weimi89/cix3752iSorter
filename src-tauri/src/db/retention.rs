@@ -59,12 +59,12 @@ pub async fn purge(db: &DbPool, days: u32) -> Result<Purged, sqlx::Error> {
 }
 
 /// 啟動清一次，之後每小時；天數跟著設定即時變。照片另有自己的保留天數（`camera_ftp.retention_days`）
-pub fn start(db: DbPool, images_dir: std::path::PathBuf, cfg: watch::Receiver<AppConfig>, cancel: CancellationToken) {
+pub fn start(db: DbPool, data_dir: std::path::PathBuf, cfg: watch::Receiver<AppConfig>, cancel: CancellationToken) {
     tokio::spawn(async move {
         loop {
-            let (days, image_days) = {
+            let (days, image_days, images_dir) = {
                 let c = cfg.borrow();
-                (c.general.retention_days, c.camera_ftp.retention_days)
+                (c.general.retention_days, c.camera_ftp.retention_days, crate::device::camera_ftp::images_dir(&c.camera_ftp, &data_dir))
             };
             match purge(&db, days).await {
                 Ok(p) if p.total() > 0 => {

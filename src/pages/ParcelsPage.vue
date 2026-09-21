@@ -122,17 +122,22 @@ onBeforeUnmount(() => unlisten?.())
           <th class="text-center" style="width: 120px;">{{ $t('parcel.status') }}</th>
           <th class="text-center" style="width: 100px;">{{ $t('parcel.travel') }}</th>
           <th class="text-center" style="width: 80px;">{{ $t('parcel.cart') }}</th>
+          <th class="text-center" style="width: 150px;">{{ $t('common.actions') }}</th>
         </tr></thead>
         <tbody>
-          <tr v-if="!list.length"><td colspan="7"><div class="py-2 d-flex align-center justify-center"><VIcon icon="tabler-alert-circle" size="20" class="me-1" /><span class="text-md">{{ $t('common.noResults') }}</span></div></td></tr>
+          <tr v-if="!list.length"><td colspan="8"><div class="py-2 d-flex align-center justify-center"><VIcon icon="tabler-alert-circle" size="20" class="me-1" /><span class="text-md">{{ $t('common.noResults') }}</span></div></td></tr>
           <tr v-for="p in list" :key="p.id" class="cursor-pointer" @click="open(p.id)">
             <td :data-label="$t('parcel.startedAt')" class="text-center text-no-wrap">{{ p.started_at }}</td>
-            <td :data-label="$t('parcel.barcode')" class="text-center selectable font-weight-medium">{{ p.barcode }}<VIcon v-if="p.image_id" icon="tabler-camera" size="14" class="ms-1 text-medium-emphasis" :title="$t('parcel.hasImage')" /></td>
+            <td :data-label="$t('parcel.barcode')" class="text-center selectable font-weight-medium">{{ p.barcode }}</td>
             <td :data-label="$t('parcel.chute')" class="text-center">{{ p.chute_code || '—' }}</td>
             <td :data-label="$t('parcel.source')" class="text-center"><VChip size="x-small" :color="sourceMeta(p.chute_source).color" variant="tonal" label>{{ $t(sourceMeta(p.chute_source).key) }}</VChip></td>
             <td :data-label="$t('parcel.status')" class="text-center"><VChip size="x-small" :color="statusMeta(p.status).color" label>{{ $t(statusMeta(p.status).key) }}</VChip></td>
             <td :data-label="$t('parcel.travel')" class="text-center">{{ fmtDuration(p.travel_ms) }}</td>
             <td :data-label="$t('parcel.cart')" class="text-center">{{ p.cart ?? '' }}</td>
+            <td :data-label="$t('common.actions')" class="text-center text-no-wrap">
+              <VBtn size="small" variant="tonal" color="primary" class="me-1" @click.stop="open(p.id)"><VIcon icon="tabler-list-details" size="16" class="me-1" />{{ $t('parcel.detail') }}</VBtn>
+              <VBtn size="small" variant="tonal" color="secondary" :disabled="!p.image_id" :title="p.image_id ? $t('parcel.hasImage') : $t('parcel.noImageShort')" @click.stop="open(p.id)"><VIcon icon="tabler-camera" size="16" /></VBtn>
+            </td>
           </tr>
         </tbody>
       </VTable>
