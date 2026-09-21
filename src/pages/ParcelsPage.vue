@@ -127,7 +127,7 @@ onBeforeUnmount(() => unlisten?.())
           <tr v-if="!list.length"><td colspan="7"><div class="py-2 d-flex align-center justify-center"><VIcon icon="tabler-alert-circle" size="20" class="me-1" /><span class="text-md">{{ $t('common.noResults') }}</span></div></td></tr>
           <tr v-for="p in list" :key="p.id" class="cursor-pointer" @click="open(p.id)">
             <td :data-label="$t('parcel.startedAt')" class="text-center text-no-wrap">{{ p.started_at }}</td>
-            <td :data-label="$t('parcel.barcode')" class="text-center selectable font-weight-medium">{{ p.barcode }}</td>
+            <td :data-label="$t('parcel.barcode')" class="text-center selectable font-weight-medium">{{ p.barcode }}<VIcon v-if="p.image_id" icon="tabler-camera" size="14" class="ms-1 text-medium-emphasis" :title="$t('parcel.hasImage')" /></td>
             <td :data-label="$t('parcel.chute')" class="text-center">{{ p.chute_code || '—' }}</td>
             <td :data-label="$t('parcel.source')" class="text-center"><VChip size="x-small" :color="sourceMeta(p.chute_source).color" variant="tonal" label>{{ $t(sourceMeta(p.chute_source).key) }}</VChip></td>
             <td :data-label="$t('parcel.status')" class="text-center"><VChip size="x-small" :color="statusMeta(p.status).color" label>{{ $t(statusMeta(p.status).key) }}</VChip></td>

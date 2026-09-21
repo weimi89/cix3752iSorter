@@ -105,7 +105,12 @@
     "sourceCol": "來源",
     "signal": "訊號",
     "raw": "原始內容",
-    "printJobs": "列印任務"
+    "printJobs": "列印任務",
+    "images": "讀碼站照片",
+    "image": "照片",
+    "hasImage": "有讀碼站照片",
+    "noImage": "沒有讀碼站照片（讀碼器未上傳，或照片對不到這件）",
+    "imageOriginal": "看原圖"
   },
   "print": {
     "printer": "印表機",
@@ -473,7 +478,8 @@
         "rules": "停線規則",
         "print": "列印",
         "buttons": "急停按鈕",
-        "webAccess": "網頁存取"
+        "webAccess": "網頁存取",
+        "cameraFtp": "讀碼站照片"
       },
       "general": {
         "retention": "資料保留天數",
@@ -602,6 +608,23 @@
         "lockMinutesHint": "鎖住期間即使密碼正確也進不來",
         "lanRanges": "不需要密碼的網路範圍",
         "lanRangesHint": "一行一筆（CIDR，例如 192.168.0.0/16）。這些範圍內的電腦視為現場設備，開啟畫面不必輸入密碼；這台機器自己永遠算現場。"
+      },
+      "cameraFtp": {
+        "listen": "FTP 監聽位址",
+        "username": "FTP 帳號",
+        "password": "FTP 密碼",
+        "maxEdge": "證據圖長邊",
+        "quality": "JPEG 品質",
+        "window": "對包裹時間窗口",
+        "retention": "照片保留天數",
+        "keepOriginalNoread": "讀碼失敗的件另外保留原圖",
+        "hint": "讀碼器端：FTP 主機填本機在相機網段的 IP、埠與帳密與這裡一致、上傳條件選全部。防火牆要放行監聽埠與被動模式埠範圍（來源限相機）。收到後縮成證據圖存檔，原圖不留；長邊 0 = 不縮（硬碟會很快滿）。保留天數 0 = 不清理。",
+        "desc": "讀碼器把每件的照片用 FTP 上傳到這裡，當「這件我們有收到」的證據；照片在包裹詳情與異常口處理可以看。",
+        "enable": "接收讀碼站照片",
+        "enableDesc": "關閉後不開 FTP 埠；讀碼器那邊也要一併關掉 FTP，否則它會一直重試連線。",
+        "keepOriginalNoreadDesc": "縮圖看不出為什麼讀不到；原圖一張 2–3 MB，只留讀碼失敗的件。",
+        "passiveMin": "被動模式埠（起）",
+        "passiveMax": "被動模式埠（迄）"
       }
     },
     "login": {

@@ -22,6 +22,7 @@ pub struct AppConfig {
     pub sorter: SorterConfig,
     pub sysled: SysLedConfig,
     pub camera: CameraConfig,
+    pub camera_ftp: CameraFtpConfig,
     pub middleware: MiddlewareConfig,
     pub ng: NgConfig,
     pub print: PrintConfig,
@@ -168,6 +169,34 @@ pub struct CameraConfig {
     pub dedup_ms: u64,
 }
 
+/// 讀碼站照片：讀碼器每件拍的圖用 FTP 上傳到本程式，當「這件我們有收到」的證據。
+///
+/// 本程式自己當 FTP 伺服器（不另裝 vsftpd、不用 root），收到原圖立刻縮成證據圖存檔，
+/// 原圖不留——20MP 一張 2–3 MB，一天五千多件會把硬碟吃光。
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct CameraFtpConfig {
+    /// 關掉就不開 FTP 埠（讀碼器那邊也要把 FTP 關掉，不然它會一直連不上）
+    pub enabled: bool,
+    /// FTP 監聽位址；預設 2121 避開需要 root 的 21
+    pub listen: String,
+    pub username: String,
+    pub password: String,
+    /// 被動模式（PASV）資料連線用的埠範圍；工控機開著防火牆，固定一段才放得了行。兩個都 0 = 隨機埠
+    pub passive_port_min: u16,
+    pub passive_port_max: u16,
+    /// 照片對回包裹的時間窗口：照片上傳完成時間往前找這麼多毫秒內綁到條碼的件
+    pub match_window_ms: i64,
+    /// 證據圖長邊像素；0 = 不縮、存原圖（硬碟會很快滿）
+    pub max_edge_px: u32,
+    /// 證據圖 JPEG 品質 1–100
+    pub jpeg_quality: u8,
+    /// 讀碼失敗的件另外保留原圖（看清楚為什麼讀不到）
+    pub keep_original_noread: bool,
+    /// 照片保留天數；0 = 不清理。與包裹資料的保留天數分開——證據要留得比訊號久
+    pub retention_days: u32,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct MiddlewareConfig {
@@ -243,6 +272,7 @@ impl Default for AppConfig {
             sorter: SorterConfig::default(),
             sysled: SysLedConfig::default(),
             camera: CameraConfig::default(),
+            camera_ftp: CameraFtpConfig::default(),
             middleware: MiddlewareConfig::default(),
             ng: NgConfig::default(),
             print: PrintConfig::default(),
@@ -340,6 +370,24 @@ impl Default for CameraConfig {
             bind_ceiling_ms: 2000,
             bind_expected_ms: 226,
             dedup_ms: 5000,
+        }
+    }
+}
+
+impl Default for CameraFtpConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            listen: "0.0.0.0:2121".into(),
+            username: "sorter".into(),
+            password: "sorter".into(),
+            passive_port_min: 50000,
+            passive_port_max: 50100,
+            match_window_ms: 5000,
+            max_edge_px: 1600,
+            jpeg_quality: 80,
+            keep_original_noread: true,
+            retention_days: 90,
         }
     }
 }

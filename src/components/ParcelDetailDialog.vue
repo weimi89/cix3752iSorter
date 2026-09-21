@@ -1,6 +1,6 @@
 <script setup>
 /** 單件包裹：訊號時間軸（相對 ~P 的毫秒）與列印任務 */
-import { api } from '@/api/http'
+import { api, parcelImageUrl } from '@/api/http'
 import { fmtMs, fmtDuration, statusMeta, sourceMeta } from '@/composables/useFormat'
 import { toast } from 'vue3-toastify'
 import { useI18n } from 'vue-i18n'
@@ -26,6 +26,9 @@ watch(() => [props.modelValue, props.parcelId], async ([open, id]) => {
 }, { immediate: true })
 
 const rel = ts => data.value ? ts - data.value.parcel.started_ms : 0
+// 讀碼站照片：點縮圖放大看；讀碼失敗件另有原圖可開
+const viewImage = ref(null)
+const fmtKb = n => `${Math.round(n / 1024)} KB`
 const sourceColor = { belt: 'primary', sorter: 'info', camera: 'secondary', api: 'success', tracker: 'warning', printer: 'secondary' }
 
 // 一眼看出卡在哪：超過門檻的區段標紅（門檻取 protocol-spec 的停線規則與實測 p95）
@@ -71,6 +74,18 @@ const anomalies = computed(() => {
             <VCol cols="6" sm="2"><div class="text-caption">{{ $t('parcel.responseId') }}</div><div>{{ data.parcel.response_id ?? '—' }}</div></VCol>
           </VRow>
 
+          <template v-if="data.images?.length">
+            <h4 class="mb-2">{{ $t('parcel.images') }}</h4>
+            <div class="d-flex flex-wrap ga-3 mb-4">
+              <div v-for="img in data.images" :key="img.id" class="parcel-image">
+                <img :src="parcelImageUrl(img.id)" :alt="img.file_name" class="parcel-image__thumb" @click="viewImage = img">
+                <div class="text-body-small text-medium-emphasis mt-1">{{ img.received_at.slice(11, 19) }} · {{ fmtKb(img.size) }}</div>
+                <a v-if="img.has_orig" :href="parcelImageUrl(img.id, true)" target="_blank" rel="noopener" class="text-body-small">{{ $t('parcel.imageOriginal') }}</a>
+              </div>
+            </div>
+          </template>
+          <div v-else class="text-body-small text-medium-emphasis mb-4">{{ $t('parcel.noImage') }}</div>
+
           <h4 class="mb-2">{{ $t('parcel.timeline') }}</h4>
           <VTable density="compact" class="mb-4">
             <thead><tr><th>{{ $t('parcel.time') }}</th><th>+ms</th><th>{{ $t('parcel.sourceCol') }}</th><th>{{ $t('parcel.signal') }}</th><th>{{ $t('parcel.raw') }}</th></tr></thead>
@@ -105,8 +120,23 @@ const anomalies = computed(() => {
       </VCardText>
     </VCard>
   </VDialog>
+
+  <VDialog :model-value="!!viewImage" max-width="1400" @update:model-value="v => { if (!v) viewImage = null }">
+    <VCard v-if="viewImage">
+      <VCardTitle class="d-flex align-center text-body-large">
+        <span class="selectable">{{ viewImage.file_name }}</span>
+        <VSpacer />
+        <a v-if="viewImage.has_orig" :href="parcelImageUrl(viewImage.id, true)" target="_blank" rel="noopener" class="me-3 text-body-medium">{{ $t('parcel.imageOriginal') }}</a>
+        <VBtn icon variant="text" @click="viewImage = null"><VIcon icon="tabler-x" /></VBtn>
+      </VCardTitle>
+      <VCardText class="pa-0"><img :src="parcelImageUrl(viewImage.id)" :alt="viewImage.file_name" class="parcel-image__full"></VCardText>
+    </VCard>
+  </VDialog>
 </template>
 
 <style scoped>
 .row-anomaly { background: rgba(var(--v-theme-error), 0.06); }
+.parcel-image { inline-size: 160px; }
+.parcel-image__thumb { inline-size: 160px; block-size: 120px; object-fit: cover; border-radius: 6px; cursor: zoom-in; border: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); }
+.parcel-image__full { display: block; inline-size: 100%; max-block-size: 85vh; object-fit: contain; background: #111; }
 </style>

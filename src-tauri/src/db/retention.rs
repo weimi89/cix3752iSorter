@@ -58,17 +58,25 @@ pub async fn purge(db: &DbPool, days: u32) -> Result<Purged, sqlx::Error> {
     Ok(Purged { parcels, print_jobs, reports, events })
 }
 
-/// 啟動清一次，之後每小時；天數跟著設定即時變
-pub fn start(db: DbPool, cfg: watch::Receiver<AppConfig>, cancel: CancellationToken) {
+/// 啟動清一次，之後每小時；天數跟著設定即時變。照片另有自己的保留天數（`camera_ftp.retention_days`）
+pub fn start(db: DbPool, images_dir: std::path::PathBuf, cfg: watch::Receiver<AppConfig>, cancel: CancellationToken) {
     tokio::spawn(async move {
         loop {
-            let days = cfg.borrow().general.retention_days;
+            let (days, image_days) = {
+                let c = cfg.borrow();
+                (c.general.retention_days, c.camera_ftp.retention_days)
+            };
             match purge(&db, days).await {
                 Ok(p) if p.total() > 0 => {
                     event_log::log(&db, Level::Info, "server", "retention", format!("清除 {days} 天前的資料：包裹 {}、列印任務 {}、回報 {}、系統事件 {}", p.parcels, p.print_jobs, p.reports, p.events));
                 }
                 Ok(_) => {}
                 Err(e) => event_log::log(&db, Level::Error, "server", "retention", format!("清除舊資料失敗: {e}")),
+            }
+            match crate::device::camera_ftp::purge(&db, &images_dir, image_days).await {
+                Ok(n) if n > 0 => event_log::log(&db, Level::Info, "server", "retention", format!("清除 {image_days} 天前的讀碼站照片 {n} 張")),
+                Ok(_) => {}
+                Err(e) => event_log::log(&db, Level::Error, "server", "retention", format!("清除舊照片失敗: {e}")),
             }
             tokio::select! {
                 _ = cancel.cancelled() => break,

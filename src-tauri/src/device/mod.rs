@@ -2,6 +2,7 @@
 
 pub mod belt;
 pub mod camera;
+pub mod camera_ftp;
 pub mod events;
 pub mod line_client;
 pub mod signal_log;

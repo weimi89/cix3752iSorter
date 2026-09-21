@@ -31,6 +31,7 @@ const SECTIONS = [
   { id: 'belt', icon: 'tabler-arrows-right', color: 'success' },
   { id: 'sorter', icon: 'tabler-route', color: 'success' },
   { id: 'camera', icon: 'tabler-scan', color: 'success' },
+  { id: 'cameraFtp', icon: 'tabler-camera', color: 'success' },
   { id: 'led', icon: 'tabler-bulb', color: 'warning' },
   { id: 'rules', icon: 'tabler-hand-stop', color: 'error' },
   { id: 'print', icon: 'tabler-printer', color: 'secondary' },
@@ -299,6 +300,43 @@ onBeforeUnmount(() => window.removeEventListener('beforeunload', beforeUnload))
             <VCol cols="4" md="2"><VLabel class="mb-1 text-body-medium">{{ $t('page.settings.camera.dedup') }}（ms）</VLabel><VNumberInput v-model="cfg.camera.dedup_ms" :min="0" :max="60000" :step="500" /></VCol>
           </VRow>
           <div class="text-body-small text-medium-emphasis mt-2">{{ $t('page.settings.camera.hint') }}</div>
+        </VCardText>
+      </VCard>
+
+      <!-- 讀碼站照片（FTP 收圖） -->
+      <VCard id="sec-cameraFtp" class="mb-4 card-shadow">
+        <VCardTitle class="d-flex align-center justify-space-between px-4 py-3">
+          <div class="d-flex align-center"><VIcon icon="tabler-camera" size="22" class="me-2" />{{ $t('page.settings.sec.cameraFtp') }}</div>
+        </VCardTitle>
+        <VDivider />
+        <VCardText class="pt-4">
+          <div class="text-body-small text-medium-emphasis mb-3">{{ $t('page.settings.cameraFtp.desc') }}</div>
+          <div class="setting-row mb-3">
+            <div>
+              <div class="text-body-large font-weight-medium">{{ $t('page.settings.cameraFtp.enable') }}</div>
+              <div class="text-body-small text-medium-emphasis">{{ $t('page.settings.cameraFtp.enableDesc') }}</div>
+            </div>
+            <VSwitch v-model="cfg.camera_ftp.enabled" class="flex-shrink-0" hide-details color="primary" inset />
+          </div>
+          <VRow density="compact">
+            <VCol cols="12" md="4"><VLabel class="mb-1 text-body-medium">{{ $t('page.settings.cameraFtp.listen') }}</VLabel><VTextField v-model="cfg.camera_ftp.listen" :error-messages="addrError(cfg.camera_ftp.listen)" placeholder="0.0.0.0:2121" /></VCol>
+            <VCol cols="6" md="4"><VLabel class="mb-1 text-body-medium">{{ $t('page.settings.cameraFtp.username') }}</VLabel><VTextField v-model="cfg.camera_ftp.username" autocomplete="off" /></VCol>
+            <VCol cols="6" md="4"><VLabel class="mb-1 text-body-medium">{{ $t('page.settings.cameraFtp.password') }}</VLabel><VTextField v-model="cfg.camera_ftp.password" autocomplete="off" /></VCol>
+            <VCol cols="6" md="3"><VLabel class="mb-1 text-body-medium">{{ $t('page.settings.cameraFtp.passiveMin') }}</VLabel><VNumberInput v-model="cfg.camera_ftp.passive_port_min" :min="0" :max="65535" :step="1" /></VCol>
+            <VCol cols="6" md="3"><VLabel class="mb-1 text-body-medium">{{ $t('page.settings.cameraFtp.passiveMax') }}</VLabel><VNumberInput v-model="cfg.camera_ftp.passive_port_max" :min="0" :max="65535" :step="1" /></VCol>
+            <VCol cols="6" md="3"><VLabel class="mb-1 text-body-medium">{{ $t('page.settings.cameraFtp.maxEdge') }}（px）</VLabel><VNumberInput v-model="cfg.camera_ftp.max_edge_px" :min="0" :max="8000" :step="100" /></VCol>
+            <VCol cols="6" md="3"><VLabel class="mb-1 text-body-medium">{{ $t('page.settings.cameraFtp.quality') }}</VLabel><VNumberInput v-model="cfg.camera_ftp.jpeg_quality" :min="1" :max="100" :step="5" /></VCol>
+            <VCol cols="6" md="3"><VLabel class="mb-1 text-body-medium">{{ $t('page.settings.cameraFtp.window') }}（ms）</VLabel><VNumberInput v-model="cfg.camera_ftp.match_window_ms" :min="500" :max="60000" :step="500" /></VCol>
+            <VCol cols="6" md="3"><VLabel class="mb-1 text-body-medium">{{ $t('page.settings.cameraFtp.retention') }}</VLabel><VNumberInput v-model="cfg.camera_ftp.retention_days" :min="0" :max="3650" :step="1" /></VCol>
+          </VRow>
+          <div class="setting-row mt-3">
+            <div>
+              <div class="text-body-large font-weight-medium">{{ $t('page.settings.cameraFtp.keepOriginalNoread') }}</div>
+              <div class="text-body-small text-medium-emphasis">{{ $t('page.settings.cameraFtp.keepOriginalNoreadDesc') }}</div>
+            </div>
+            <VSwitch v-model="cfg.camera_ftp.keep_original_noread" class="flex-shrink-0" hide-details color="primary" inset />
+          </div>
+          <div class="text-body-small text-medium-emphasis mt-3">{{ $t('page.settings.cameraFtp.hint') }}</div>
         </VCardText>
       </VCard>
 

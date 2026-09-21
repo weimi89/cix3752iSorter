@@ -47,6 +47,9 @@ async function request(method, path, body, { raw = false } = {}) {
   return await res.json()
 }
 
+/** 讀碼站照片本體的網址（<img src> 直接用；session 走 cookie） */
+export const parcelImageUrl = (id, orig = false) => `${apiBase()}/api/parcel-images/${id}/file${orig ? '?orig=1' : ''}`
+
 export const api = {
   status: () => request('GET', '/api/status'),
   health: () => request('GET', '/api/health'),

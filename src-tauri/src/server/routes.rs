@@ -58,6 +58,7 @@ pub(super) fn api_router() -> Router<ServerState> {
         .route("/parcels", get(parcels_list))
         .route("/parcels/export.xlsx", get(parcels_export))
         .route("/parcels/{id}", get(parcel_detail))
+        .route("/parcel-images/{id}/file", get(parcel_image_file))
         .route("/stats/daily", get(stats_daily))
         .route("/stats/hourly", get(stats_hourly))
         .route("/stats/overview", get(stats_overview))
@@ -193,6 +194,8 @@ struct ParcelRow {
     started_ms: i64,
     ended_ms: Option<i64>,
     travel_ms: Option<i64>,
+    /// 這件的第一張讀碼站照片；NULL = 沒照片
+    image_id: Option<i64>,
 }
 
 /// 多筆單號：逗號／分號／頓號／空白／換行都算分隔（貼 Excel 直欄也行）
@@ -248,7 +251,7 @@ fn parcels_filter(q: &ParcelsQuery) -> (String, Vec<String>) {
     (where_sql, binds)
 }
 
-const PARCEL_COLS: &str = "id, ulid, barcode, chute_code, chute_cid, chute_source, chute_reason, status, belt_slot, cart, ir_length, gap, block_pos, lost_pos, response_id, started_at, started_ms, ended_ms, travel_ms";
+const PARCEL_COLS: &str = "id, ulid, barcode, chute_code, chute_cid, chute_source, chute_reason, status, belt_slot, cart, ir_length, gap, block_pos, lost_pos, response_id, started_at, started_ms, ended_ms, travel_ms, (SELECT MIN(i.id) FROM parcel_images i WHERE i.parcel_id = parcels.id) AS image_id";
 
 async fn parcels_list(State(state): State<ServerState>, Query(q): Query<ParcelsQuery>) -> ApiResult<serde_json::Value> {
     let (where_sql, binds) = parcels_filter(&q);
@@ -291,7 +294,38 @@ async fn parcel_detail(State(state): State<ServerState>, Path(id): Path<i64>) ->
         .bind(id)
         .fetch_all(&state.app.db)
         .await?;
-    Ok(Json(serde_json::json!({ "parcel": parcel, "events": events, "print_jobs": prints })))
+    let images: Vec<ParcelImageRow> = sqlx::query_as("SELECT id, file_name, size, received_at, (orig_path IS NOT NULL) AS has_orig FROM parcel_images WHERE parcel_id = ? ORDER BY id")
+        .bind(id)
+        .fetch_all(&state.app.db)
+        .await?;
+    Ok(Json(serde_json::json!({ "parcel": parcel, "events": events, "print_jobs": prints, "images": images })))
+}
+
+#[derive(serde::Serialize, sqlx::FromRow)]
+struct ParcelImageRow {
+    id: i64,
+    file_name: String,
+    size: i64,
+    received_at: String,
+    has_orig: bool,
+}
+
+#[derive(Deserialize)]
+struct ImageQuery {
+    /// 1 = 拿保留的原圖（只有讀碼失敗件有）
+    #[serde(default)]
+    orig: u8,
+}
+
+/// 讀碼站照片本體；路徑只從資料表拿，不吃網址上的檔名
+async fn parcel_image_file(State(state): State<ServerState>, Path(id): Path<i64>, Query(q): Query<ImageQuery>) -> Result<Response, ApiError> {
+    let row: Option<(String, Option<String>)> = sqlx::query_as("SELECT rel_path, orig_path FROM parcel_images WHERE id = ?").bind(id).fetch_optional(&state.app.db).await?;
+    let (rel, orig) = row.ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "找不到這張照片".into()))?;
+    let rel = if q.orig == 1 { orig.ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "這件沒有保留原圖".into()))? } else { rel };
+    let path = state.app.data_dir.join("images").join(&rel);
+    let data = tokio::fs::read(&path).await.map_err(|_| ApiError(StatusCode::NOT_FOUND, "照片檔案已不存在".into()))?;
+    let mime = mime_guess::from_path(&rel).first_or_octet_stream().to_string();
+    Ok(([(header::CONTENT_TYPE, mime), (header::CACHE_CONTROL, "private, max-age=86400".to_string())], data).into_response())
 }
 
 async fn parcels_export(State(state): State<ServerState>, Query(q): Query<ParcelsQuery>) -> Result<Response, ApiError> {
@@ -480,6 +514,26 @@ async fn config_put(
     }
     // 安全參數的上下限不能只靠畫面：設定檔可以手改、API 可以直接打；超出範圍的值會讓鎖定形同虛設
     // 或讓 SQLite 的時間運算回 NULL
+    let f = &cfg.camera_ftp;
+    f.listen.parse::<std::net::SocketAddr>().map_err(|_| bad("讀碼站照片 FTP 監聽位址格式錯誤"))?;
+    if f.enabled && (f.username.trim().is_empty() || f.password.is_empty()) {
+        return Err(bad("讀碼站照片 FTP 帳號與密碼不可空白"));
+    }
+    if !(1..=100).contains(&f.jpeg_quality) {
+        return Err(bad("證據圖 JPEG 品質必須在 1–100"));
+    }
+    if f.max_edge_px != 0 && !(320..=8000).contains(&f.max_edge_px) {
+        return Err(bad("證據圖長邊必須是 0（不縮）或 320–8000 像素"));
+    }
+    if (f.passive_port_min == 0) != (f.passive_port_max == 0) || f.passive_port_min > f.passive_port_max {
+        return Err(bad("被動模式埠範圍要兩個都填（起 ≤ 迄），或兩個都 0 交給系統"));
+    }
+    if !(500..=60_000).contains(&f.match_window_ms) {
+        return Err(bad("照片對包裹的時間窗口必須在 500–60000 毫秒"));
+    }
+    if f.retention_days > 3650 {
+        return Err(bad("照片保留天數最多 3650"));
+    }
     let w = &cfg.web_access;
     if !(1..=720).contains(&w.session_hours) {
         return Err(bad("登入後可用時數必須在 1–720 小時"));
@@ -650,6 +704,8 @@ struct AbnormalRow {
     state: Option<String>,
     handled_ms: Option<i64>,
     handled_by: Option<String>,
+    /// 這件的第一張讀碼站照片；NULL = 沒照片
+    image_id: Option<i64>,
 }
 
 /// 今天落到異常口（預設格口）的件；待處理的最舊排前面，已處理的最近處理排前面
@@ -663,7 +719,8 @@ async fn abnormal_list(State(state): State<ServerState>, Query(q): Query<Abnorma
     };
     let sql = format!(
         "SELECT p.id, p.barcode, p.started_at, p.ended_ms, p.chute_code, p.chute_source, p.chute_reason, p.cart,
-                h.state, h.handled_ms, h.handled_by
+                h.state, h.handled_ms, h.handled_by,
+                (SELECT MIN(i.id) FROM parcel_images i WHERE i.parcel_id = p.id) AS image_id
            FROM parcels p LEFT JOIN abnormal_handling h ON h.parcel_id = p.id
           WHERE p.chute_code = ? AND p.status = 3 AND p.started_ms >= ? {filter}
           ORDER BY {order} LIMIT ?"

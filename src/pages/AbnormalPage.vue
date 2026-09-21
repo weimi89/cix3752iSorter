@@ -1,6 +1,6 @@
 <script setup>
 import { useI18n } from 'vue-i18n'
-import { api } from '@/api/http'
+import { api, parcelImageUrl } from '@/api/http'
 import { listen } from '@/api/events'
 import { fmtTimeMs, sourceMeta } from '@/composables/useFormat'
 import AppHeader from '@/components/AppHeader.vue'
@@ -83,6 +83,8 @@ onMounted(() => {
     listen('abnormal-updated', soon),
     // 新的異常件落格（終態）也要出現在清單上
     listen('parcel-updated', ({ payload }) => { if (payload.ended_ms) soon() }),
+    // 照片通常比落格晚一兩秒到，到了再刷一次縮圖才會出現
+    listen('parcel-image', soon),
   ]
 })
 onBeforeUnmount(() => { unlisten.forEach(u => u()); clearInterval(clock) })
@@ -115,7 +117,11 @@ onBeforeUnmount(() => { unlisten.forEach(u => u()); clearInterval(clock) })
         <tbody>
           <tr v-if="!list.length"><td colspan="6"><div class="py-3 d-flex align-center justify-center"><VIcon icon="tabler-circle-check" size="20" class="me-1 text-success" /><span class="text-md">{{ tab === 'pending' ? $t('page.abnormal.nonePending') : $t('common.noResults') }}</span></div></td></tr>
           <tr v-for="r in list" :key="r.id" :class="{ 'abnormal-overdue': !r.state && ageMs(r) >= OVERDUE_MS }">
-            <td :data-label="$t('page.abnormal.landedAt')" class="text-center text-no-wrap">{{ fmtTimeMs(r.ended_ms).slice(0, 8) }}</td>
+            <td :data-label="$t('page.abnormal.landedAt')" class="text-center text-no-wrap">
+              <div>{{ fmtTimeMs(r.ended_ms).slice(0, 8) }}</div>
+              <!-- 讀碼站照片縮圖放在時間下面，不另開一欄：欄位已經很擠，桌面與平板都塞不下第七欄 -->
+              <img v-if="r.image_id" :src="parcelImageUrl(r.image_id)" :alt="r.barcode" class="abnormal-thumb mt-1" @click="open(r.id)">
+            </td>
             <td :data-label="$t('parcel.barcode')" class="text-center"><span class="selectable font-weight-medium cursor-pointer" @click="open(r.id)">{{ r.barcode }}</span></td>
             <td :data-label="$t('page.abnormal.reason')" class="text-center"><VChip size="x-small" :color="sourceMeta(r.chute_source).color" variant="tonal" label>{{ reasonText(r) }}</VChip></td>
             <td :data-label="$t('page.abnormal.waiting')" class="text-center text-no-wrap" :class="{ 'text-error font-weight-bold': !r.state && ageMs(r) >= OVERDUE_MS }">{{ r.state ? '—' : fmtAge(ageMs(r)) }}</td>
@@ -144,6 +150,7 @@ onBeforeUnmount(() => { unlisten.forEach(u => u()); clearInterval(clock) })
 
 <style scoped>
 .abnormal-overdue { background: rgba(var(--v-theme-error), 0.06); }
+.abnormal-thumb { inline-size: 64px; block-size: 48px; object-fit: cover; border-radius: 4px; cursor: pointer; vertical-align: middle; }
 @media (min-width: 640px) {
   .abnormal-table :deep(table) { table-layout: fixed; inline-size: 100%; }
 }
