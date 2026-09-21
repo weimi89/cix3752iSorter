@@ -58,6 +58,7 @@ pub(super) fn api_router() -> Router<ServerState> {
         .route("/parcels", get(parcels_list))
         .route("/parcels/export.xlsx", get(parcels_export))
         .route("/parcels/{id}", get(parcel_detail))
+        .route("/parcel-images/{id}", get(parcel_image_meta))
         .route("/parcel-images/{id}/file", get(parcel_image_file))
         .route("/stats/daily", get(stats_daily))
         .route("/stats/hourly", get(stats_hourly))
@@ -310,11 +311,39 @@ struct ParcelImageRow {
     has_orig: bool,
 }
 
+/// 放大檢視用：照片加上它對到的那件的條碼與時間（現場看照片比看資料多，標題要一眼認得出是哪件）
+#[derive(serde::Serialize, sqlx::FromRow)]
+struct ParcelImageMeta {
+    id: i64,
+    file_name: String,
+    size: i64,
+    received_at: String,
+    has_orig: bool,
+    parcel_id: Option<i64>,
+    barcode: Option<String>,
+    started_at: Option<String>,
+    chute_code: Option<String>,
+}
+
 #[derive(Deserialize)]
 struct ImageQuery {
     /// 1 = 拿保留的原圖（只有讀碼失敗件有）
     #[serde(default)]
     orig: u8,
+}
+
+/// 單張照片的資訊（列表只有 image_id，放大檢視要檔名與有沒有原圖）
+async fn parcel_image_meta(State(state): State<ServerState>, Path(id): Path<i64>) -> ApiResult<ParcelImageMeta> {
+    let row: Option<ParcelImageMeta> = sqlx::query_as(
+        "SELECT i.id, i.file_name, i.size, i.received_at, (i.orig_path IS NOT NULL) AS has_orig,
+                i.parcel_id, p.barcode, p.started_at, p.chute_code
+           FROM parcel_images i LEFT JOIN parcels p ON p.id = i.parcel_id
+          WHERE i.id = ?",
+    )
+        .bind(id)
+        .fetch_optional(&state.app.db)
+        .await?;
+    Ok(Json(row.ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "找不到這張照片".into()))?))
 }
 
 /// 讀碼站照片本體；路徑只從資料表拿，不吃網址上的檔名

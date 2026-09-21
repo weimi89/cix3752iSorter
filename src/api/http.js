@@ -52,6 +52,7 @@ export const parcelImageUrl = (id, orig = false) => `${apiBase()}/api/parcel-ima
 
 export const api = {
   status: () => request('GET', '/api/status'),
+  parcelImage: id => request('GET', `/api/parcel-images/${id}`),
   health: () => request('GET', '/api/health'),
   // 前端錯誤回報（見 api/errorReport.js）；後端記成事件記錄 `ui` 類別
   reportClientError: body => request('POST', '/api/client-errors', body),

@@ -7,6 +7,7 @@ import AppHeader from '@/components/AppHeader.vue'
 import PageActions from '@/components/PageActions.vue'
 import TablePagination from '@/components/TablePagination.vue'
 import ParcelDetailDialog from '@/components/ParcelDetailDialog.vue'
+import ParcelImageViewer from '@/components/ParcelImageViewer.vue'
 import AppDatePicker from '@/components/AppDatePicker.vue'
 import MultiNoField from '@/components/MultiNoField.vue'
 import { toast } from 'vue3-toastify'
@@ -44,6 +45,10 @@ const load = async () => {
 const search = () => { page.value = 1; load() }
 const resetSearch = () => { Object.assign(filters, { startDate: '', endDate: '', barcode: '', chute: '', status: null, source: null }); search() }
 const open = id => { detailId.value = id; detailOpen.value = true }
+// 照片按鈕直接放大，不經包裹詳情
+const viewerImage = ref(null)
+const viewerOpen = ref(false)
+const openImage = p => { viewerImage.value = { id: p.image_id }; viewerOpen.value = true }
 const exportNow = () => window.open(api.parcelsExportUrl(params()), '_blank')
 
 const statusItems = computed(() => [{ value: null, title: t('common.all') }, ...Object.entries(STATUS).map(([v, m]) => ({ value: Number(v), title: t(m.key) }))])
@@ -136,7 +141,7 @@ onBeforeUnmount(() => unlisten?.())
             <td :data-label="$t('parcel.cart')" class="text-center">{{ p.cart ?? '' }}</td>
             <td :data-label="$t('common.actions')" class="text-center text-no-wrap">
               <VBtn size="small" variant="tonal" color="primary" class="me-1" @click.stop="open(p.id)"><VIcon icon="tabler-list-details" size="16" class="me-1" />{{ $t('parcel.detail') }}</VBtn>
-              <VBtn size="small" variant="tonal" color="secondary" :disabled="!p.image_id" :title="p.image_id ? $t('parcel.hasImage') : $t('parcel.noImageShort')" @click.stop="open(p.id)"><VIcon icon="tabler-camera" size="16" /></VBtn>
+              <VBtn size="small" variant="tonal" color="secondary" :disabled="!p.image_id" :title="p.image_id ? $t('parcel.hasImage') : $t('parcel.noImageShort')" @click.stop="openImage(p)"><VIcon icon="tabler-camera" size="16" /></VBtn>
             </td>
           </tr>
         </tbody>
@@ -146,5 +151,6 @@ onBeforeUnmount(() => unlisten?.())
     </VCard>
 
     <ParcelDetailDialog v-model="detailOpen" :parcel-id="detailId" />
+    <ParcelImageViewer v-model="viewerOpen" :image="viewerImage" />
   </div>
 </template>

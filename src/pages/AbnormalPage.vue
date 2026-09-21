@@ -7,6 +7,7 @@ import AppHeader from '@/components/AppHeader.vue'
 import PageActions from '@/components/PageActions.vue'
 import ParcelDetailDialog from '@/components/ParcelDetailDialog.vue'
 import ProtectedImg from '@/components/ProtectedImg.vue'
+import ParcelImageViewer from '@/components/ParcelImageViewer.vue'
 import { toast } from 'vue3-toastify'
 
 const { t } = useI18n()
@@ -19,6 +20,10 @@ const errorMsg = ref('')
 const busyId = ref(null)
 const detailId = ref(null)
 const detailOpen = ref(false)
+// 縮圖直接放大；條碼才是進詳情
+const viewerImage = ref(null)
+const viewerOpen = ref(false)
+const openImage = r => { viewerImage.value = { id: r.image_id }; viewerOpen.value = true }
 
 const load = async () => {
   loading.value = true
@@ -121,7 +126,7 @@ onBeforeUnmount(() => { unlisten.forEach(u => u()); clearInterval(clock) })
             <td :data-label="$t('page.abnormal.landedAt')" class="text-center text-no-wrap">
               <div>{{ fmtTimeMs(r.ended_ms).slice(0, 8) }}</div>
               <!-- 讀碼站照片縮圖放在時間下面，不另開一欄：欄位已經很擠，桌面與平板都塞不下第七欄 -->
-              <ProtectedImg v-if="r.image_id" :src="parcelImageUrl(r.image_id)" :alt="r.barcode" class="abnormal-thumb mt-1" @click="open(r.id)" />
+              <ProtectedImg v-if="r.image_id" :src="parcelImageUrl(r.image_id)" :alt="r.barcode" class="abnormal-thumb mt-1" @click="openImage(r)" />
             </td>
             <td :data-label="$t('parcel.barcode')" class="text-center"><span class="selectable font-weight-medium cursor-pointer" @click="open(r.id)">{{ r.barcode }}</span></td>
             <td :data-label="$t('page.abnormal.reason')" class="text-center"><VChip size="x-small" :color="sourceMeta(r.chute_source).color" variant="tonal" label>{{ reasonText(r) }}</VChip></td>
@@ -146,6 +151,7 @@ onBeforeUnmount(() => { unlisten.forEach(u => u()); clearInterval(clock) })
     </VCard>
 
     <ParcelDetailDialog v-model="detailOpen" :parcel-id="detailId" />
+    <ParcelImageViewer v-model="viewerOpen" :image="viewerImage" />
   </div>
 </template>
 
