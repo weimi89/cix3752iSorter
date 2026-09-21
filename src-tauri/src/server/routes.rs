@@ -64,7 +64,6 @@ pub(super) fn api_router() -> Router<ServerState> {
         .route("/config", get(config_get).put(config_put))
         .route("/web-auth/password", get(web_auth_password_get).put(web_auth_password_put))
         .route("/chutes", get(chutes_get).put(chutes_put))
-        .route("/chutes/{code}/new-bag", post(chute_new_bag))
         .route("/abnormal", get(abnormal_list))
         .route("/abnormal/{id}/handle", post(abnormal_handle))
         .route("/abnormal/{id}/reopen", post(abnormal_reopen))
@@ -615,13 +614,10 @@ struct ChuteApi {
     printer_port: Option<String>,
     enabled: bool,
     sort_order: i64,
-    /// 每袋上限（0 = 不限）
-    #[serde(default)]
-    bag_limit: i64,
 }
 
 async fn chutes_get(State(state): State<ServerState>) -> ApiResult<Vec<ChuteApi>> {
-    let rows = sqlx::query_as::<_, ChuteApi>("SELECT code, label, cid, printer_port, enabled, sort_order, bag_limit FROM chutes ORDER BY sort_order, code")
+    let rows = sqlx::query_as::<_, ChuteApi>("SELECT code, label, cid, printer_port, enabled, sort_order FROM chutes ORDER BY sort_order, code")
         .fetch_all(&state.app.db)
         .await?;
     Ok(Json(rows))
@@ -732,19 +728,6 @@ async fn abnormal_reopen(State(state): State<ServerState>, Path(id): Path<i64>) 
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
-/// 換袋：現場把某格口的袋子換掉後按一下，本袋件數歸零、上一袋定版
-async fn chute_new_bag(State(state): State<ServerState>, Path(code): Path<String>) -> ApiResult<serde_json::Value> {
-    let exists: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM chutes WHERE code = ?").bind(&code).fetch_one(&state.app.db).await?;
-    if exists == 0 {
-        return Err(bad(format!("沒有格口 {code}")));
-    }
-    let Some(h) = state.app.tracker.get() else {
-        return Err(ApiError(StatusCode::SERVICE_UNAVAILABLE, "狀態機尚未啟動".into()));
-    };
-    h.new_bag(code, "web".into()).await;
-    Ok(Json(serde_json::json!({ "ok": true })))
-}
-
 async fn chutes_put(State(state): State<ServerState>, Json(list): Json<Vec<ChuteApi>>) -> ApiResult<serde_json::Value> {
     let default_code = state.app.config.current().general.default_chute;
     if !list.iter().any(|c| c.code == default_code) {
@@ -761,14 +744,13 @@ async fn chutes_put(State(state): State<ServerState>, Json(list): Json<Vec<Chute
     let mut tx = state.app.db.begin().await?;
     sqlx::query("DELETE FROM chutes").execute(&mut *tx).await?;
     for c in &list {
-        sqlx::query("INSERT INTO chutes (code, label, cid, printer_port, enabled, sort_order, bag_limit) VALUES (?, ?, ?, ?, ?, ?, ?)")
+        sqlx::query("INSERT INTO chutes (code, label, cid, printer_port, enabled, sort_order) VALUES (?, ?, ?, ?, ?, ?)")
             .bind(c.code.trim())
             .bind(&c.label)
             .bind(c.cid)
             .bind(c.printer_port.as_ref().filter(|p| !p.trim().is_empty()))
             .bind(c.enabled as i64)
             .bind(c.sort_order)
-            .bind(c.bag_limit.max(0))
             .execute(&mut *tx)
             .await?;
     }

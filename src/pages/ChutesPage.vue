@@ -46,7 +46,7 @@ const mark = () => { dirty.value = true }
 const save = async () => {
   saving.value = true
   try {
-    await api.saveChutes(list.value.map(c => ({ ...c, cid: Number(c.cid), sort_order: Number(c.sort_order), bag_limit: Number(c.bag_limit) || 0 })))
+    await api.saveChutes(list.value.map(c => ({ ...c, cid: Number(c.cid), sort_order: Number(c.sort_order) })))
     toast(t('common.saved'), { type: 'success' })
     load()
   } catch (e) {
@@ -95,7 +95,6 @@ onMounted(load)
               <VCol cols="6" md="3" class="px-1"><div class="search-field"><label>{{ $t('page.chutes.label') }}</label><VTextField v-model="c.label" density="compact" variant="outlined" hide-details @update:model-value="mark" /></div></VCol>
               <VCol cols="6" md="3" class="px-1"><div class="search-field"><label>CID</label><VNumberInput v-model="c.cid" :min="1000000" :max="1999999" :step="1" control-variant="hidden" density="compact" variant="outlined" hide-details @update:model-value="mark" /></div></VCol>
               <VCol cols="6" md="3" class="px-1"><div class="search-field"><label>{{ $t('page.chutes.order') }}</label><VNumberInput v-model="c.sort_order" :min="0" density="compact" variant="outlined" hide-details @update:model-value="mark" /></div></VCol>
-              <VCol cols="6" md="3" class="px-1"><div class="search-field"><label>{{ $t('page.chutes.bagLimit') }}</label><VNumberInput v-model="c.bag_limit" :min="0" :step="10" density="compact" variant="outlined" hide-details @update:model-value="mark" /></div></VCol>
               <VCol cols="12" class="px-1"><div class="search-field"><label>{{ $t('page.chutes.printer') }}</label><VCombobox v-model="c.printer_port" :items="portItems" :placeholder="$t('page.chutes.noPrinter')" :error="printerMissing(c)" density="compact" variant="outlined" hide-details clearable @update:model-value="mark" />
                 <div v-if="printerMissing(c)" class="text-body-small text-error mt-1 d-flex align-center"><VIcon icon="tabler-alert-triangle" size="13" class="me-1" />{{ $t('page.chutes.printerMissingHint') }}</div></div></VCol>
             </VRow>
@@ -131,7 +130,6 @@ onMounted(load)
             <VCol cols="6" class="px-1"><div class="search-field"><label>{{ $t('page.chutes.label') }}</label><VTextField v-model="c.label" density="compact" variant="outlined" hide-details @update:model-value="mark" /></div></VCol>
             <VCol cols="6" class="px-1"><div class="search-field"><label>CID</label><VNumberInput v-model="c.cid" :min="1000000" :max="1999999" :step="1" control-variant="hidden" density="compact" variant="outlined" hide-details @update:model-value="mark" /></div></VCol>
             <VCol cols="6" class="px-1"><div class="search-field"><label>{{ $t('page.chutes.order') }}</label><VNumberInput v-model="c.sort_order" :min="0" density="compact" variant="outlined" hide-details @update:model-value="mark" /></div></VCol>
-            <VCol cols="6" class="px-1"><div class="search-field"><label>{{ $t('page.chutes.bagLimit') }}</label><VNumberInput v-model="c.bag_limit" :min="0" :step="10" density="compact" variant="outlined" hide-details @update:model-value="mark" /></div></VCol>
             <VCol cols="12" class="px-1"><div class="search-field"><label>{{ $t('page.chutes.printer') }}</label><VCombobox v-model="c.printer_port" :items="portItems" :placeholder="$t('page.chutes.noPrinter')" density="compact" variant="outlined" hide-details clearable @update:model-value="mark" /></div></VCol>
           </VRow>
           <div class="pause-row" :class="c.enabled ? 'pause-row--on' : 'pause-row--off'">

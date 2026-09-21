@@ -28,26 +28,6 @@ let hourlyTimer = null
 const tracker = computed(() => status.tracker)
 const counters = computed(() => tracker.value?.counters || {})
 const inFlight = computed(() => tracker.value?.in_flight || [])
-// 各格口本袋件數：有上限的到 80% 轉黃、到上限轉紅；換袋要確認，按錯會把件數歸零
-const bags = computed(() => tracker.value?.bags || [])
-const bagPct = b => (b.limit ? Math.min(100, Math.round((b.count / b.limit) * 100)) : 0)
-const bagColor = b => (!b.limit ? 'info' : b.count >= b.limit ? 'error' : b.count >= b.limit * 0.8 ? 'warning' : 'success')
-const bagToChange = ref(null)
-const changingBag = ref(false)
-const confirmNewBag = async () => {
-  const b = bagToChange.value
-  if (!b) return
-  changingBag.value = true
-  try {
-    await api.newBag(b.code)
-    toast(t('page.dashboard.bagChanged', { code: b.code, seq: b.seq + 1 }), { type: 'success', autoClose: 4000 })
-    bagToChange.value = null
-  } catch (e) {
-    toast(e.message, { type: 'error' })
-  } finally {
-    changingBag.value = false
-  }
-}
 // 已經過 = 伺服器現在時間 − 包裹進線時間。本機時鐘先加上與伺服器的差,再扣掉快照與本機計時最多半秒的落差,
 // 剛進線的包裹不會閃出負數
 const elapsedMs = p => Math.max(0, now.value + status.serverOffsetMs - p.p_ms)
@@ -210,50 +190,6 @@ const stats = computed(() => [
       </VCol>
     </VRow>
 
-    <!-- 格口袋況：每格一塊，件數 / 上限 進度條；到上限整塊標紅並有語音提示，換完袋按一下歸零 -->
-    <VRow density="compact" class="mt-1">
-      <VCol cols="12">
-        <VCard class="card-shadow">
-          <VCardItem>
-            <template #prepend><VAvatar :color="bags.some(b => b.limit && b.count >= b.limit) ? 'error' : 'primary'" variant="tonal"><VIcon icon="tabler-shopping-bag" /></VAvatar></template>
-            <VCardTitle>{{ $t('page.dashboard.bags') }}</VCardTitle>
-            <VCardSubtitle>{{ $t('page.dashboard.bagsHint') }}</VCardSubtitle>
-          </VCardItem>
-          <VCardText class="pt-0">
-            <div v-if="!bags.length" class="text-medium-emphasis text-body-small">{{ $t('common.noData') }}</div>
-            <div v-else class="bag-grid">
-              <div v-for="b in bags" :key="b.code" class="bag-cell" :class="`bag-cell--${bagColor(b)}`">
-                <div class="d-flex align-center justify-space-between">
-                  <div class="text-title-medium font-weight-bold">{{ b.code }}<span class="text-body-small text-medium-emphasis ms-1">{{ b.label }}</span></div>
-                  <VBtn size="x-small" variant="tonal" :color="bagColor(b)" :title="$t('page.dashboard.newBag')" @click="bagToChange = b"><VIcon icon="tabler-refresh" size="14" class="me-1" />{{ $t('page.dashboard.newBag') }}</VBtn>
-                </div>
-                <div class="d-flex align-baseline mt-1">
-                  <span class="text-headline-small font-weight-bold" :class="`text-${bagColor(b)}`">{{ b.count }}</span>
-                  <span v-if="b.limit" class="text-body-small text-medium-emphasis ms-1">/ {{ b.limit }}</span>
-                  <VSpacer />
-                  <span class="text-body-small text-medium-emphasis">{{ $t('page.dashboard.bagSeq', { seq: b.seq }) }}</span>
-                </div>
-                <VProgressLinear v-if="b.limit" :model-value="bagPct(b)" :color="bagColor(b)" height="6" rounded class="mt-1" />
-                <div v-else class="text-body-small text-medium-emphasis mt-1">{{ $t('page.dashboard.bagNoLimit') }}</div>
-              </div>
-            </div>
-          </VCardText>
-        </VCard>
-      </VCol>
-    </VRow>
-
-    <VDialog :model-value="!!bagToChange" max-width="360" @update:model-value="v => { if (!v) bagToChange = null }">
-      <VCard v-if="bagToChange">
-        <VCardTitle class="text-title-large">{{ $t('page.dashboard.newBagConfirmTitle', { code: bagToChange.code }) }}</VCardTitle>
-        <VCardText>{{ $t('page.dashboard.newBagConfirmText', { count: bagToChange.count, seq: bagToChange.seq }) }}</VCardText>
-        <VCardActions>
-          <VSpacer />
-          <VBtn variant="text" @click="bagToChange = null">{{ $t('common.cancel') }}</VBtn>
-          <VBtn color="primary" variant="flat" :loading="changingBag" @click="confirmNewBag">{{ $t('page.dashboard.newBag') }}</VBtn>
-        </VCardActions>
-      </VCard>
-    </VDialog>
-
     <VRow density="compact" class="mt-1">
       <VCol cols="12" lg="7">
         <!-- 目前處理中 -->
@@ -354,10 +290,6 @@ const stats = computed(() => [
 .current-body { min-height: 64px; }
 .barcode-cell { max-width: 160px; }
 /* 格口袋況：一格一塊，寬度隨螢幕排，最少 150px */
-.bag-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; }
-.bag-cell { border: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); border-radius: 8px; padding: 8px 10px; }
-.bag-cell--warning { border-color: rgb(var(--v-theme-warning)); background: rgba(var(--v-theme-warning), 0.06); }
-.bag-cell--error { border-color: rgb(var(--v-theme-error)); background: rgba(var(--v-theme-error), 0.08); }
 /* 欄寬照表頭指定，不隨內容撐開；手機卡片式（table-cards）會改成 block，這條不影響 */
 @media (min-width: 640px) {
   .inflight-table :deep(table) { table-layout: fixed; inline-size: 100%; }

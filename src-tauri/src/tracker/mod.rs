@@ -107,16 +107,9 @@ pub struct TrackerSnapshot {
     /// 產生這份快照時的伺服器時鐘。前端算「已經過」要用它對齊自己的時鐘,
     /// 網頁版從別台電腦開時兩邊時鐘常差個一兩秒,直接用瀏覽器時間會算出負數。
     pub now_ms: i64,
-    /// 各格口現在這袋的件數與上限（看板換袋管理用）
-    pub bags: Vec<machine::BagInfo>,
 }
 
 impl TrackerHandle {
-    /// 換袋（網頁按鈕）
-    pub async fn new_bag(&self, code: String, by: String) {
-        let _ = self.tx.send(Input::NewBag { code, by }).await;
-    }
-
     pub async fn belt_start(&self) {
         let _ = self.tx.send(Input::BeltStart).await;
     }
@@ -197,28 +190,13 @@ impl TrackerHandle {
 }
 
 pub async fn load_chutes(db: &crate::db::DbPool) -> anyhow::Result<HashMap<String, ChuteRow>> {
-    let rows: Vec<(String, i64, Option<String>, i64, String, i64, i64)> =
-        sqlx::query_as("SELECT code, cid, printer_port, enabled, label, sort_order, bag_limit FROM chutes").fetch_all(db).await?;
+    let rows: Vec<(String, i64, Option<String>, i64, String, i64)> =
+        sqlx::query_as("SELECT code, cid, printer_port, enabled, label, sort_order FROM chutes").fetch_all(db).await?;
     Ok(rows
         .into_iter()
-        .map(|(code, cid, printer_port, enabled, label, sort_order, bag_limit)| {
-            (code.clone(), ChuteRow { code, cid: Cid(cid as u32), printer_port, enabled: enabled != 0, label, sort_order, bag_limit: bag_limit.max(0) as u32 })
+        .map(|(code, cid, printer_port, enabled, label, sort_order)| {
+            (code.clone(), ChuteRow { code, cid: Cid(cid as u32), printer_port, enabled: enabled != 0, label, sort_order })
         })
-        .collect())
-}
-
-/// 啟動時：每個格口還開著的那袋，件數從 parcels 算（關袋前不存 count，重啟不會算錯）
-pub async fn load_open_bags(db: &crate::db::DbPool) -> anyhow::Result<HashMap<String, machine::BagState>> {
-    let rows: Vec<(String, i64, i64, i64)> = sqlx::query_as(
-        "SELECT b.chute_code, b.seq, b.started_ms,
-                (SELECT COUNT(*) FROM parcels p WHERE p.chute_code = b.chute_code AND p.status = 3 AND p.ended_ms >= b.started_ms) AS cnt
-           FROM chute_bags b WHERE b.ended_ms IS NULL",
-    )
-    .fetch_all(db)
-    .await?;
-    Ok(rows
-        .into_iter()
-        .map(|(code, seq, started_ms, cnt)| (code, machine::BagState { seq: seq.max(1) as u32, started_ms, count: cnt.max(0) as u32 }))
         .collect())
 }
 
@@ -245,12 +223,11 @@ struct LiveOutputs {
     jam_tx: mpsc::Sender<JamAlert>,
 }
 
-/// 要請中介機出聲的現場告警：卡件單次（照舊 Node 節流）、卡件熱點、袋滿
+/// 要請中介機出聲的現場告警：卡件單次（照舊 Node 節流）、卡件熱點
 #[derive(Debug, Clone, PartialEq)]
 pub enum JamAlert {
     Chute(i32),
     Hotspot { module: i32, count: usize },
-    BagFull { code: String, seq: u32, count: u32, limit: u32 },
 }
 
 /// 卡件熱點：同一模組在 `window_ms` 內累積到 `min_count` 次就提示「請檢查機構」，
@@ -374,13 +351,6 @@ impl machine::Outputs for LiveOutputs {
             let _ = self.jam_tx.try_send(JamAlert::Chute(chute_no));
         }
     }
-    fn store_bag(&mut self, op: machine::BagOp) {
-        self.store.send(store::StoreOp::Bag(op));
-    }
-    fn bag_full(&mut self, code: &str, seq: u32, count: u32, limit: u32) {
-        // 格口名稱由消費端（app.rs）查 chutes 表補上，這裡只送代碼
-        let _ = self.jam_tx.try_send(JamAlert::BagFull { code: code.to_string(), seq, count, limit });
-    }
     fn store_jam(&mut self, ts_ms: i64, cart: u32, pos: i32, parcel: Option<&Parcel>) {
         // 每次堵塞開始只記一筆（machine 已去重），熱點就在這裡數
         if let Some((module, count)) = self.jam_hot.on_jam(pos, ts_ms) {
@@ -453,10 +423,6 @@ pub async fn spawn(
         jam_tx,
     };
     let mut machine = Machine::new(cfg, chutes, today, crate::db::now_ms());
-    match load_open_bags(&app.db).await {
-        Ok(bags) => machine.set_bags(bags),
-        Err(e) => event_log::log(&app.db, Level::Warn, "chute", "bags", format!("讀取各格口目前袋子失敗，件數從 0 起算：{e}")),
-    }
     let mut cfg_rx = app.config.subscribe();
 
     tokio::spawn(async move {
@@ -521,7 +487,6 @@ fn snapshot(m: &Machine) -> TrackerSnapshot {
         current: m.current.and_then(|k| m.parcels.get(&k).cloned()),
         in_flight: m.in_flight().into_iter().cloned().collect(),
         now_ms: crate::db::now_ms(),
-        bags: m.bags_view(),
     }
 }
 

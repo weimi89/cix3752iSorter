@@ -57,7 +57,6 @@ export const api = {
   abnormalHandle: (id, state) => request('POST', `/api/abnormal/${id}/handle`, { state }),
   abnormalReopen: id => request('POST', `/api/abnormal/${id}/reopen`),
   // 換袋：本袋件數歸零、上一袋定版
-  newBag: code => request('POST', `/api/chutes/${encodeURIComponent(code)}/new-bag`),
 
   parcels: params => request('GET', `/api/parcels?${qs(params)}`),
   parcel: id => request('GET', `/api/parcels/${id}`),

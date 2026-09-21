@@ -412,7 +412,7 @@ mod tests {
     fn chutes() -> HashMap<String, ChuteRow> {
         let mut m = HashMap::new();
         for (code, cid, enabled) in [("L1", 1000323, true), ("R5", 1006324, false), ("RS", 1007301, true), ("LS", 1007323, true)] {
-            m.insert(code.to_string(), ChuteRow { code: code.into(), cid: Cid(cid), printer_port: None, enabled, label: code.into(), sort_order: 0, bag_limit: 0 });
+            m.insert(code.to_string(), ChuteRow { code: code.into(), cid: Cid(cid), printer_port: None, enabled, label: code.into(), sort_order: 0 });
         }
         m
     }
