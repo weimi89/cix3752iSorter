@@ -6,6 +6,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "prebuild": "node scripts/build-icon-subset.mjs",
     "build": "vite build",
     "preview": "vite preview",
     "tauri": "tauri",
