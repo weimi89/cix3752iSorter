@@ -327,7 +327,7 @@ mod tests {
 
     #[test]
     fn 同幀兩個合法qr_取離畫面中心近的_不看字典序() {
-        let center = frame_center(4600, 3400);
+        let center = frame_center(5440, 3648);
         // 9/21 實例：鄰件 74Z01398784 在畫面上緣（字典序較小），這件 74Z01398831 在中央
         let frame = "74Z01398784;(1176,170)(1066,0)(814,83)(921,284);QRCode;74Z01398831;(2518,2443)(2563,2162)(2247,2084)(2190,2373);QRCode@";
         assert_eq!(pick_barcode(parse_frame(frame), center), "74Z01398831");
