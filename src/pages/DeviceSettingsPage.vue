@@ -191,7 +191,9 @@ onBeforeUnmount(() => window.removeEventListener('beforeunload', beforeUnload))
           <VRow density="compact">
             <VCol cols="6" md="3"><VLabel class="mb-1 text-body-medium">{{ $t('page.settings.general.retention') }}</VLabel><VNumberInput v-model="cfg.general.retention_days" :min="0" :max="365" /></VCol>
             <VCol cols="6" md="3"><VLabel class="mb-1 text-body-medium">{{ $t('page.settings.general.defaultChute') }}</VLabel><VTextField v-model="cfg.general.default_chute" :error-messages="cfg.general.default_chute?.trim() ? '' : $t('page.settings.v.defaultChute')" /></VCol>
+            <VCol cols="6" md="3"><VLabel class="mb-1 text-body-medium">{{ $t('page.settings.general.reentryHold') }}（ms）</VLabel><VNumberInput v-model="cfg.general.reentry_hold_ms" :min="0" :max="60000" :step="500" /></VCol>
           </VRow>
+          <div class="text-body-small text-medium-emphasis mt-2">{{ $t('page.settings.general.reentryHoldHint') }}</div>
           <VDivider class="my-4" />
           <VRow density="compact" align="end">
             <VCol cols="12" md="4"><VLabel class="mb-1 text-body-medium">{{ $t('page.settings.general.bind') }}</VLabel><VTextField v-model="cfg.server.bind" :error-messages="addrError(cfg.server.bind)" /></VCol>
@@ -300,6 +302,11 @@ onBeforeUnmount(() => window.removeEventListener('beforeunload', beforeUnload))
             <VCol cols="4" md="2"><VLabel class="mb-1 text-body-medium">{{ $t('page.settings.camera.dedup') }}（ms）</VLabel><VNumberInput v-model="cfg.camera.dedup_ms" :min="0" :max="60000" :step="500" /></VCol>
           </VRow>
           <div class="text-body-small text-medium-emphasis mt-2">{{ $t('page.settings.camera.hint') }}</div>
+          <VRow density="compact" class="mt-1">
+            <VCol cols="6" md="2"><VLabel class="mb-1 text-body-medium">{{ $t('page.settings.camera.frameWidth') }}（px）</VLabel><VNumberInput v-model="cfg.camera.frame_width" :min="0" :max="20000" :step="100" /></VCol>
+            <VCol cols="6" md="2"><VLabel class="mb-1 text-body-medium">{{ $t('page.settings.camera.frameHeight') }}（px）</VLabel><VNumberInput v-model="cfg.camera.frame_height" :min="0" :max="20000" :step="100" /></VCol>
+          </VRow>
+          <div class="text-body-small text-medium-emphasis mt-2">{{ $t('page.settings.camera.frameHint') }}</div>
         </VCardText>
       </VCard>
 

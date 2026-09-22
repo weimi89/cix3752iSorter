@@ -15,6 +15,9 @@ use sqlx::Row;
 
 use crate::db::DbPool;
 
+/// 異常三分類（互斥，規則在 `db::abnormal_kind`）：`abnormal`＝分揀機異常、`middleware`＝仲介機回傳、
+/// `noread_landed`＝讀碼失敗落異常口；`done - middleware - noread_landed` 才是正常分揀完成。
+/// `noread`（讀到 NoRead 的件，不論結局）與 `defaulted`（走預設口，不論結局）是舊口徑，讀碼失敗率那幾張圖還在用。
 #[derive(Serialize, Default, Clone, Copy)]
 pub struct Bucket {
     pub total: i64,
@@ -22,6 +25,8 @@ pub struct Bucket {
     pub noread: i64,
     pub defaulted: i64,
     pub abnormal: i64,
+    pub middleware: i64,
+    pub noread_landed: i64,
 }
 
 #[derive(Serialize)]
@@ -40,6 +45,8 @@ pub struct DailyRow {
     pub noread: i64,
     pub defaulted: i64,
     pub abnormal: i64,
+    pub middleware: i64,
+    pub noread_landed: i64,
 }
 
 #[derive(Serialize, Default, Clone)]
@@ -49,6 +56,8 @@ pub struct HourBucket {
     pub done: i64,
     pub abnormal: i64,
     pub noread: i64,
+    pub middleware: i64,
+    pub noread_landed: i64,
 }
 
 #[derive(Serialize)]
@@ -81,6 +90,11 @@ pub struct ChuteCount {
     pub total: i64,
     pub done: i64,
     pub abnormal: i64,
+    /// 在這格「完成」後同條碼 5 秒～10 分鐘內又進線且再次完成：件其實沒落進去、被人撿回重投。
+    /// 再進線被攔到異常口的（REENTRY）是讀到鄰件條碼，不是這格沒接到，不算。
+    /// 集中在某幾格就是那幾格的推包時機或落袋口有問題（9/21 L2 佔該格完成件 4%）。
+    /// 子查詢的 `+` 是逼 SQLite 走條碼索引：不加會挑 status 索引掃全表，30 天要跑 50 秒
+    pub refed_after: i64,
 }
 
 #[derive(Serialize)]
@@ -216,6 +230,22 @@ pub struct DuplicateRow {
     pub chutes: String,
 }
 
+/// 投料連續性：相鄰兩件上線間距的分布。分揀機節拍約 1 秒一件，5 秒以上的空檔就是線在等料
+#[derive(Serialize, Default)]
+pub struct FeedingStats {
+    /// 5 秒～30 秒的空檔：次數與累計分鐘（投料手忙不過來）
+    pub short_gaps: i64,
+    pub short_gap_min: f64,
+    /// 30 秒～5 分鐘的空檔（換籠車、卡件處理）
+    pub mid_gaps: i64,
+    pub mid_gap_min: f64,
+    /// 5 分鐘以上（休息、換班）
+    pub long_gaps: i64,
+    pub long_gap_min: f64,
+    /// 第一件到最後一件的跨度（分鐘）
+    pub span_min: f64,
+}
+
 #[derive(Serialize)]
 pub struct Overview {
     pub from: String,
@@ -244,6 +274,9 @@ pub struct Overview {
     /// 各小車（分揀機載具）的件數與異常數，看有沒有某台特別會出事
     pub by_cart: Vec<CartCount>,
     pub noread_by_length: Vec<LengthBucket>,
+    /// 讀碼失敗的系統判定原因各幾件（`db::abnormal_kind::NOREAD_CAUSES`），多的在前
+    pub noread_causes: Vec<KeyCount>,
+    pub feeding: FeedingStats,
     /// 這台有沒有印過任何面單。現場面單由中介機印時格口表雖然填了埠位、列印任務永遠是 0，
     /// 統計頁的列印卡就不顯示（看埠位有沒有設不準，所以看的是有沒有任務）
     pub printing_used: bool,
@@ -275,7 +308,8 @@ fn day_start_ms(day: NaiveDate) -> i64 {
         .unwrap_or(0)
 }
 
-pub async fn overview(db: &DbPool, retention_days: u32, from: NaiveDate, to: NaiveDate) -> anyhow::Result<Overview> {
+/// `default_chute` 是異常口代碼：落到那裡的完成件要分成仲介機回傳／讀碼失敗
+pub async fn overview(db: &DbPool, retention_days: u32, default_chute: &str, from: NaiveDate, to: NaiveDate) -> anyhow::Result<Overview> {
     if from > to {
         anyhow::bail!("起始日期不能晚於結束日期");
     }
@@ -305,8 +339,8 @@ pub async fn overview(db: &DbPool, retention_days: u32, from: NaiveDate, to: Nai
     let range = daily_sum(db, from, to).await?;
     let daily = daily_rows(db, from, to).await?;
 
-    let (hourly, heatmap) = hour_buckets(db, &ts_from, &ts_to).await?;
-    let by_chute = chute_counts(db, &ts_from, &ts_to).await?;
+    let (hourly, heatmap) = hour_buckets(db, default_chute, &ts_from, &ts_to).await?;
+    let by_chute = chute_counts(db, default_chute, &ts_from, &ts_to).await?;
     let by_source = source_counts(db, &ts_from, &ts_to).await?;
     let by_status = status_counts(db, &ts_from, &ts_to).await?;
     let travel = travel_stats(db, &ts_from, &ts_to).await?;
@@ -324,6 +358,8 @@ pub async fn overview(db: &DbPool, retention_days: u32, from: NaiveDate, to: Nai
     let duplicates = duplicate_stats(db, &ts_from, &ts_to).await?;
     let by_cart = cart_counts(db, &ts_from, &ts_to).await?;
     let noread_by_length = length_buckets(db, &ts_from, &ts_to).await?;
+    let noread_causes = noread_cause_counts(db, default_chute, &ts_from, &ts_to).await?;
+    let feeding = feeding_stats(db, &ts_from, &ts_to).await?;
     let printing_used: i64 = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM print_jobs)").fetch_one(db).await?;
 
     Ok(Overview {
@@ -351,6 +387,8 @@ pub async fn overview(db: &DbPool, retention_days: u32, from: NaiveDate, to: Nai
         duplicates,
         by_cart,
         noread_by_length,
+        noread_causes,
+        feeding,
         printing_used: printing_used > 0,
     })
 }
@@ -359,7 +397,8 @@ pub async fn overview(db: &DbPool, retention_days: u32, from: NaiveDate, to: Nai
 async fn daily_sum(db: &DbPool, from: NaiveDate, to: NaiveDate) -> anyhow::Result<Bucket> {
     let row = sqlx::query(
         "SELECT COALESCE(SUM(total),0) AS total, COALESCE(SUM(done),0) AS done, COALESCE(SUM(noread),0) AS noread,
-                COALESCE(SUM(defaulted),0) AS defaulted, COALESCE(SUM(abnormal),0) AS abnormal
+                COALESCE(SUM(defaulted),0) AS defaulted, COALESCE(SUM(abnormal),0) AS abnormal,
+                COALESCE(SUM(middleware),0) AS middleware, COALESCE(SUM(noread_landed),0) AS noread_landed
            FROM daily_stats WHERE day >= ? AND day <= ?",
     )
     .bind(from.format("%Y-%m-%d").to_string())
@@ -372,13 +411,15 @@ async fn daily_sum(db: &DbPool, from: NaiveDate, to: NaiveDate) -> anyhow::Resul
         noread: row.try_get("noread")?,
         defaulted: row.try_get("defaulted")?,
         abnormal: row.try_get("abnormal")?,
+        middleware: row.try_get("middleware")?,
+        noread_landed: row.try_get("noread_landed")?,
     })
 }
 
 /// [from, to] 每一天一列，沒件的日子補 0，前端畫圖不必補洞
 async fn daily_rows(db: &DbPool, from: NaiveDate, to: NaiveDate) -> anyhow::Result<Vec<DailyRow>> {
     let rows: Vec<DailyRow> = sqlx::query_as(
-        "SELECT day, total, done, noread, defaulted, abnormal FROM daily_stats WHERE day >= ? AND day <= ? ORDER BY day",
+        "SELECT day, total, done, noread, defaulted, abnormal, middleware, noread_landed FROM daily_stats WHERE day >= ? AND day <= ? ORDER BY day",
     )
     .bind(from.format("%Y-%m-%d").to_string())
     .bind(to.format("%Y-%m-%d").to_string())
@@ -392,7 +433,7 @@ async fn daily_rows(db: &DbPool, from: NaiveDate, to: NaiveDate) -> anyhow::Resu
         if it.peek().is_some_and(|r| r.day == key) {
             out.push(it.next().expect("peek 過"));
         } else {
-            out.push(DailyRow { day: key, total: 0, done: 0, noread: 0, defaulted: 0, abnormal: 0 });
+            out.push(DailyRow { day: key, total: 0, done: 0, noread: 0, defaulted: 0, abnormal: 0, middleware: 0, noread_landed: 0 });
         }
         d += Duration::days(1);
     }
@@ -401,15 +442,21 @@ async fn daily_rows(db: &DbPool, from: NaiveDate, to: NaiveDate) -> anyhow::Resu
 
 /// 區間內已終態的包裹依上線時刻分到 24 個小時桶，以及「星期 × 小時」熱力格。
 /// 在途的不計：還沒結束的件既不算完成也不算異常，放進去會讓當下這一小時的異常數虛高。
-async fn hour_buckets(db: &DbPool, ts_from: &str, ts_to: &str) -> anyhow::Result<(Vec<HourBucket>, Vec<HeatCell>)> {
-    let rows = sqlx::query(
-        "SELECT CAST(strftime('%w', substr(started_at, 1, 10)) AS INTEGER) AS wd,
-                CAST(substr(started_at, 12, 2) AS INTEGER) AS h,
-                COUNT(*) AS total, SUM(status = 3) AS done, SUM(barcode = 'NoRead') AS noread
-           FROM parcels
-          WHERE started_at >= ? AND started_at < ? AND ended_ms IS NOT NULL
-          GROUP BY wd, h",
-    )
+async fn hour_buckets(db: &DbPool, default_chute: &str, ts_from: &str, ts_to: &str) -> anyhow::Result<(Vec<HourBucket>, Vec<HeatCell>)> {
+    let landed = crate::db::abnormal_kind::SQL_LANDED_DEFAULT;
+    let nr = crate::db::abnormal_kind::SQL_NOREAD_KIND;
+    let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
+        "SELECT CAST(strftime('%w', substr(p.started_at, 1, 10)) AS INTEGER) AS wd,
+                CAST(substr(p.started_at, 12, 2) AS INTEGER) AS h,
+                COUNT(*) AS total, SUM(p.status = 3) AS done, SUM(p.barcode = 'NoRead') AS noread,
+                SUM(p.status = 3 AND NOT {nr} AND {landed}) AS middleware,
+                SUM(p.status = 3 AND {nr} AND {landed}) AS noread_landed
+           FROM parcels p
+          WHERE p.started_at >= ? AND p.started_at < ? AND p.ended_ms IS NOT NULL
+          GROUP BY wd, h"
+    )))
+    .bind(default_chute)
+    .bind(default_chute)
     .bind(ts_from)
     .bind(ts_to)
     .fetch_all(db)
@@ -422,11 +469,15 @@ async fn hour_buckets(db: &DbPool, ts_from: &str, ts_to: &str) -> anyhow::Result
         let total: i64 = r.try_get("total")?;
         let done: i64 = r.try_get("done")?;
         let noread: i64 = r.try_get("noread")?;
+        let middleware: i64 = r.try_get("middleware")?;
+        let noread_landed: i64 = r.try_get("noread_landed")?;
         if let Some(b) = hourly.get_mut(h.clamp(0, 23) as usize) {
             b.total += total;
             b.done += done;
             b.abnormal += total - done;
             b.noread += noread;
+            b.middleware += middleware;
+            b.noread_landed += noread_landed;
         }
         heat.push(HeatCell { weekday: wd, hour: h, count: total });
     }
@@ -434,10 +485,15 @@ async fn hour_buckets(db: &DbPool, ts_from: &str, ts_to: &str) -> anyhow::Result
 }
 
 /// 各格口件數，照格口表的排序；啟用中的格口即使 0 件也列出來，一眼看得出哪格沒在收
-async fn chute_counts(db: &DbPool, ts_from: &str, ts_to: &str) -> anyhow::Result<Vec<ChuteCount>> {
+async fn chute_counts(db: &DbPool, default_chute: &str, ts_from: &str, ts_to: &str) -> anyhow::Result<Vec<ChuteCount>> {
     let rows = sqlx::query(
         "SELECT c.code, c.label, c.enabled,
-                COUNT(p.id) AS total, COALESCE(SUM(p.status = 3), 0) AS done
+                COUNT(p.id) AS total, COALESCE(SUM(p.status = 3), 0) AS done,
+                COALESCE(SUM(p.status = 3 AND p.barcode <> 'NoRead' AND EXISTS (
+                    SELECT 1 FROM parcels b
+                     WHERE b.barcode = p.barcode AND +b.status = 3 AND +b.id > p.id
+                       AND COALESCE(b.chute_reason, '') <> 'REENTRY'
+                       AND b.started_ms - p.started_ms BETWEEN 5000 AND 600000)), 0) AS refed_after
            FROM chutes c
            LEFT JOIN parcels p ON p.chute_code = c.code AND p.started_at >= ? AND p.started_at < ? AND p.ended_ms IS NOT NULL
           GROUP BY c.code
@@ -455,9 +511,61 @@ async fn chute_counts(db: &DbPool, ts_from: &str, ts_to: &str) -> anyhow::Result
         if total == 0 && enabled == 0 {
             continue;
         }
-        out.push(ChuteCount { code: r.try_get("code")?, label: r.try_get("label")?, total, done, abnormal: total - done });
+        let code: String = r.try_get("code")?;
+        // 異常口的件本來就是要撿回重投的，「又進線」對它不是警訊
+        let refed_after = if code == default_chute { 0 } else { r.try_get("refed_after")? };
+        out.push(ChuteCount { code, label: r.try_get("label")?, total, done, abnormal: total - done, refed_after });
     }
     Ok(out)
+}
+
+/// 相鄰兩件上線間距分桶（SQLite 視窗函式）
+async fn feeding_stats(db: &DbPool, ts_from: &str, ts_to: &str) -> anyhow::Result<FeedingStats> {
+    let row = sqlx::query(
+        "WITH g AS (SELECT started_ms - LAG(started_ms) OVER (ORDER BY started_ms) AS gap FROM parcels WHERE started_at >= ? AND started_at < ?)
+         SELECT COALESCE(SUM(gap BETWEEN 5000 AND 29999), 0) AS s_n, COALESCE(SUM(CASE WHEN gap BETWEEN 5000 AND 29999 THEN gap END), 0) AS s_ms,
+                COALESCE(SUM(gap BETWEEN 30000 AND 299999), 0) AS m_n, COALESCE(SUM(CASE WHEN gap BETWEEN 30000 AND 299999 THEN gap END), 0) AS m_ms,
+                COALESCE(SUM(gap >= 300000), 0) AS l_n, COALESCE(SUM(CASE WHEN gap >= 300000 THEN gap END), 0) AS l_ms
+           FROM g WHERE gap IS NOT NULL",
+    )
+    .bind(ts_from)
+    .bind(ts_to)
+    .fetch_one(db)
+    .await?;
+    let span: Option<(i64, i64)> = sqlx::query_as("SELECT MIN(started_ms), MAX(started_ms) FROM parcels WHERE started_at >= ? AND started_at < ?")
+        .bind(ts_from)
+        .bind(ts_to)
+        .fetch_optional(db)
+        .await?
+        .filter(|(a, b): &(i64, i64)| *b > *a);
+    let min = |ms: i64| (ms as f64 / 60_000.0 * 10.0).round() / 10.0;
+    Ok(FeedingStats {
+        short_gaps: row.try_get("s_n")?,
+        short_gap_min: min(row.try_get("s_ms")?),
+        mid_gaps: row.try_get("m_n")?,
+        mid_gap_min: min(row.try_get("m_ms")?),
+        long_gaps: row.try_get("l_n")?,
+        long_gap_min: min(row.try_get("l_ms")?),
+        span_min: span.map(|(a, b)| min(b - a)).unwrap_or(0.0),
+    })
+}
+
+/// 讀碼失敗（含被攔的再進線）依系統判定原因分桶
+async fn noread_cause_counts(db: &DbPool, default_chute: &str, ts_from: &str, ts_to: &str) -> anyhow::Result<Vec<KeyCount>> {
+    let landed = crate::db::abnormal_kind::SQL_LANDED_DEFAULT;
+    let nr = crate::db::abnormal_kind::SQL_NOREAD_KIND;
+    let cause = crate::db::abnormal_kind::SQL_NOREAD_CAUSE;
+    let rows: Vec<(Option<String>, i64)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT cause, COUNT(*) FROM (SELECT {cause} AS cause FROM parcels p
+           WHERE p.started_at >= ? AND p.started_at < ? AND p.status = 3 AND {nr} AND {landed})
+          GROUP BY cause ORDER BY COUNT(*) DESC"
+    )))
+    .bind(ts_from)
+    .bind(ts_to)
+    .bind(default_chute)
+    .fetch_all(db)
+    .await?;
+    Ok(rows.into_iter().filter_map(|(c, n)| c.map(|c| KeyCount { key: c, count: n })).collect())
 }
 
 /// 格口來源分布（api／default／noread／timeout／manual）
@@ -910,13 +1018,16 @@ mod tests {
         let done = (status == 3) as i64;
         let noread = (source == "noread") as i64;
         let defaulted = !matches!(source, "api" | "manual") as i64;
+        // 與 tracker/store.rs::daily 同口徑：落到異常口（RS）的完成件依有沒有讀到碼分兩類
+        let middleware = (status == 3 && chute == "RS" && source != "noread") as i64;
+        let noread_landed = (status == 3 && chute == "RS" && source == "noread") as i64;
         sqlx::query(
-            "INSERT INTO daily_stats (day, total, done, noread, defaulted, abnormal) VALUES (?, 1, ?, ?, ?, ?)
-             ON CONFLICT(day) DO UPDATE SET total = total + 1, done = done + ?, noread = noread + ?, defaulted = defaulted + ?, abnormal = abnormal + ?",
+            "INSERT INTO daily_stats (day, total, done, noread, defaulted, abnormal, middleware, noread_landed) VALUES (?1, 1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(day) DO UPDATE SET total = total + 1, done = done + ?2, noread = noread + ?3, defaulted = defaulted + ?4, abnormal = abnormal + ?5,
+                                            middleware = middleware + ?6, noread_landed = noread_landed + ?7",
         )
         .bind(day)
-        .bind(done).bind(noread).bind(defaulted).bind(1 - done)
-        .bind(done).bind(noread).bind(defaulted).bind(1 - done)
+        .bind(done).bind(noread).bind(defaulted).bind(1 - done).bind(middleware).bind(noread_landed)
         .execute(db)
         .await
         .unwrap();
@@ -951,7 +1062,7 @@ mod tests {
 
         let from = Local::now().date_naive() - Duration::days(1);
         let to = Local::now().date_naive();
-        let o = overview(&db, 15, from, to).await.unwrap();
+        let o = overview(&db, 15, "RS", from, to).await.unwrap();
 
         assert_eq!((o.range.total, o.range.done, o.range.noread, o.range.defaulted, o.range.abnormal), (5, 4, 1, 2, 1));
         assert_eq!((o.kpi.today.total, o.kpi.yesterday.total, o.kpi.last7.total), (4, 1, 5));
@@ -983,6 +1094,63 @@ mod tests {
         let week = o.compare.iter().find(|c| c.label == "week").unwrap();
         assert_eq!((week.current, week.previous, week.delta_ratio), (5, 0, None), "前期 0 件不算比率");
         assert_eq!(o.parcels_since.as_deref(), Some(yesterday.as_str()));
+    }
+
+    #[tokio::test]
+    async fn 異常三分類_狀態異常優先_落異常口依讀碼分開() {
+        let db = test_db().await;
+        let today = day(0);
+        seed_parcel(&db, &today, 9, "L1", "api", 3, 1000).await; // 正常完成
+        seed_parcel(&db, &today, 9, "RS", "timeout", 3, 1000).await; // 仲介機回覆太晚 → 異常口
+        seed_parcel(&db, &today, 9, "RS", "default", 3, 1000).await; // 門市關轉這類 → 異常口
+        seed_parcel(&db, &today, 9, "RS", "noread", 3, 1000).await; // 讀碼失敗 → 異常口
+        seed_parcel(&db, &today, 9, "RS", "noread", 6, 1000).await; // 讀碼失敗但路上堵塞被取走 → 算分揀機
+        seed_parcel(&db, &today, 9, "L2", "api", 4, 1000).await; // 失去追蹤 → 分揀機
+
+        let d = Local::now().date_naive();
+        let o = overview(&db, 15, "RS", d, d).await.unwrap();
+        let r = o.range;
+        assert_eq!((r.total, r.done, r.abnormal, r.middleware, r.noread_landed), (6, 4, 2, 2, 1), "三類互斥，狀態異常優先");
+        assert_eq!((r.noread, r.defaulted), (2, 4), "舊口徑不受影響：NoRead 兩件、走預設口四件");
+        assert_eq!(r.done - r.middleware - r.noread_landed, 1, "扣掉異常口兩類才是正常完成");
+        let h = &o.hourly[9];
+        assert_eq!((h.total, h.done, h.abnormal, h.middleware, h.noread_landed), (6, 4, 2, 2, 1), "每小時桶與 daily_stats 同口徑");
+        let row = &o.daily[0];
+        assert_eq!((row.middleware, row.noread_landed, row.abnormal), (2, 1, 2));
+
+        // 格口「完成後又進線」：L1 完成後 30 秒同碼再進線且完成 → L1 記 1；再進線那件落 R1 不算 R1 的
+        seed_parcel(&db, &today, 11, "L1", "api", 3, 1000).await;
+        let base: i64 = sqlx::query_scalar("SELECT started_ms FROM parcels WHERE chute_code = 'L1' AND substr(started_at, 12, 2) = '11'").fetch_one(&db).await.unwrap();
+        sqlx::query("INSERT INTO parcels (ulid, barcode, chute_code, chute_source, status, started_at, started_ms, ended_ms, travel_ms, updated_ms) VALUES (?, 'SF001', 'R1', 'api', 3, ?, ?, ?, 1000, ?)")
+            .bind(ulid::Ulid::generate().to_string())
+            .bind(format!("{today} 11:15:30.000"))
+            .bind(base + 30_000).bind(base + 31_000).bind(base + 30_000)
+            .execute(&db).await.unwrap();
+        let o3 = overview(&db, 15, "RS", d, d).await.unwrap();
+        let by = |code: &str| o3.by_chute.iter().find(|c| c.code == code).map(|c| c.refed_after).unwrap();
+        assert_eq!((by("L1"), by("R1")), (1, 0), "只記第一次落的那格");
+        // 異常口的件重投是常態，不算又進線：RS 走 default 的那件 30 秒後再進線完成也是 0
+        let rs_base: i64 = sqlx::query_scalar("SELECT started_ms FROM parcels WHERE chute_code = 'RS' AND chute_source = 'default'").fetch_one(&db).await.unwrap();
+        sqlx::query("INSERT INTO parcels (ulid, barcode, chute_code, chute_source, status, started_at, started_ms, ended_ms, travel_ms, updated_ms) VALUES (?, 'SF001', 'L3', 'api', 3, ?, ?, ?, 1000, ?)")
+            .bind(ulid::Ulid::generate().to_string())
+            .bind(format!("{today} 09:15:30.000"))
+            .bind(rs_base + 30_000).bind(rs_base + 31_000).bind(rs_base + 30_000)
+            .execute(&db).await.unwrap();
+        let o4 = overview(&db, 15, "RS", d, d).await.unwrap();
+        assert_eq!(o4.by_chute.iter().find(|c| c.code == "RS").map(|c| c.refed_after), Some(0));
+
+        // 讀碼失敗原因（系統判定）：那件落異常口的 NoRead 沒有綁碼事件 → 讀碼器沒送結果
+        let o5 = overview(&db, 15, "RS", d, d).await.unwrap();
+        assert_eq!(o5.noread_causes.iter().map(|k| (k.key.as_str(), k.count)).collect::<Vec<_>>(), vec![("no_frame", 1)]);
+        // 補一筆綁碼事件（讀碼器回 NoRead@）→ 變成「沒讀到碼」
+        let noread_id: i64 = sqlx::query_scalar("SELECT id FROM parcels WHERE chute_source = 'noread' AND status = 3 LIMIT 1").fetch_one(&db).await.unwrap();
+        sqlx::query("INSERT INTO parcel_events (parcel_id, ts_ms, source, kind, raw) VALUES (?, 1, 'camera', 'bind', 'NoRead@')").bind(noread_id).execute(&db).await.unwrap();
+        let o6 = overview(&db, 15, "RS", d, d).await.unwrap();
+        assert_eq!(o6.noread_causes.iter().map(|k| (k.key.as_str(), k.count)).collect::<Vec<_>>(), vec![("no_code", 1)]);
+
+        // 異常口改成別的格口：來源不是 api 的件當時一定走異常口，照算；只有「api 直接回 RS」那類才會跟著設定變
+        let o2 = overview(&db, 15, "NG", d, d).await.unwrap();
+        assert_eq!((o2.hourly[9].middleware, o2.hourly[9].noread_landed), (2, 1));
     }
 
     #[tokio::test]
@@ -1028,13 +1196,13 @@ mod tests {
             sqlx::query("INSERT INTO jam_events (ts_ms, created_at, cart, pos, module, parcel_id) VALUES (?, ?, 1, ?, ?, ?)")
                 .bind(ms).bind(crate::db::local_ts(ms)).bind(pos).bind(pos / 10 + 1).bind(pid).execute(&db).await.unwrap();
         }
-        // 分揀機斷線兩次：10:00 斷 → 10:05 回、11:00 斷 → 11:02 回；皮帶 12:00 斷了沒回（算到現在）
-        for (cat, action, hh, mm) in [("sorter", "disconnected", 10, 0), ("sorter", "connected", 10, 5), ("sorter", "disconnected", 11, 0), ("sorter", "connected", 11, 2), ("belt", "disconnected", 12, 0)] {
+        // 分揀機斷線兩次：10:00 斷 → 10:05 回、11:00 斷 → 11:02 回；皮帶 00:01 斷了沒回（算到現在）
+        for (cat, action, hh, mm) in [("sorter", "disconnected", 10, 0), ("sorter", "connected", 10, 5), ("sorter", "disconnected", 11, 0), ("sorter", "connected", 11, 2), ("belt", "disconnected", 0, 1)] {
             sqlx::query("INSERT INTO event_log (level, category, action, message, created_at) VALUES ('warn', ?, ?, '', ?)")
                 .bind(cat).bind(action).bind(crate::db::local_ts(to_ms(hh, mm))).execute(&db).await.unwrap();
         }
         let d = Local::now().date_naive();
-        let o = overview(&db, 15, d, d).await.unwrap();
+        let o = overview(&db, 15, "RS", d, d).await.unwrap();
 
         let find = |k: &str| o.reasons.iter().find(|r| r.key == k).map(|r| (r.count, r.defaulted));
         assert_eq!(find("STORE_CLOSED"), Some((1, 1)));
@@ -1057,12 +1225,13 @@ mod tests {
         assert_eq!((dev("sorter").disconnects, dev("sorter").longest_ms, dev("sorter").total_ms), (2, 300_000, 420_000));
         assert_eq!((dev("sorter").by_hour[10], dev("sorter").by_hour[11]), (1, 1));
         assert_eq!(dev("belt").disconnects, 1);
+        // 皮帶斷線造在 00:01：斷到現在還沒回來要算到現在，造在中午的話上午跑測試會變成負數
         assert!(dev("belt").longest_ms > 0, "斷到現在還沒回來的要算到現在");
         assert_eq!(dev("camera").disconnects, 0);
 
         assert_eq!((o.duplicates.barcodes, o.duplicates.extra_runs, o.duplicates.twice, o.duplicates.thrice), (1, 2, 0, 1));
         sqlx::query("UPDATE parcels SET cart = CASE WHEN id % 2 = 0 THEN 7 ELSE 3 END, status = CASE WHEN id = ? THEN 4 ELSE status END").bind(ids[0].0).execute(&db).await.unwrap();
-        let o2 = overview(&db, 15, d, d).await.unwrap();
+        let o2 = overview(&db, 15, "RS", d, d).await.unwrap();
         let cart = |c: i64| o2.by_cart.iter().find(|x| x.cart == c).map(|x| (x.total, x.abnormal));
         assert_eq!(o2.by_cart.len(), 2);
         assert_eq!(cart(3).unwrap().0 + cart(7).unwrap().0, 6);
@@ -1075,7 +1244,7 @@ mod tests {
     async fn 沒資料時每個分項都是空或零_不報錯() {
         let db = test_db().await;
         let today = Local::now().date_naive();
-        let o = overview(&db, 15, today, today).await.unwrap();
+        let o = overview(&db, 15, "RS", today, today).await.unwrap();
         assert_eq!(o.range.total, 0);
         assert_eq!(o.daily.len(), 1);
         assert_eq!(o.hourly.len(), 24);
@@ -1091,8 +1260,8 @@ mod tests {
     async fn 區間檢查_起訖顛倒與超過一年都拒絕() {
         let db = test_db().await;
         let today = Local::now().date_naive();
-        assert!(overview(&db, 15, today, today - Duration::days(1)).await.is_err());
-        assert!(overview(&db, 15, today - Duration::days(400), today).await.is_err());
+        assert!(overview(&db, 15, "RS", today, today - Duration::days(1)).await.is_err());
+        assert!(overview(&db, 15, "RS", today - Duration::days(400), today).await.is_err());
         assert_eq!(parse_day(Some("2026-13-01")).unwrap_err().contains("日期格式錯誤"), true);
         assert_eq!(parse_day(Some("")).unwrap(), today);
     }

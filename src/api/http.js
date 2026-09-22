@@ -57,9 +57,8 @@ export const api = {
   // 前端錯誤回報（見 api/errorReport.js）；後端記成事件記錄 `ui` 類別
   reportClientError: body => request('POST', '/api/client-errors', body),
   // 異常口處理清單
-  abnormalList: params => request('GET', `/api/abnormal?${qs(params)}`),
-  abnormalHandle: (id, state) => request('POST', `/api/abnormal/${id}/handle`, { state }),
-  abnormalReopen: id => request('POST', `/api/abnormal/${id}/reopen`),
+  reportDay: day => request('GET', `/api/report/day?${qs({ from: day })}`),
+  abnormalReview: params => request('GET', `/api/abnormal/review?${qs(params)}`),
   // 換袋：本袋件數歸零、上一袋定版
 
   parcels: params => request('GET', `/api/parcels?${qs(params)}`),

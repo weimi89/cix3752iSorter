@@ -40,7 +40,8 @@ pub trait Outputs {
     fn store_update(&mut self, p: &Parcel);
     fn store_event(&mut self, p: &Parcel, ts_ms: i64, source: &'static str, kind: &str, raw: Option<&str>);
     fn store_forget(&mut self, p: &Parcel);
-    fn store_daily(&mut self, p: &Parcel);
+    /// 終態件計入當日統計；`default_chute` 是當時的異常口，歸類要用
+    fn store_daily(&mut self, p: &Parcel, default_chute: &str);
     /// 向中介機查格口；NoRead 也要送（中介機要拍照存證、計入讀碼失敗統計），但本機已先決定預設口
     fn request_chute(&mut self, p: &Parcel);
     /// 格口決定被接受、且中介機有給面單 → 交給列印
@@ -708,10 +709,16 @@ impl Machine {
 
     // 皮帶運轉中沒有心跳訊號（只有停止時週期送 `~k-1`），所以送出啟停指令時先樂觀更新
     // `belt_running`，畫面上的單顆啟停鈕才會立刻切換；之後 `~k-1`／`~P` 會把它糾正回實況
+    // 皮帶已經停著（堵塞中又判到堵塞到頭部）時指令照送、但記錄降為「停線中」：
+    // 同一次卡件記兩筆「停線」，事件記錄的停線次數會是實際的一倍半
     fn belt_stop<O: Outputs>(&mut self, out: &mut O, reason: &str) {
         out.belt_cmd(&self.cfg.belt.cmd.stop.clone());
-        self.belt_running = false;
-        out.log(crate::event_log::Level::Warn, "belt", "stop", format!("停線：{reason}"));
+        let was_running = std::mem::replace(&mut self.belt_running, false);
+        if was_running {
+            out.log(crate::event_log::Level::Warn, "belt", "stop", format!("停線：{reason}"));
+        } else {
+            out.log(crate::event_log::Level::Info, "belt", "stop_hold", format!("停線中：{reason}"));
+        }
     }
 
     fn belt_start<O: Outputs>(&mut self, out: &mut O, reason: &str) {
@@ -888,7 +895,7 @@ impl Machine {
         for key in done {
             if let Some(p) = self.parcels.remove(&key) {
                 out.store_update(&p);
-                out.store_daily(&p);
+                out.store_daily(&p, &self.cfg.general.default_chute);
                 out.store_forget(&p);
                 self.account(&p);
                 if let Some(cart) = p.cart {

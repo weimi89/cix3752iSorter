@@ -23,6 +23,7 @@
     "done": "已送出",
     "keyword": "關鍵字",
     "advancedSearch": "進階查詢",
+    "clearAll": "全部清除",
     "multiNoPlaceholder": "可貼多個單號，用逗號、空白或換行分隔"
   },
   "pagination": {
@@ -39,8 +40,9 @@
       "settings": "設定"
     },
     "dashboard": "即時看板",
+    "report": "班次報表",
     "stats": "統計綜合",
-    "abnormal": "異常口處理",
+    "abnormal": "異常存證",
     "parcels": "包裹查詢",
     "printJobs": "列印任務",
     "reportQueue": "回報佇列",
@@ -110,8 +112,6 @@
     "image": "照片",
     "hasImage": "有讀碼站照片",
     "noImage": "沒有讀碼站照片（讀碼器未上傳，或照片對不到這件）",
-    "imageOriginal": "看原圖",
-    "imageEvidence": "證據圖",
     "noImageShort": "沒有照片",
     "steps": "流程",
     "step": {
@@ -235,14 +235,15 @@
       "current": "目前處理中",
       "currentHint": "正在分揀機頭部等待上車的包裹",
       "noCurrent": "目前沒有在分揀機頭部的包裹",
-      "abnormalPending": "異常口待處理 {n} 件 · 最久 {age}",
       "inFlight": "在途包裹",
       "inFlightHint": "已進線、尚未落格口的包裹",
       "elapsed": "已經過",
       "hourlyChart": "近 12 小時件數",
       "chart": {
-        "done": "完成",
-        "abnormal": "異常"
+        "done": "正常完成",
+        "noread": "讀碼失敗",
+        "middleware": "仲介機回傳",
+        "abnormal": "分揀機異常"
       },
       "messages": "系統訊息"
     },
@@ -261,16 +262,22 @@
       "endDate": "結束日期",
       "rangeTotal": "區間件數",
       "doneRate": "完成率",
-      "doneRateHint": "正常完成 ÷ 區間件數；在途件不計",
+      "doneRateHint": "正常完成 ÷ 區間件數；落到異常口的件不算正常完成，在途件不計",
       "done": "完成",
-      "abnormal": "異常",
+      "doneNormal": "正常完成",
+      "abnormal": "分揀機異常",
+      "middleware": "仲介機回傳",
+      "noreadLanded": "讀碼失敗",
+      "kpiSorter": "分揀機",
+      "kpiMiddleware": "仲介機",
+      "kpiNoread": "讀碼失敗",
       "noread": "讀碼失敗",
       "defaulted": "走預設口",
       "partialNote": "包裹明細只保留 {days} 天（最早到 {since}），更早的日期只有每日件數，格口、來源、時段等分項不含那段期間。",
       "dailyTrend": "每日趨勢",
-      "dailyTrendHint": "區間內每天的完成與異常件數",
+      "dailyTrendHint": "區間內每天的正常完成、讀碼失敗、仲介機回傳與分揀機異常件數",
       "hourlyTrend": "小時趨勢",
-      "hourlyTrendHint": "當天各小時的完成與異常件數（依上線時刻）",
+      "hourlyTrendHint": "當天各小時的正常完成、讀碼失敗、仲介機回傳與分揀機異常件數（依上線時刻）",
       "hourly": "時段分布",
       "hourlyHint": "區間內各小時的件數加總，找出尖峰時段",
       "compareTitle": "歷史比對",
@@ -283,11 +290,13 @@
       "avg": "平均",
       "max": "最長",
       "byChute": "依格口",
-      "byChuteHint": "各格口的件數（綠＝完成、紅＝異常）；啟用中的格口 0 件也列出",
+      "byChuteHint": "各格口的件數（綠＝完成、紅＝分揀機異常）；啟用中的格口 0 件也列出。「又進線」＝在這格完成後同條碼十分鐘內再進線，件其實沒落進去",
+      "chuteRefed": "又進線",
+      "chuteRefedHint": "在這格「完成」後 5 秒～10 分鐘內同條碼又進線且再次完成：件沒落進去被撿回重投；集中在某幾格就是那幾格推包時機或落袋口有問題",
       "bySource": "格口來源",
       "bySourceHint": "格口是誰決定的",
       "byStatus": "結束狀態",
-      "byStatusHint": "已結束包裹的最終狀態分布",
+      "byStatusHint": "已結束包裹的最終狀態分布；完成以外的就是分揀機異常",
       "print": "列印",
       "printHint": "區間內建立的列印任務；下方依印表機（對應格口）",
       "report": "回報",
@@ -299,15 +308,24 @@
       "failRate": "失敗率",
       "heatmapTitle": "時段熱力圖",
       "heatmapHint": "星期 × 24 小時的件數分布，找尖峰時段",
-      "wd": { "Sun": "日", "Mon": "一", "Tue": "二", "Wed": "三", "Thu": "四", "Fri": "五", "Sat": "六" },
+      "wd": {
+        "Sun": "日",
+        "Mon": "一",
+        "Tue": "二",
+        "Wed": "三",
+        "Thu": "四",
+        "Fri": "五",
+        "Sat": "六"
+      },
       "reasons": "異常原因",
-      "reasonsHint": "走異常口、或帶錯誤提示面單的原因；括號內是走異常口的件數",
+      "reasonsHint": "仲介機回傳與讀碼失敗走異常口、或帶錯誤提示面單的原因；括號內是走異常口的件數",
       "reasonUnknown": "其他",
       "reason": {
         "NOREAD": "讀碼失敗",
         "TIMEOUT": "中介機逾時未回",
         "LATE": "中介機回覆太晚",
         "STORE_CLOSED": "門市關轉",
+        "REENTRY": "同碼短時間再進線（疑似讀到鄰件）",
         "NOT_FOUND": "查無訂單",
         "STATUS_ABNORMAL": "訂單狀態異常",
         "UNCONFIRMED": "訂單未確認",
@@ -380,7 +398,10 @@
       "byCart": "小車異常率",
       "byCartHint": "各小車（分揀機載具）的異常件比例；明顯高於平均的會標紅，可能是那台載具有問題",
       "cartAvg": "平均",
-      "cartUnit": "號"
+      "cartUnit": "號",
+      "noreadCauses": "讀碼失敗原因",
+      "noreadCausesHint": "系統從讀碼站的回應判定：沒讀到碼（面單朝下、反光…）、讀到鄰件的碼（進料區露在畫面裡）、讀到的不是單號、讀碼器沒回應",
+      "noreadCausesGoto": "翻照片 →"
     },
     "parcels": {
       "title": "包裹查詢",
@@ -445,28 +466,27 @@
       "noLogFiles": "還沒有日誌檔"
     },
     "abnormal": {
-      "title": "異常口處理",
-      "subtitle": "今天落到異常口的包裹：讀碼失敗、逾時的重投一次即可，門市關轉、查無訂單的請下架；同條碼再進線且正常分揀會自動結案",
-      "subtitleShort": "異常口待處理件",
-      "tabPending": "待處理",
-      "tabHandled": "已處理",
-      "landedAt": "落格時間",
-      "reason": "原因",
-      "waiting": "等待",
-      "state": "處理",
-      "pending": "待處理",
-      "removed": "已下架",
-      "refed": "已重投",
-      "markRefed": "已重投",
-      "markRemoved": "已下架",
-      "reopen": "復原",
-      "nonePending": "異常口沒有待處理的件",
-      "justNow": "剛剛",
-      "minutes": "{n} 分鐘",
-      "hours": "{h} 小時 {m} 分",
-      "removedDone": "{barcode} 已記為下架",
-      "refedDone": "{barcode} 已記為重投",
-      "by": { "web": "網頁", "desktop": "桌面", "auto": "自動（再進線）" }
+      "title": "異常存證",
+      "subtitle": "每天的異常件（讀碼失敗、仲介機回傳、分揀機異常）與讀碼站拍的存證照；讀碼失敗的原因由系統從讀碼站的回應判定",
+      "subtitleShort": "翻異常件存證照",
+      "day": "日期",
+      "dayTotal": "當天異常件",
+      "noPhoto": "沒有照片（當時讀碼站沒拍到）",
+      "noItems": "這一天沒有異常件",
+      "openDetail": "看包裹詳情",
+      "hint": "點照片放大；點條碼看詳情",
+      "kind": {
+        "noread": "讀碼失敗",
+        "middleware": "仲介機回傳",
+        "sorter": "分揀機異常"
+      },
+      "causes": "讀碼失敗原因",
+      "cause": {
+        "no_code": "讀碼器沒讀到碼",
+        "neighbor": "讀到鄰件的碼",
+        "bad_code": "讀到的不是單號",
+        "no_frame": "讀碼器沒回應"
+      }
     },
     "chutes": {
       "title": "格口對照",
@@ -525,6 +545,8 @@
       "general": {
         "retention": "資料保留天數",
         "defaultChute": "預設格口",
+        "reentryHold": "同碼再進線攔截",
+        "reentryHoldHint": "同一條碼在這段時間內剛正常分過又進線，不問仲介機、直接走異常口讓人核對面單——這種件多半是讀碼站讀到了鄰件的條碼（實測間隔 2–6 秒）。一件包裹分完被撿回重投最快約 8 秒，設到 8 秒以上會把正常重投也攔下；0 = 關閉。",
         "bind": "網頁監聽位址",
         "bindHint": "改了要重啟程式才生效；其餘設定存檔即生效"
       },
@@ -552,7 +574,10 @@
         "floor": "綁碼窗口下限",
         "ceiling": "綁碼窗口上限",
         "dedup": "同碼去重",
-        "hint": "條碼要在觸發點之後這段時間內到達才會綁到該件；下限為負代表允許條碼比觸發點早到。"
+        "frameWidth": "畫面寬",
+        "frameHeight": "畫面高",
+        "hint": "條碼要在觸發點之後這段時間內到達才會綁到該件；下限為負代表允許條碼比觸發點早到。",
+        "frameHint": "同一幀讀到兩個以上的條碼時，取離畫面中心最近的那個（貼邊的是還在進料區的下一件）。要填相機輸出的座標範圍（桃園讀碼器約 4600×3400），差一點不影響，但填成別台的解析度會挑錯；兩邊 0 = 不看座標（預設）。"
       },
       "led": {
         "title": "系統燈",
@@ -659,11 +684,11 @@
         "window": "對包裹時間窗口",
         "retention": "照片保留天數",
         "keepOriginalNoread": "讀碼失敗的件另外保留原圖",
-        "hint": "讀碼器端：FTP 主機填本機在相機網段的 IP、埠與帳密與這裡一致、上傳條件選全部。防火牆要放行監聽埠與被動模式埠範圍（來源限相機）。收到後縮成證據圖存檔，原圖不留；長邊 0 = 不縮（硬碟會很快滿）。保留天數 0 = 不清理。",
+        "hint": "讀碼器端：FTP 主機填本機在相機網段的 IP、埠與帳密與這裡一致、上傳條件選全部。防火牆要放行監聽埠與被動模式埠範圍（來源限相機）。長邊 0 = 存原圖（一張約 620 KB，一天 9 千件約 5.7 GB，硬碟 200 GB 大約放 30 天）；填長邊就縮成證據圖（1600 約 110 KB）。保留天數 0 = 不清理。",
         "desc": "讀碼器把每件的照片用 FTP 上傳到這裡，當「這件我們有收到」的證據；照片在包裹詳情與異常口處理可以看。",
         "enable": "接收讀碼站照片",
         "enableDesc": "關閉後不開 FTP 埠；讀碼器那邊也要一併關掉 FTP，否則它會一直重試連線。",
-        "keepOriginalNoreadDesc": "縮圖看不出為什麼讀不到；原圖一張 2–3 MB，只留讀碼失敗的件。",
+        "keepOriginalNoreadDesc": "只在長邊有填（存縮圖）時有用：讀碼失敗的件另外留一份原圖看為什麼讀不到；存原圖時本來就都是原圖，這個不會多存。",
         "passiveMin": "被動模式埠（起）",
         "passiveMax": "被動模式埠（迄）",
         "imagesDir": "照片存放目錄",
@@ -682,6 +707,43 @@
       "retry": "重新嘗試",
       "notEnabled": "這台機器目前沒有開放外部連線。要從外面使用，請現場人員到「系統設定 → 網頁存取」打開「開放外部連線」。",
       "notEnabledSubtitle": "目前未開放外部連線"
+    },
+    "report": {
+      "title": "班次報表",
+      "subtitle": "一天一頁：件數、完成率、三類異常，以及系統依門檻挑出的問題點——看一眼就知道要改什麼",
+      "subtitleShort": "看一眼就知道要改什麼",
+      "day": "日期",
+      "prevDay": "前一天",
+      "nextDay": "後一天",
+      "noData": "這一天沒有件",
+      "kpi": {
+        "total": "進線",
+        "doneRate": "正常完成率",
+        "sorter": "分揀機異常",
+        "middleware": "仲介機回傳",
+        "noread": "讀碼失敗"
+      },
+      "findings": "問題點",
+      "findingsHint": "紅＝要處理、黃＝要注意、灰＝知道就好；每條都有數字與現場可以做的事",
+      "noFindings": "這一天沒有超過門檻的問題",
+      "action": "可以做的",
+      "goto": {
+        "noread": "翻讀碼失敗照片",
+        "reentry": "翻讀碼失敗照片",
+        "refed": "看格口統計",
+        "jams": "看卡件統計",
+        "sorter": "翻分揀機異常照片",
+        "middleware": "翻仲介機回傳件",
+        "feeding": "看時段分布"
+      },
+      "cards": {
+        "refed": "各格口完成後又進線",
+        "refedEmpty": "沒有",
+        "jams": "卡件依模組",
+        "jamsEmpty": "沒有卡件",
+        "causes": "讀碼失敗原因",
+        "causesEmpty": "沒有讀碼失敗"
+      }
     }
   },
   "updater": {

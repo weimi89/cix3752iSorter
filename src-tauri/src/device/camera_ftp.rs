@@ -497,6 +497,8 @@ async fn unique_name(dir: &Path, stem: &str, ext: &str) -> String {
 
 /// 照片對回包裹：窗口內剛綁條碼、還沒有照片的件。檔名含其中某件的條碼就對那件；
 /// 否則取最早的那件（讀碼器照拍照順序上傳）。
+/// 只認有綁碼事件的件：讀碼器一次觸發同時拍照與送幀，沒送幀的件通常也沒照片，
+/// 把它列進候選會讓下一件的照片錯配給它、之後同窗口內每件都錯位一件——錯的證據比沒有更糟
 pub async fn match_parcel(db: &DbPool, cfg: &CameraFtpConfig, file_name: &str, received_ms: i64) -> Result<Option<(i64, String)>, sqlx::Error> {
     let since = received_ms - cfg.match_window_ms.max(0);
     let candidates: Vec<(i64, String)> = sqlx::query_as(
@@ -660,6 +662,25 @@ mod tests {
         assert!(match_parcel(&db, &cfg, "20260921_151130123_5_3.jpg", now).await.unwrap().is_none());
     }
 
+    #[tokio::test]
+    async fn 對包裹_沒有綁碼事件的件不當候選_免得下一件的照片錯配給它() {
+        let (db, _dir) = test_db().await;
+        let cfg = CameraFtpConfig::default();
+        let now = crate::db::now_ms();
+        // 相機沒觸發的件：只有 ~P、沒有 bind 事件（也不會有照片）
+        sqlx::query("INSERT INTO parcels (ulid, barcode, status, started_at, started_ms, updated_ms) VALUES (?, 'NoRead', 2, ?, ?, ?)")
+            .bind(ulid::Ulid::generate().to_string())
+            .bind(crate::db::local_ts(now - 2500))
+            .bind(now - 2500)
+            .bind(now - 2500)
+            .execute(&db)
+            .await
+            .unwrap();
+        let bound = seed_parcel(&db, "74Z01234567", now - 1000).await;
+        let hit = match_parcel(&db, &cfg, "20260921_151130123_7_7.jpg", now).await.unwrap();
+        assert_eq!(hit.map(|(id, _)| id), Some(bound), "照片要給有綁碼的那件，不是更早但沒觸發的那件");
+    }
+
     /// 讀到指定代碼的那一行回覆（多行回覆 `211-` 跳到結尾那行）
     async fn expect(lines: &mut tokio::io::Lines<BufReader<tokio::net::tcp::OwnedReadHalf>>, code: &str) -> String {
         loop {
@@ -678,7 +699,8 @@ mod tests {
         let images_dir = dir.join("images");
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let cfg = CameraFtpConfig { keep_original_noread: true, ..CameraFtpConfig::default() };
+        // 這個測試看的是「存縮圖＋讀碼失敗留原圖」的路徑，預設已改成存原圖，這裡明確指定縮圖
+        let cfg = CameraFtpConfig { keep_original_noread: true, max_edge_px: 1600, ..CameraFtpConfig::default() };
         let cancel = CancellationToken::new();
         {
             let (db, images_dir, cfg, cancel) = (db.clone(), images_dir.clone(), cfg.clone(), cancel.clone());

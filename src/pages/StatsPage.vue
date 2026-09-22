@@ -25,10 +25,14 @@ const hexToRgba = (hex, alpha) => {
 
 // 日期區間：預設今日；快選鍵只是把起訖填成對應日期，手動改日期就沒有快選亮著
 const dateOffset = days => { const d = new Date(); d.setDate(d.getDate() + days); return fmtDate(d) }
-const startDate = ref(dateOffset(0))
-const endDate = ref(dateOffset(0))
+// 預設看昨天：主管是事後看整個班次，今天的數字還在變；班次報表點過來會帶日期
+const route = useRoute()
+const queryDay = typeof route.query.day === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(route.query.day) ? route.query.day : null
+const startDate = ref(queryDay || dateOffset(-1))
+const endDate = ref(queryDay || dateOffset(-1))
 const quickRange = computed({
   get() {
+    if (startDate.value === dateOffset(-1) && endDate.value === dateOffset(-1)) return 'yesterday'
     if (endDate.value !== dateOffset(0)) return null
     if (startDate.value === dateOffset(0)) return 'today'
     if (startDate.value === dateOffset(-6)) return '7d'
@@ -36,6 +40,7 @@ const quickRange = computed({
     return null
   },
   set(v) {
+    if (v === 'yesterday') { startDate.value = dateOffset(-1); endDate.value = dateOffset(-1); return }
     const days = { today: 1, '7d': 7, '30d': 30 }[v]
     if (!days) return
     endDate.value = dateOffset(0)
@@ -123,13 +128,16 @@ const kpiCards = computed(() => {
   ]
 })
 
-const range = computed(() => data.value?.range || { total: 0, done: 0, noread: 0, defaulted: 0, abnormal: 0 })
-const doneRate = computed(() => (range.value.total ? Math.round((range.value.done / range.value.total) * 1000) / 10 : null))
+const range = computed(() => data.value?.range || { total: 0, done: 0, noread: 0, defaulted: 0, abnormal: 0, middleware: 0, noread_landed: 0 })
+// 異常三分類（互斥）：分揀機異常＝件沒到該去的口；仲介機回傳、讀碼失敗＝正常落到異常口。
+// 「完成」欄位含落異常口的件，扣掉後才是真的分到正常格口
+const doneNormal = b => (b?.done ?? 0) - (b?.middleware ?? 0) - (b?.noread_landed ?? 0)
+const doneRate = computed(() => (range.value.total ? Math.round((doneNormal(range.value) / range.value.total) * 1000) / 10 : null))
 const rangeItems = computed(() => [
-  { key: 'done', label: t('page.stats.done'), value: range.value.done, color: 'success', icon: 'tabler-circle-check' },
+  { key: 'done', label: t('page.stats.doneNormal'), value: doneNormal(range.value), color: 'success', icon: 'tabler-circle-check' },
   { key: 'abnormal', label: t('page.stats.abnormal'), value: range.value.abnormal, color: 'error', icon: 'tabler-alert-circle' },
-  { key: 'noread', label: t('page.stats.noread'), value: range.value.noread, color: 'warning', icon: 'tabler-barcode-off' },
-  { key: 'defaulted', label: t('page.stats.defaulted'), value: range.value.defaulted, color: 'warning', icon: 'tabler-arrow-bear-right' },
+  { key: 'middleware', label: t('page.stats.middleware'), value: range.value.middleware, color: 'info', icon: 'tabler-cloud-x' },
+  { key: 'noread_landed', label: t('page.stats.noreadLanded'), value: range.value.noread_landed, color: 'warning', icon: 'tabler-barcode-off' },
 ])
 
 const pct = (n, max) => (max > 0 ? Math.round((n / max) * 100) : 0)
@@ -140,34 +148,35 @@ const share = (n, total) => {
   return v < 1 ? Math.round(v * 10) / 10 : Math.round(v)
 }
 
-// 趨勢：多日看每日、單日看 24 小時；完成／異常疊在同一根柱子上，一眼看得出異常佔比
+// 趨勢：多日看每日、單日看 24 小時；正常完成／讀碼失敗／仲介機回傳／分揀機異常疊在同一根柱子上，一眼看得出哪類佔多
 const axisStyle = () => ({
   axisLine: { lineStyle: { color: hexToRgba(color('on-surface'), 0.12) } },
   axisLabel: { color: hexToRgba(color('on-surface'), 0.6), fontSize: 11 },
   axisTick: { show: false },
 })
-const stackedBarOption = (labels, done, abnormal) => ({
+const STACK_SERIES = [
+  { key: 'doneNormal', label: 'page.stats.doneNormal', color: 'success', pick: doneNormal },
+  { key: 'noread_landed', label: 'page.stats.noreadLanded', color: 'warning', pick: b => b.noread_landed },
+  { key: 'middleware', label: 'page.stats.middleware', color: 'info', pick: b => b.middleware },
+  { key: 'abnormal', label: 'page.stats.abnormal', color: 'error', pick: b => b.abnormal },
+]
+const stackedBarOption = (labels, rows) => ({
   tooltip: { trigger: 'axis' },
-  legend: { top: 0, data: [t('page.stats.done'), t('page.stats.abnormal')], textStyle: { color: hexToRgba(color('on-surface'), 0.7) } },
+  legend: { top: 0, data: STACK_SERIES.map(s => t(s.label)), textStyle: { color: hexToRgba(color('on-surface'), 0.7) } },
   grid: { left: 40, right: 16, top: 36, bottom: 28 },
   xAxis: { type: 'category', data: labels, ...axisStyle() },
   yAxis: { type: 'value', minInterval: 1, axisLine: { show: false }, splitLine: { lineStyle: { color: hexToRgba(color('on-surface'), 0.06) } }, axisLabel: axisStyle().axisLabel, axisTick: { show: false } },
-  series: [
-    { name: t('page.stats.done'), type: 'bar', stack: 'a', data: done, itemStyle: { color: color('success') } },
-    { name: t('page.stats.abnormal'), type: 'bar', stack: 'a', data: abnormal, itemStyle: { color: color('error') } },
-  ],
+  series: STACK_SERIES.map(s => ({ name: t(s.label), type: 'bar', stack: 'a', data: rows.map(s.pick), itemStyle: { color: color(s.color) } })),
 })
 const trendOption = computed(() => {
   const d = data.value
-  if (!d) return stackedBarOption([], [], [])
-  if (isSingleDay.value) {
-    return stackedBarOption(d.hourly.map(h => String(h.hour).padStart(2, '0')), d.hourly.map(h => h.done), d.hourly.map(h => h.abnormal))
-  }
-  return stackedBarOption(d.daily.map(r => r.day.slice(5)), d.daily.map(r => r.done), d.daily.map(r => r.abnormal))
+  if (!d) return stackedBarOption([], [])
+  if (isSingleDay.value) return stackedBarOption(d.hourly.map(h => String(h.hour).padStart(2, '0')), d.hourly)
+  return stackedBarOption(d.daily.map(r => r.day.slice(5)), d.daily)
 })
 const hourlyOption = computed(() => {
   const h = data.value?.hourly || []
-  return stackedBarOption(h.map(x => String(x.hour).padStart(2, '0')), h.map(x => x.done), h.map(x => x.abnormal))
+  return stackedBarOption(h.map(x => String(x.hour).padStart(2, '0')), h)
 })
 
 const chutes = computed(() => data.value?.by_chute || [])
@@ -217,6 +226,10 @@ const compare = computed(() => data.value?.compare || [])
 // 異常原因：代碼對到文案，沒對到的顯示代碼本身（中介機日後新增的錯誤碼也看得懂）
 const reasons = computed(() => data.value?.reasons || [])
 const reasonsTotal = computed(() => reasons.value.reduce((a, b) => a + b.count, 0))
+// 讀碼失敗的原因由系統從讀碼站回應判定：哪種最多，現場就先改那個
+const noreadCauses = computed(() => data.value?.noread_causes || [])
+const noreadCausesMax = computed(() => noreadCauses.value.reduce((a, b) => Math.max(a, b.count), 0))
+const noreadCausesTotal = computed(() => noreadCauses.value.reduce((a, b) => a + b.count, 0))
 const reasonLabel = key => {
   const k = `page.stats.reason.${key}`
   return te(k) ? t(k) : key
@@ -356,15 +369,17 @@ const heatmapOption = computed(() => ({
     <VRow density="compact">
       <VCol v-for="c in kpiCards" :key="c.key" cols="6" md="3">
         <VCard class="card-shadow kpi-card h-100" :class="{ 'kpi-card--primary': c.primary }">
-          <VCardText class="d-flex align-center gap-3">
-            <VAvatar :color="c.color" :variant="c.primary ? 'flat' : 'tonal'" :size="c.primary ? 44 : 40"><VIcon :icon="c.icon" :size="c.primary ? 24 : 20" /></VAvatar>
+          <!-- 圖示貼齊頂端、四個分項固定兩欄兩列：四張卡不論數字長短版面都一樣 -->
+          <VCardText class="d-flex align-start gap-3">
+            <VAvatar :color="c.color" :variant="c.primary ? 'flat' : 'tonal'" :size="c.primary ? 44 : 40" class="kpi-card__icon"><VIcon :icon="c.icon" :size="c.primary ? 24 : 20" /></VAvatar>
             <div class="flex-grow-1" style="min-width: 0">
               <div class="text-body-small text-medium-emphasis">{{ c.label }}</div>
               <div class="kpi-card__count font-weight-bold" :class="c.primary ? 'text-primary' : ''">{{ c.b?.total ?? 0 }}</div>
-              <!-- 兩個數字各自不拆行，手機放不下時整組換到下一行，不會拆成「異／常」 -->
-              <div class="text-body-small text-medium-emphasis mt-1 d-flex flex-wrap gap-x-2">
-                <span class="text-success text-no-wrap">{{ $t('page.stats.done') }} {{ c.b?.done ?? 0 }}</span>
-                <span class="text-no-wrap" :class="c.b?.abnormal ? 'text-error' : ''">{{ $t('page.stats.abnormal') }} {{ c.b?.abnormal ?? 0 }}</span>
+              <div class="kpi-card__sub text-body-small text-medium-emphasis mt-1">
+                <span class="text-success text-no-wrap">{{ $t('page.stats.doneNormal') }} {{ doneNormal(c.b) }}</span>
+                <span class="text-no-wrap" :class="c.b?.abnormal ? 'text-error' : ''">{{ $t('page.stats.kpiSorter') }} {{ c.b?.abnormal ?? 0 }}</span>
+                <span class="text-no-wrap" :class="c.b?.middleware ? 'text-info' : ''">{{ $t('page.stats.kpiMiddleware') }} {{ c.b?.middleware ?? 0 }}</span>
+                <span class="text-no-wrap" :class="c.b?.noread_landed ? 'text-warning' : ''">{{ $t('page.stats.kpiNoread') }} {{ c.b?.noread_landed ?? 0 }}</span>
               </div>
             </div>
           </VCardText>
@@ -382,6 +397,7 @@ const heatmapOption = computed(() => ({
             <div class="stats-date-field"><AppDatePicker v-model="endDate" :label="$t('page.stats.endDate')" :min="startDate" :max="dateOffset(0)" /></div>
           </div>
           <VBtnToggle v-model="quickRange" density="comfortable" color="primary" variant="tonal" divided>
+            <VBtn value="yesterday" size="small">{{ $t('page.stats.yesterday') }}</VBtn>
             <VBtn value="today" size="small">{{ $t('page.stats.today') }}</VBtn>
             <VBtn value="7d" size="small">{{ $t('page.stats.last7Days') }}</VBtn>
             <VBtn value="30d" size="small">{{ $t('page.stats.last30Days') }}</VBtn>
@@ -476,13 +492,19 @@ const heatmapOption = computed(() => ({
           <VCardText>
             <div v-if="!chutes.length" class="empty-state"><VIcon icon="tabler-route-off" size="40" class="empty-state__icon" /><div class="empty-state__text">{{ $t('common.noData') }}</div></div>
             <div v-else class="stat-rows">
-              <div v-for="c in chutes" :key="c.code" class="stat-row" :class="{ 'stat-row--zero': c.total === 0 }">
+              <div v-for="c in chutes" :key="c.code" class="stat-row stat-row--chute" :class="{ 'stat-row--zero': c.total === 0 }">
                 <div class="stat-row__label stat-row__label--wide" :title="c.label">{{ c.code }}<span v-if="c.label" class="text-medium-emphasis ms-1">{{ c.label }}</span></div>
                 <div class="stat-row__bar stat-row__bar--split">
                   <div class="stat-row__fill stat-row__fill--success" :style="{ inlineSize: pct(c.done, chutesMax) + '%' }" />
                   <div class="stat-row__fill stat-row__fill--error" :style="{ inlineSize: pct(c.abnormal, chutesMax) + '%' }" />
                 </div>
                 <div class="stat-row__value">{{ c.total }}<span class="text-body-small text-medium-emphasis ms-1">({{ share(c.total, chutesTotal) }}%)</span></div>
+                <!-- 完成後同碼又進線＝件沒落進去被撿回重投；哪格特別多就是那格推包／落袋口有問題。沒有就留空格，數字欄才對得齊 -->
+                <div class="stat-row__tag">
+                  <VChip v-if="c.refed_after" size="x-small" color="warning" variant="tonal" label class="text-no-wrap" :title="$t('page.stats.chuteRefedHint')">
+                    {{ $t('page.stats.chuteRefed') }} {{ c.refed_after }}<span v-if="c.done" class="ms-1">({{ share(c.refed_after, c.done) }}%)</span>
+                  </VChip>
+                </div>
               </div>
             </div>
           </VCardText>
@@ -594,7 +616,7 @@ const heatmapOption = computed(() => ({
       </VCol>
     </VRow>
 
-    <!-- 異常原因 + 卡件 -->
+    <!-- 異常原因 + 主管標記原因 ／ 卡件 + 小車異常率（兩列各兩張，不留空位）-->
     <VRow density="compact" class="mt-3">
       <VCol cols="12" md="6">
         <VCard class="card-shadow h-100">
@@ -611,6 +633,29 @@ const heatmapOption = computed(() => ({
                 <div class="stat-row__label stat-row__label--wide" :title="r.key">{{ reasonLabel(r.key) }}</div>
                 <div class="stat-row__bar"><div class="stat-row__fill stat-row__fill--error" :style="{ inlineSize: pct(r.count, reasonsTotal) + '%' }" /></div>
                 <div class="stat-row__value">{{ r.count }}<span v-if="r.defaulted !== r.count" class="text-body-small text-medium-emphasis ms-1">({{ r.defaulted }})</span></div>
+              </div>
+            </div>
+          </VCardText>
+        </VCard>
+      </VCol>
+      <VCol cols="12" md="6">
+        <VCard class="card-shadow h-100">
+          <VCardItem>
+            <template #prepend><VAvatar color="warning" variant="tonal"><VIcon icon="tabler-barcode-off" /></VAvatar></template>
+            <VCardTitle>{{ $t('page.stats.noreadCauses') }}</VCardTitle>
+            <VCardSubtitle>{{ $t('page.stats.noreadCausesHint') }}</VCardSubtitle>
+            <template #append>
+              <RouterLink :to="{ name: 'abnormal', query: { day: startDate, kind: 'noread' } }" class="text-body-small text-no-wrap">{{ $t('page.stats.noreadCausesGoto') }}</RouterLink>
+            </template>
+          </VCardItem>
+          <VDivider />
+          <VCardText>
+            <div v-if="!noreadCauses.length" class="empty-state"><VIcon icon="tabler-mood-smile" size="40" class="empty-state__icon" /><div class="empty-state__text">{{ $t('common.noData') }}</div></div>
+            <div v-else class="stat-rows">
+              <div v-for="r in noreadCauses" :key="r.key" class="stat-row stat-row--reason">
+                <div class="stat-row__label stat-row__label--wide">{{ $t(`page.abnormal.cause.${r.key}`) }}</div>
+                <div class="stat-row__bar"><div class="stat-row__fill stat-row__fill--warning" :style="{ inlineSize: pct(r.count, noreadCausesMax) + '%' }" /></div>
+                <div class="stat-row__value">{{ r.count }}<span class="text-body-small text-medium-emphasis ms-1">({{ share(r.count, noreadCausesTotal) }}%)</span></div>
               </div>
             </div>
           </VCardText>
@@ -649,6 +694,43 @@ const heatmapOption = computed(() => ({
               </VCol>
             </VRow>
           </VCardText>
+        </VCard>
+      </VCol>
+      <VCol cols="12" md="6">
+        <VCard class="card-shadow h-100">
+          <VCardItem>
+            <template #prepend><VAvatar :color="carts.some(cartHot) ? 'error' : 'info'" variant="tonal"><VIcon icon="tabler-truck-loading" /></VAvatar></template>
+            <VCardTitle>{{ $t('page.stats.byCart') }}</VCardTitle>
+            <VCardSubtitle>{{ $t('page.stats.byCartHint') }}</VCardSubtitle>
+          </VCardItem>
+          <VCardText class="pt-0">
+            <div v-if="!carts.length" class="empty-state"><VIcon icon="tabler-truck-off" size="40" class="empty-state__icon" /><div class="empty-state__text">{{ $t('common.noData') }}</div></div>
+            <VChart v-else :option="cartOption" autoresize style="height: 240px" />
+          </VCardText>
+        </VCard>
+      </VCol>
+    </VRow>
+
+    <!-- 讀碼失敗率趨勢 + 依包裹長度 -->
+    <VRow density="compact" class="mt-3">
+      <VCol cols="12" md="6">
+        <VCard class="card-shadow h-100">
+          <VCardItem>
+            <template #prepend><VAvatar color="warning" variant="tonal"><VIcon icon="tabler-barcode-off" /></VAvatar></template>
+            <VCardTitle>{{ $t('page.stats.noreadRate') }}</VCardTitle>
+            <VCardSubtitle>{{ $t('page.stats.noreadRateHint') }}</VCardSubtitle>
+          </VCardItem>
+          <VCardText class="pt-0"><VChart :option="noreadOption" autoresize style="height: 240px" /></VCardText>
+        </VCard>
+      </VCol>
+      <VCol cols="12" md="6">
+        <VCard class="card-shadow h-100">
+          <VCardItem>
+            <template #prepend><VAvatar color="warning" variant="tonal"><VIcon icon="tabler-ruler-measure" /></VAvatar></template>
+            <VCardTitle>{{ $t('page.stats.noreadByLength') }}</VCardTitle>
+            <VCardSubtitle>{{ $t('page.stats.noreadByLengthHint') }}</VCardSubtitle>
+          </VCardItem>
+          <VCardText class="pt-0"><VChart :option="noreadLengthOption" autoresize style="height: 240px" /></VCardText>
         </VCard>
       </VCol>
     </VRow>
@@ -778,43 +860,6 @@ const heatmapOption = computed(() => ({
       </VCol>
     </VRow>
 
-    <!-- 讀碼失敗率趨勢 + 小車異常率 -->
-    <VRow density="compact" class="mt-3">
-      <VCol cols="12" md="6">
-        <VCard class="card-shadow h-100">
-          <VCardItem>
-            <template #prepend><VAvatar color="warning" variant="tonal"><VIcon icon="tabler-barcode-off" /></VAvatar></template>
-            <VCardTitle>{{ $t('page.stats.noreadRate') }}</VCardTitle>
-            <VCardSubtitle>{{ $t('page.stats.noreadRateHint') }}</VCardSubtitle>
-          </VCardItem>
-          <VCardText class="pt-0"><VChart :option="noreadOption" autoresize style="height: 240px" /></VCardText>
-        </VCard>
-      </VCol>
-      <VCol cols="12" md="6">
-        <VCard class="card-shadow h-100">
-          <VCardItem>
-            <template #prepend><VAvatar color="warning" variant="tonal"><VIcon icon="tabler-ruler-measure" /></VAvatar></template>
-            <VCardTitle>{{ $t('page.stats.noreadByLength') }}</VCardTitle>
-            <VCardSubtitle>{{ $t('page.stats.noreadByLengthHint') }}</VCardSubtitle>
-          </VCardItem>
-          <VCardText class="pt-0"><VChart :option="noreadLengthOption" autoresize style="height: 240px" /></VCardText>
-        </VCard>
-      </VCol>
-      <VCol cols="12" md="6">
-        <VCard class="card-shadow h-100">
-          <VCardItem>
-            <template #prepend><VAvatar :color="carts.some(cartHot) ? 'error' : 'info'" variant="tonal"><VIcon icon="tabler-truck-loading" /></VAvatar></template>
-            <VCardTitle>{{ $t('page.stats.byCart') }}</VCardTitle>
-            <VCardSubtitle>{{ $t('page.stats.byCartHint') }}</VCardSubtitle>
-          </VCardItem>
-          <VCardText class="pt-0">
-            <div v-if="!carts.length" class="empty-state"><VIcon icon="tabler-truck-off" size="40" class="empty-state__icon" /><div class="empty-state__text">{{ $t('common.noData') }}</div></div>
-            <VChart v-else :option="cartOption" autoresize style="height: 240px" />
-          </VCardText>
-        </VCard>
-      </VCol>
-    </VRow>
-
     <!-- 星期 × 小時熱力圖 -->
     <VRow density="compact" class="mt-3">
       <VCol cols="12">
@@ -852,6 +897,11 @@ const heatmapOption = computed(() => ({
 .kpi-card {
   &--primary { border-block-start: 3px solid rgb(var(--v-theme-primary)); }
   &__count { font-size: 2rem; line-height: 2.25rem; white-space: nowrap; }
+  // 圖示對齊大數字那行（標籤 + 半個數字高）
+  &__icon { margin-block-start: 14px; }
+  // 分項固定兩欄，放不下時自己縮成一欄
+  &__sub { display: grid; grid-template-columns: repeat(2, max-content); column-gap: 12px; row-gap: 2px; }
+  @media (max-width: 400px) { &__sub { grid-template-columns: 1fr; } }
   @media (max-width: 639.98px) {
     &__count { font-size: 1.5rem; line-height: 1.75rem; }
   }
@@ -867,6 +917,13 @@ const heatmapOption = computed(() => ({
   &--reason { grid-template-columns: 150px 1fr 88px; }
   &--narrow { grid-template-columns: 32px 1fr 40px; }
   &--travel { grid-template-columns: 40px 1fr 110px; }
+  // 格口列右側多一欄放「又進線」籌碼；手機寬沒位置就藏
+  &--chute { grid-template-columns: 96px 1fr 88px 112px; }
+}
+.stat-row__tag { min-inline-size: 0; }
+@media (max-width: 599px) {
+  .stat-row--chute { grid-template-columns: 96px 1fr 88px; }
+  .stat-row__tag { display: none; }
 }
 .stat-row__label {
   font-size: 12px;

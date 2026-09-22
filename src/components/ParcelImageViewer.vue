@@ -1,10 +1,15 @@
 <script setup>
 /**
- * 讀碼站照片放大檢視：獨立對話框，包裹查詢的照片按鈕與包裹詳情的縮圖都開它。
- * 只給 id 也行（列表只有 image_id），會自己去拿檔名與有沒有原圖。
+ * 讀碼站照片放大檢視：Viewer.js 全螢幕檢視器（滾輪／手勢縮放、拖曳、旋轉、翻轉、1:1），
+ * 包裹查詢、包裹詳情、異常存證的縮圖都開它。只給 id 也行（列表只有 image_id），會自己去拿檔名。
+ *
+ * 圖片先 fetch 成 blob 再交給檢視器：桌面視窗的來源是 tauri://localhost，<img> 直接載後台網址會被跨站防護擋成 403
+ * （同 ProtectedImg）。有原圖的舊件直接看原圖；現在全部存原圖，不再讓人切證據圖／原圖。
  */
+import Viewer from 'viewerjs'
+import 'viewerjs/dist/viewer.css'
 import { api, parcelImageUrl } from '@/api/http'
-import ProtectedImg from '@/components/ProtectedImg.vue'
+import { apiBase } from '@/api/runtime'
 
 const props = defineProps({
   modelValue: Boolean,
@@ -13,39 +18,63 @@ const props = defineProps({
 })
 const emit = defineEmits(['update:modelValue'])
 
-const meta = ref(null)
-const viewOriginal = ref(false)
+const holder = ref(null)
+let viewer = null
+let blobUrl = ''
+let opening = 0
 
-watch(() => [props.modelValue, props.image], async ([open, img]) => {
-  if (!open || !img) return
-  viewOriginal.value = false
-  meta.value = { id: img.id, file_name: '', has_orig: false }
-  try { meta.value = await api.parcelImage(img.id) } catch { /* 拿不到就只顯示圖 */ }
+const destroy = () => {
+  if (viewer) { viewer.destroy(); viewer = null }
+  if (blobUrl) { URL.revokeObjectURL(blobUrl); blobUrl = '' }
+  if (holder.value) holder.value.innerHTML = ''
+}
+
+const open = async img => {
+  const seq = ++opening
+  destroy()
+  let meta = { id: img.id, file_name: '', has_orig: false }
+  try { meta = await api.parcelImage(img.id) } catch { /* 拿不到就只顯示圖 */ }
+  if (seq !== opening) return
+  const src = parcelImageUrl(meta.id, !!meta.has_orig)
+  try {
+    const res = await fetch(src.startsWith('http') ? src : apiBase() + src)
+    if (!res.ok) throw new Error(String(res.status))
+    blobUrl = URL.createObjectURL(await res.blob())
+  } catch {
+    emit('update:modelValue', false)
+    return
+  }
+  if (seq !== opening || !holder.value) return
+  const el = document.createElement('img')
+  el.src = blobUrl
+  el.alt = meta.file_name || ''
+  holder.value.appendChild(el)
+  const title = [meta.barcode, meta.chute_code, meta.started_at || meta.received_at, meta.file_name].filter(Boolean).join(' · ')
+  viewer = new Viewer(el, {
+    navbar: false,
+    title: () => title,
+    // 單張：不要上一張／下一張與播放
+    toolbar: { zoomIn: 1, zoomOut: 1, oneToOne: 1, reset: 1, rotateLeft: 1, rotateRight: 1, flipHorizontal: 1, flipVertical: 1 },
+    zIndex: 3000,
+    transition: false,
+    hidden: () => emit('update:modelValue', false),
+  })
+  viewer.show()
+}
+
+watch(() => [props.modelValue, props.image], ([isOpen, img]) => {
+  if (isOpen && img) open(img)
+  else { opening++; destroy() }
 }, { immediate: true })
 
-const close = () => emit('update:modelValue', false)
+onBeforeUnmount(() => { opening++; destroy() })
 </script>
 
 <template>
-  <VDialog :model-value="modelValue" max-width="1400" @update:model-value="v => { if (!v) close() }">
-    <VCard v-if="meta">
-      <VCardTitle class="d-flex align-center flex-wrap ga-2">
-        <span v-if="meta.barcode" class="selectable text-title-large font-weight-bold">{{ meta.barcode }}</span>
-        <VChip v-if="meta.chute_code" size="small" label variant="tonal" color="primary">{{ meta.chute_code }}</VChip>
-        <span class="text-body-medium text-medium-emphasis">{{ meta.started_at || meta.received_at }}</span>
-        <span class="text-body-small text-medium-emphasis selectable">{{ meta.file_name }}</span>
-        <VSpacer />
-        <VBtnToggle v-if="meta.has_orig" v-model="viewOriginal" density="compact" variant="outlined" mandatory class="me-3">
-          <VBtn :value="false" size="small">{{ $t('parcel.imageEvidence') }}</VBtn>
-          <VBtn :value="true" size="small">{{ $t('parcel.imageOriginal') }}</VBtn>
-        </VBtnToggle>
-        <VBtn icon variant="text" @click="close"><VIcon icon="tabler-x" /></VBtn>
-      </VCardTitle>
-      <VCardText class="pa-0"><ProtectedImg :src="parcelImageUrl(meta.id, viewOriginal)" :alt="meta.file_name" class="parcel-image__full" /></VCardText>
-    </VCard>
-  </VDialog>
+  <!-- 檢視器自己會開全螢幕遮罩；這個容器只用來掛那張隱藏的 img -->
+  <div ref="holder" class="parcel-image-viewer__holder" />
 </template>
 
 <style scoped>
-.parcel-image__full { display: block; inline-size: 100%; max-block-size: 85vh; object-fit: contain; background: #111; }
+.parcel-image-viewer__holder { display: none; }
 </style>

@@ -1,5 +1,6 @@
 //! SQLite 連線池與 migration。
 
+pub mod abnormal_kind;
 pub mod retention;
 
 use std::path::Path;

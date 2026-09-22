@@ -5,6 +5,7 @@ import { useWebAuth } from '@/composables/useWebAuth'
 // 頁面動態載入：現場手機走 Wi-Fi 開網頁，只載該頁需要的部分
 const routes = [
   { path: '/', name: 'dashboard', component: () => import('@/pages/DashboardPage.vue'), meta: { title: 'nav.dashboard' } },
+  { path: '/report', name: 'report', component: () => import('@/pages/ReportPage.vue'), meta: { title: 'nav.report' } },
   { path: '/stats', name: 'stats', component: () => import('@/pages/StatsPage.vue'), meta: { title: 'nav.stats' } },
   { path: '/abnormal', name: 'abnormal', component: () => import('@/pages/AbnormalPage.vue'), meta: { title: 'nav.abnormal' } },
   { path: '/parcels', name: 'parcels', component: () => import('@/pages/ParcelsPage.vue'), meta: { title: 'nav.parcels' } },

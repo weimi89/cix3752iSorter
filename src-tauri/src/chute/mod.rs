@@ -111,8 +111,32 @@ pub struct PriorParcel {
 impl PriorParcel {
     /// 上次真的分到正常格口並完成：走異常口的件狀態也是「完成」，那是重投迴圈的常態，不算
     fn completed_normally(&self) -> bool {
-        self.status == 3 && self.chute_reason.is_none() && matches!(self.chute_source.as_deref(), Some("api") | Some("manual"))
+        self.status == 3 && self.chute_reason.is_none() && self.decided_normally()
     }
+
+    /// 中介機正常給過格口（不論有沒有走完——幾秒前才分的件多半還在路上）
+    fn decided_normally(&self) -> bool {
+        self.chute_reason.is_none() && matches!(self.chute_source.as_deref(), Some("api") | Some("manual"))
+    }
+}
+
+/// 純函式：同一條碼 `hold_ms` 內剛正常分過又進線 → 這件多半是讀到鄰件的條碼（相機視野含進料區），
+/// 回那筆前科的上線時間；`hold_ms` ≤ 0 關閉。`prior` 只含 `hold_ms` 內的件
+pub fn reentry_hold(prior: &[PriorParcel], hold_ms: i64) -> Option<i64> {
+    if hold_ms <= 0 {
+        return None;
+    }
+    prior.iter().find(|p| p.decided_normally()).map(|p| p.started_ms)
+}
+
+/// 查資料庫版：回 `(前科上線時間, 現在)`；`hold_ms` ≤ 0 不查
+pub async fn check_reentry_hold(db: &crate::db::DbPool, barcode: &str, ulid: &str, hold_ms: i64) -> Option<(i64, i64)> {
+    if hold_ms <= 0 {
+        return None;
+    }
+    let now = crate::db::now_ms();
+    let prior = load_prior(db, barcode, ulid, now - hold_ms).await;
+    reentry_hold(&prior, hold_ms).map(|prev_ms| (prev_ms, now))
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -121,31 +145,6 @@ pub enum HistoryAlert {
     RepeatDefault { count: usize, reason: String },
     /// 之前已完成分揀，現在又進線
     ReEntry { prev_chute: String, prev_started_ms: i64 },
-}
-
-/// 同條碼今天落到異常口（`default_chute`）且還沒處理的件，全部記成「已重投（auto）」；回記了幾件。
-/// 失敗只記警告——這是清單狀態，不能影響分揀
-pub async fn mark_refed(db: &crate::db::DbPool, barcode: &str, ulid: &str, since_ms: i64, default_chute: &str) -> u64 {
-    let r = sqlx::query(
-        "INSERT INTO abnormal_handling (parcel_id, state, handled_ms, handled_by)
-         SELECT p.id, 'refed', ?, 'auto' FROM parcels p
-          WHERE p.barcode = ? AND p.ulid <> ? AND p.started_ms >= ? AND p.chute_code = ? AND p.status = 3
-            AND NOT EXISTS (SELECT 1 FROM abnormal_handling h WHERE h.parcel_id = p.id)",
-    )
-    .bind(crate::db::now_ms())
-    .bind(barcode)
-    .bind(ulid)
-    .bind(since_ms)
-    .bind(default_chute)
-    .execute(db)
-    .await;
-    match r {
-        Ok(r) => r.rows_affected(),
-        Err(e) => {
-            tracing::warn!(%barcode, "異常件自動結案失敗: {e}");
-            0
-        }
-    }
 }
 
 /// 同一條碼從 `since_ms` 起的其他包裹（排除自己），新的在前。查詢失敗回空——這是提示，不能影響分揀
@@ -190,6 +189,7 @@ pub fn history_verdict(prior: &[PriorParcel], source: ChuteSource, reason: Optio
 pub fn reason_label(code: &str) -> &str {
     match code {
         "STORE_CLOSED" => "門市關轉",
+        "REENTRY" => "同碼短時間再進線",
         "NOT_FOUND" => "查無訂單",
         "UNCONFIRMED" => "訂單未確認",
         "NO_CHANNEL" => "中介機未給格口",
@@ -294,7 +294,18 @@ impl ChuteResolver {
     async fn resolve(&self, req: ChuteRequest) {
         let ChuteRequest { key, ulid, barcode, notify_only } = req;
         let started = std::time::Instant::now();
-        let default_code = self.app.config.current().general.default_chute;
+        let general = self.app.config.current().general;
+        let default_code = general.default_chute;
+        // 幾秒內同碼剛正常分過：不問中介機（問了它會再記一次完成），直接走異常口讓人核對面單
+        let held = if notify_only { None } else { check_reentry_hold(&self.app.db, &barcode, &ulid, general.reentry_hold_ms).await };
+        if let Some((prev_ms, now)) = held {
+            let decision = self.fallback(&default_code, format!("{:.1} 秒前同條碼剛分過，疑似讀到鄰件條碼", (now - prev_ms) as f64 / 1000.0), "REENTRY");
+            event_log::log(&self.app.db, Level::Warn, "chute", "reentry_hold", format!("條碼 {barcode} → {}：{}", decision.code, decision.note.clone().unwrap_or_default()));
+            event_bus::emit("chute-resolved", serde_json::json!({ "key": key, "barcode": barcode, "chute": decision.code, "source": decision.source, "elapsed_ms": started.elapsed().as_millis() as i64, "note": decision.note }));
+            event_bus::emit("parcel-alert", serde_json::json!({ "kind": "reentry_hold", "barcode": barcode, "message": format!("條碼 {barcode} 幾秒前剛分過又進線，已送異常口，請核對面單") }));
+            self.tracker.chute_result(key, decision.code, decision.cid, decision.source, decision.response_id, decision.reason, None);
+            return;
+        }
         let result = self.mw.query_parcel(&barcode).await;
         let elapsed = started.elapsed().as_millis() as i64;
         if notify_only {
@@ -337,17 +348,7 @@ impl ChuteResolver {
         // 決定先送出去，前科查詢另外跑：它要查 DB、可能還要通知中介機，不能拖住分揀
         let this = self.clone();
         let (source, reason) = (decision.source, decision.reason);
-        tokio::spawn(async move {
-            if source == ChuteSource::Api {
-                // 同條碼今天走過異常口、現在中介機正常給格口 → 那些異常件視為「已重投」自動結案
-                let db = this.app.db.clone();
-                let n = mark_refed(&db, &barcode, &ulid, crate::db::today_start_ms(), &default_code).await;
-                if n > 0 {
-                    event_bus::emit("abnormal-updated", serde_json::json!({ "barcode": barcode, "auto": n }));
-                }
-            }
-            this.history_alert(&ulid, &barcode, source, reason.as_deref()).await
-        });
+        tokio::spawn(async move { this.history_alert(&ulid, &barcode, source, reason.as_deref()).await });
     }
 
     /// 同一條碼今天的前科：反覆因同一原因走異常口（門市關轉件被一投再投，今天有一件投了 4 次），
@@ -469,6 +470,50 @@ mod tests {
         assert!(d.note.unwrap().contains("不在對照表"));
         assert_eq!(d.reason.as_deref(), Some("CHUTE_UNKNOWN"));
     }
+    #[test]
+    fn 再進線攔截_幾秒內正常分過就攔_異常口與關閉不攔() {
+        let in_flight = PriorParcel { status: 2, chute_code: Some("L2".into()), chute_source: Some("api".into()), chute_reason: None, started_ms: 1000 };
+        assert_eq!(reentry_hold(&[in_flight.clone()], 8000), Some(1000), "還在路上的件也算剛分過");
+        assert_eq!(reentry_hold(&[in_flight.clone()], 0), None, "0 = 關閉");
+        let default = PriorParcel { status: 3, chute_code: Some("RS".into()), chute_source: Some("default".into()), chute_reason: Some("STORE_CLOSED".into()), started_ms: 1000 };
+        assert_eq!(reentry_hold(&[default], 8000), None, "上次走異常口的不攔——那是重投迴圈");
+        assert_eq!(reentry_hold(&[], 8000), None);
+    }
+
+    #[tokio::test]
+    async fn 再進線攔截_查資料庫_只攔窗口內正常分過的同碼_不含自己() {
+        let dir = std::env::temp_dir().join(format!("reentry-{}", ulid::Ulid::generate()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = crate::db::init(&dir).await.unwrap();
+        let now = crate::db::now_ms();
+        let seed = |bc: &'static str, chute: &'static str, source: &'static str, reason: Option<&'static str>, status: i64, ago_ms: i64| {
+            let db = db.clone();
+            async move {
+                let u = ulid::Ulid::generate().to_string();
+                sqlx::query("INSERT INTO parcels (ulid, barcode, chute_code, chute_source, chute_reason, status, started_at, started_ms, updated_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
+                    .bind(&u).bind(bc).bind(chute).bind(source).bind(reason).bind(status)
+                    .bind(crate::db::local_ts(now - ago_ms)).bind(now - ago_ms).bind(now - ago_ms)
+                    .execute(&db).await.unwrap();
+                u
+            }
+        };
+        // A：3 秒前中介機給了 L2、還在路上（狀態 2）→ 攔
+        seed("A1234567890", "L2", "api", None, 2, 3000).await;
+        let hit = check_reentry_hold(&db, "A1234567890", "me", 6000).await;
+        assert_eq!(hit.map(|(prev, _)| now - prev >= 3000), Some(true));
+        // 同一件自己（ulid 相同）不算前科
+        let me = seed("B1234567890", "L1", "api", None, 3, 1000).await;
+        assert!(check_reentry_hold(&db, "B1234567890", &me, 6000).await.is_none());
+        // C：10 秒前分過 → 超出窗口不攔
+        seed("C1234567890", "L1", "api", None, 3, 10_000).await;
+        assert!(check_reentry_hold(&db, "C1234567890", "me", 6000).await.is_none());
+        // D：2 秒前走異常口（門市關轉）→ 重投迴圈，不攔
+        seed("D1234567890", "RS", "default", Some("STORE_CLOSED"), 3, 2000).await;
+        assert!(check_reentry_hold(&db, "D1234567890", "me", 6000).await.is_none());
+        // 關閉
+        assert!(check_reentry_hold(&db, "A1234567890", "me", 0).await.is_none());
+    }
+
     fn prior(status: i64, chute: &str, reason: Option<&str>, started_ms: i64) -> PriorParcel {
         // 有原因代碼的都是走異常口（default），沒有的是中介機正常給格口（api）
         let source = if reason.is_some() { "default" } else { "api" };
@@ -533,28 +578,5 @@ mod tests {
         assert!(matches!(history_verdict(&prior, ChuteSource::Default, Some("STORE_CLOSED")), Some(HistoryAlert::RepeatDefault { count: 3, .. })));
     }
 
-    #[tokio::test]
-    async fn 再進線且正常給格口_今天走過異常口的同條碼自動結案() {
-        let dir = std::env::temp_dir().join(format!("chute-refed-{}", ulid::Ulid::generate()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let db = crate::db::init(&dir).await.unwrap();
-        let ins = |ulid: &str, barcode: &str, chute: &str, status: i64, ms: i64| {
-            let (ulid, barcode, chute) = (ulid.to_string(), barcode.to_string(), chute.to_string());
-            let db = db.clone();
-            async move {
-                sqlx::query("INSERT INTO parcels (ulid, barcode, chute_code, chute_source, status, started_at, started_ms, updated_ms) VALUES (?, ?, ?, 'default', ?, '2026-09-18 19:00:00.000', ?, ?)")
-                    .bind(ulid).bind(barcode).bind(chute).bind(status).bind(ms).bind(ms).execute(&db).await.unwrap();
-            }
-        };
-        ins("A", "X1", "RS", 3, 1_000).await; // 今天走異常口、完成 → 該結案
-        ins("B", "X1", "RS", 4, 1_500).await; // 遺失的不在清單，不動
-        ins("C", "X1", "L2", 3, 2_000).await; // 正常格口，不是異常件
-        ins("D", "X1", "RS", 3, 500).await; // 起點之前（昨天）
-        ins("E", "X1", "RS", 1, 3_000).await; // 這一件自己（還在途）
-        assert_eq!(mark_refed(&db, "X1", "E", 1_000, "RS").await, 1);
-        assert_eq!(mark_refed(&db, "X1", "E", 1_000, "RS").await, 0, "已結案的不重複記");
-        let (state, by): (String, String) = sqlx::query_as("SELECT state, handled_by FROM abnormal_handling h JOIN parcels p ON p.id = h.parcel_id WHERE p.ulid = 'A'").fetch_one(&db).await.unwrap();
-        assert_eq!((state.as_str(), by.as_str()), ("refed", "auto"));
-    }
 
 }

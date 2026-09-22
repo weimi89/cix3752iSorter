@@ -43,6 +43,13 @@ export default defineConfig({
     host: host || false,
     hmr: host ? { protocol: 'ws', host, port: 5181 } : undefined,
     proxy: Object.fromEntries(['/api', '/auth', '/events'].map(p => [p, { target: BACKEND, changeOrigin: false }])),
+    // 桌面視窗（WebKit）在 Vite 一起來就載入，第一批模組還在轉換／相依還在打包時會拿到錯誤回應，
+    // WebKit 不會重試，整頁就停在「Importing a module script failed」。先把入口與所有頁面暖起來
+    warmup: { clientFiles: ['./src/main.js', './src/pages/*.vue', './src/components/*.vue'] },
+  },
+  // 相依一律在啟動時就打包好，不要等第一個請求才發現（同上，WebKit 撞到重打包會直接失敗）
+  optimizeDeps: {
+    include: ['vue', 'vue-router', 'pinia', 'vue-i18n', 'vuetify', 'vue3-toastify', 'vue-echarts', 'echarts/core', 'echarts/charts', 'echarts/components', 'echarts/renderers', 'viewerjs', '@vueuse/core', 'qrcode', '@tauri-apps/api/core', '@tauri-apps/plugin-process', '@tauri-apps/plugin-updater'],
   },
   build: {
     // 工控機瀏覽器可能是舊版 Chromium；分揀線現場也會用手機開

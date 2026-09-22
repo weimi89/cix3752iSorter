@@ -63,12 +63,11 @@ pub(super) fn api_router() -> Router<ServerState> {
         .route("/stats/daily", get(stats_daily))
         .route("/stats/hourly", get(stats_hourly))
         .route("/stats/overview", get(stats_overview))
+        .route("/report/day", get(report_day))
         .route("/config", get(config_get).put(config_put))
         .route("/web-auth/password", get(web_auth_password_get).put(web_auth_password_put))
         .route("/chutes", get(chutes_get).put(chutes_put))
-        .route("/abnormal", get(abnormal_list))
-        .route("/abnormal/{id}/handle", post(abnormal_handle))
-        .route("/abnormal/{id}/reopen", post(abnormal_reopen))
+        .route("/abnormal/review", get(abnormal_review))
         .route("/belt/start", post(belt_start))
         .route("/belt/stop", post(belt_stop))
         .route("/sorter/reset", post(sorter_reset))
@@ -121,22 +120,10 @@ async fn status(State(state): State<ServerState>) -> ApiResult<serde_json::Value
     .fetch_one(&state.app.db)
     .await
     .unwrap_or((0, 0));
-    // 異常口待處理件：看板要看得到有幾件沒人理、最久等了多久
-    let default_chute = state.app.config.current().general.default_chute;
-    let (abn_pending, abn_oldest): (i64, Option<i64>) = sqlx::query_as(
-        "SELECT COUNT(*), MIN(p.ended_ms) FROM parcels p LEFT JOIN abnormal_handling h ON h.parcel_id = p.id
-          WHERE p.chute_code = ? AND p.status = 3 AND p.started_ms >= ? AND h.state IS NULL",
-    )
-    .bind(&default_chute)
-    .bind(crate::db::today_start_ms())
-    .fetch_one(&state.app.db)
-    .await
-    .unwrap_or((0, None));
     Ok(Json(serde_json::json!({
         "version": env!("CARGO_PKG_VERSION"),
         "uptime_secs": state.app.started_at.elapsed().as_secs(),
         "noread_1h": { "total": noread_total, "noread": noread_count },
-        "abnormal_pending": { "count": abn_pending, "oldest_ms": abn_oldest },
         "devices": { "belt": rt.belt, "sorter": rt.sorter, "camera": rt.camera },
         "tracker": tracker,
         "chute_latency": state.app.resolver.get().map(|r| r.latency_stats()),
@@ -470,7 +457,10 @@ struct HourlyRow {
     hour: String,
     total: i64,
     done: i64,
+    /// 分揀機異常（狀態 4–8）；`middleware`／`noread_landed` 是落到異常口的兩類（規則在 `db::abnormal_kind`）
     abnormal: i64,
+    middleware: i64,
+    noread_landed: i64,
 }
 
 /// 最近 N 個整點（含當前這一小時）的完成／異常件數，依包裹上線時間分桶；
@@ -483,21 +473,29 @@ async fn stats_hourly(State(state): State<ServerState>, Query(q): Query<HoursQue
     let first = this_hour - Duration::hours(hours - 1);
     // started_at 是本機時間字串，直接比字串走 idx_parcels_started_at
     let since = first.format("%Y-%m-%d %H:%M:%S%.3f").to_string();
-    let rows: Vec<(String, i64, i64)> = sqlx::query_as(
-        "SELECT substr(started_at, 1, 13) AS h, COUNT(*), SUM(status = 3)
-         FROM parcels WHERE started_at >= ? AND ended_ms IS NOT NULL GROUP BY h",
-    )
+    let default_chute = state.app.config.current().general.default_chute;
+    let landed = crate::db::abnormal_kind::SQL_LANDED_DEFAULT;
+    let nr = crate::db::abnormal_kind::SQL_NOREAD_KIND;
+    let rows: Vec<(String, i64, i64, i64, i64)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT substr(p.started_at, 1, 13) AS h, COUNT(*), SUM(p.status = 3),
+                COALESCE(SUM(p.status = 3 AND NOT {nr} AND {landed}), 0), COALESCE(SUM(p.status = 3 AND {nr} AND {landed}), 0)
+         FROM parcels p WHERE p.started_at >= ? AND p.ended_ms IS NOT NULL GROUP BY h"
+    )))
+    .bind(&default_chute)
+    .bind(&default_chute)
     .bind(&since)
     .fetch_all(&state.app.db)
     .await?;
     let mut out: Vec<HourlyRow> = (0..hours)
         .map(|i| HourlyRow { hour: (first + Duration::hours(i)).format("%Y-%m-%d %H:00").to_string(), ..Default::default() })
         .collect();
-    for (h, total, done) in rows {
+    for (h, total, done, middleware, noread_landed) in rows {
         if let Some(b) = out.iter_mut().find(|b| b.hour.starts_with(&h)) {
             b.total = total;
             b.done = done;
             b.abnormal = total - done;
+            b.middleware = middleware;
+            b.noread_landed = noread_landed;
         }
     }
     Ok(Json(out))
@@ -513,11 +511,33 @@ struct RangeQuery {
 async fn stats_overview(State(state): State<ServerState>, Query(q): Query<RangeQuery>) -> ApiResult<super::stats::Overview> {
     let from = super::stats::parse_day(q.from.as_deref()).map_err(bad)?;
     let to = super::stats::parse_day(q.to.as_deref()).map_err(bad)?;
-    let retention_days = state.app.config.current().general.retention_days;
-    let overview = super::stats::overview(&state.app.db, retention_days, from, to)
+    let general = state.app.config.current().general;
+    let overview = super::stats::overview(&state.app.db, general.retention_days, &general.default_chute, from, to)
         .await
         .map_err(|e| bad(e.to_string()))?;
     Ok(Json(overview))
+}
+
+/// 班次報表：一天的統計＋依門檻挑出的問題點；`day` 空白＝最近有資料的那天（今天沒件就退到昨天）
+async fn report_day(State(state): State<ServerState>, Query(q): Query<RangeQuery>) -> ApiResult<serde_json::Value> {
+    let day = match q.from.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(s) => super::stats::parse_day(Some(s)).map_err(bad)?,
+        None => {
+            let latest: Option<String> = sqlx::query_scalar("SELECT day FROM daily_stats WHERE total > 0 ORDER BY day DESC LIMIT 1").fetch_optional(&state.app.db).await?;
+            super::stats::parse_day(latest.as_deref()).map_err(bad)?
+        }
+    };
+    let general = state.app.config.current().general;
+    let overview = super::stats::overview(&state.app.db, general.retention_days, &general.default_chute, day, day).await.map_err(|e| bad(e.to_string()))?;
+    let findings = super::report::findings(&overview);
+    // 前一天／後一天有沒有資料，前端做翻頁用
+    let (prev, next): (Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT (SELECT MAX(day) FROM daily_stats WHERE total > 0 AND day < ?1), (SELECT MIN(day) FROM daily_stats WHERE total > 0 AND day > ?1)",
+    )
+    .bind(day.format("%Y-%m-%d").to_string())
+    .fetch_one(&state.app.db)
+    .await?;
+    Ok(Json(serde_json::json!({ "day": overview.from, "prev_day": prev, "next_day": next, "findings": findings, "overview": overview })))
 }
 
 // ---------- 設定 ----------
@@ -571,6 +591,12 @@ async fn config_put(
         }
         // 換目錄不搬舊圖，但目錄至少要建得出來，否則相機一上傳就全數失敗
         std::fs::create_dir_all(p).map_err(|e| bad(format!("照片存放目錄建立失敗：{e}")))?;
+    }
+    if !(0..=60_000).contains(&cfg.general.reentry_hold_ms) {
+        return Err(bad("同碼再進線攔截秒數必須在 0–60 秒（0 = 關閉）"));
+    }
+    if (cfg.camera.frame_width == 0) != (cfg.camera.frame_height == 0) || cfg.camera.frame_width > 20_000 || cfg.camera.frame_height > 20_000 {
+        return Err(bad("相機畫面尺寸要兩邊都填（像素，最大 20000），或兩邊都 0 不用座標挑碼"));
     }
     let w = &cfg.web_access;
     if !(1..=720).contains(&w.session_hours) {
@@ -715,112 +741,127 @@ async fn chutes_get(State(state): State<ServerState>) -> ApiResult<Vec<ChuteApi>
     Ok(Json(rows))
 }
 
-// ---------- 異常口處理清單 ----------
+// ---------- 異常件存證 ----------
 
 #[derive(Deserialize)]
-struct AbnormalQuery {
-    /// pending / handled / all（預設 pending）
+struct ReviewQuery {
+    /// YYYY-MM-DD；空 = 今天
     #[serde(default)]
-    state: String,
-    #[serde(default = "default_abnormal_limit")]
+    day: String,
+    /// sorter / middleware / noread / 空 = 全部
+    #[serde(default)]
+    kind: String,
+    /// 只看讀碼失敗的某個原因（`db::abnormal_kind::NOREAD_CAUSES`）
+    #[serde(default)]
+    cause: String,
+    #[serde(default = "default_review_limit")]
     limit: i64,
+    #[serde(default)]
+    offset: i64,
 }
-fn default_abnormal_limit() -> i64 {
-    200
+fn default_review_limit() -> i64 {
+    24
 }
 
 #[derive(serde::Serialize, sqlx::FromRow)]
-struct AbnormalRow {
+struct ReviewRow {
     id: i64,
     barcode: String,
     started_at: String,
     ended_ms: Option<i64>,
+    status: i64,
     chute_code: Option<String>,
     chute_source: Option<String>,
     chute_reason: Option<String>,
     cart: Option<i64>,
-    state: Option<String>,
-    handled_ms: Option<i64>,
-    handled_by: Option<String>,
+    /// sorter / middleware / noread（規則在 `db::abnormal_kind`）
+    kind: String,
+    /// 讀碼失敗的系統判定原因；其他類別為 NULL
+    cause: Option<String>,
     /// 這件的第一張讀碼站照片；NULL = 沒照片
     image_id: Option<i64>,
+    has_orig: bool,
 }
 
-/// 今天落到異常口（預設格口）的件；待處理的最舊排前面，已處理的最近處理排前面
-async fn abnormal_list(State(state): State<ServerState>, Query(q): Query<AbnormalQuery>) -> ApiResult<serde_json::Value> {
+/// 某一天的異常件（分揀機異常、仲介機回傳、讀碼失敗）翻照片用：新的在前、分頁；
+/// 各類件數與讀碼失敗各原因件數一律回整天的，不隨篩選變，頁首數字才穩
+async fn abnormal_review(State(state): State<ServerState>, Query(q): Query<ReviewQuery>) -> ApiResult<serde_json::Value> {
+    use crate::db::abnormal_kind::{NOREAD_CAUSES, SQL_ENDED_KIND, SQL_NOREAD_CAUSE};
+    let day = super::stats::parse_day(Some(&q.day)).map_err(bad)?;
+    let ts_from = format!("{} 00:00:00.000", day.format("%Y-%m-%d"));
+    let ts_to = format!("{} 00:00:00.000", (day + chrono::Duration::days(1)).format("%Y-%m-%d"));
+    if !matches!(q.kind.as_str(), "" | "sorter" | "middleware" | "noread") {
+        return Err(bad("kind 只能是 sorter／middleware／noread 或空白"));
+    }
+    if !q.cause.is_empty() && !NOREAD_CAUSES.contains(&q.cause.as_str()) {
+        return Err(bad("cause 不在原因清單裡"));
+    }
     let default_chute = state.app.config.current().general.default_chute;
-    let since = crate::db::today_start_ms();
-    let (filter, order) = match q.state.as_str() {
-        "handled" => ("AND h.state IS NOT NULL", "h.handled_ms DESC"),
-        "all" => ("", "(h.state IS NULL) DESC, p.ended_ms DESC"),
-        _ => ("AND h.state IS NULL", "p.ended_ms ASC"),
-    };
-    let sql = format!(
-        "SELECT p.id, p.barcode, p.started_at, p.ended_ms, p.chute_code, p.chute_source, p.chute_reason, p.cart,
-                h.state, h.handled_ms, h.handled_by,
-                (SELECT MIN(i.id) FROM parcel_images i WHERE i.parcel_id = p.id) AS image_id
-           FROM parcels p LEFT JOIN abnormal_handling h ON h.parcel_id = p.id
-          WHERE p.chute_code = ? AND p.status = 3 AND p.started_ms >= ? {filter}
-          ORDER BY {order} LIMIT ?"
+    // 篩選條件都放在外層，內層先把類別與原因算出來
+    let base = format!(
+        "SELECT p.*, {SQL_ENDED_KIND} AS kind, {SQL_NOREAD_CAUSE} AS cause,
+                (SELECT MIN(i.id) FROM parcel_images i WHERE i.parcel_id = p.id) AS image_id,
+                EXISTS (SELECT 1 FROM parcel_images i WHERE i.parcel_id = p.id AND i.orig_path IS NOT NULL) AS has_orig
+           FROM parcels p
+          WHERE p.started_at >= ? AND p.started_at < ? AND p.ended_ms IS NOT NULL"
     );
-    let rows = sqlx::query_as::<_, AbnormalRow>(sqlx::AssertSqlSafe(sql))
+    let mut filter = String::from("kind IS NOT NULL");
+    if !q.kind.is_empty() {
+        filter.push_str(" AND kind = ?");
+    }
+    if !q.cause.is_empty() {
+        filter.push_str(" AND cause = ?");
+    }
+    let list_sql = format!("SELECT * FROM ({base}) WHERE {filter} ORDER BY started_at DESC LIMIT ? OFFSET ?");
+    let mut query = sqlx::query_as::<_, ReviewRow>(sqlx::AssertSqlSafe(list_sql)).bind(&default_chute).bind(&ts_from).bind(&ts_to);
+    if !q.kind.is_empty() {
+        query = query.bind(&q.kind);
+    }
+    if !q.cause.is_empty() {
+        query = query.bind(&q.cause);
+    }
+    let rows = query.bind(q.limit.clamp(1, 200)).bind(q.offset.max(0)).fetch_all(&state.app.db).await?;
+
+    let count_sql = format!("SELECT COUNT(*) FROM ({base}) WHERE {filter}");
+    let mut cq = sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(count_sql)).bind(&default_chute).bind(&ts_from).bind(&ts_to);
+    if !q.kind.is_empty() {
+        cq = cq.bind(&q.kind);
+    }
+    if !q.cause.is_empty() {
+        cq = cq.bind(&q.cause);
+    }
+    let total: i64 = cq.fetch_one(&state.app.db).await?;
+
+    // 整天的分類與原因統計（不受篩選影響）
+    let summary_sql = format!("SELECT kind, cause, COUNT(*) AS n FROM ({base}) WHERE kind IS NOT NULL GROUP BY kind, cause");
+    let summary: Vec<(String, Option<String>, i64)> = sqlx::query_as(sqlx::AssertSqlSafe(summary_sql))
         .bind(&default_chute)
-        .bind(since)
-        .bind(q.limit.clamp(1, 1000))
+        .bind(&ts_from)
+        .bind(&ts_to)
         .fetch_all(&state.app.db)
         .await?;
-    let pending: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM parcels p LEFT JOIN abnormal_handling h ON h.parcel_id = p.id
-          WHERE p.chute_code = ? AND p.status = 3 AND p.started_ms >= ? AND h.state IS NULL",
-    )
-    .bind(&default_chute)
-    .bind(since)
-    .fetch_one(&state.app.db)
-    .await?;
-    Ok(Json(serde_json::json!({ "list": rows, "pending": pending, "now_ms": crate::db::now_ms() })))
-}
-
-#[derive(Deserialize)]
-struct HandleBody {
-    /// removed（已下架）/ refed（已重投）
-    state: String,
-}
-
-async fn abnormal_handle(State(state): State<ServerState>, Path(id): Path<i64>, Json(body): Json<HandleBody>) -> ApiResult<serde_json::Value> {
-    if !matches!(body.state.as_str(), "removed" | "refed") {
-        return Err(bad("處理狀態只能是 removed（已下架）或 refed（已重投）"));
+    let mut by_kind = serde_json::json!({ "sorter": 0, "middleware": 0, "noread": 0 });
+    let mut cause_counts: std::collections::BTreeMap<&str, i64> = NOREAD_CAUSES.iter().map(|c| (*c, 0)).collect();
+    let mut day_total = 0;
+    for (kind, cause, n) in &summary {
+        day_total += n;
+        if let Some(v) = by_kind.get_mut(kind.as_str()) {
+            *v = serde_json::json!(v.as_i64().unwrap_or(0) + n);
+        }
+        if let Some(c) = cause {
+            if let Some(v) = cause_counts.get_mut(c.as_str()) {
+                *v += n;
+            }
+        }
     }
-    let default_chute = state.app.config.current().general.default_chute;
-    let barcode: Option<String> = sqlx::query_scalar("SELECT barcode FROM parcels WHERE id = ? AND chute_code = ? AND status = 3")
-        .bind(id)
-        .bind(&default_chute)
-        .fetch_optional(&state.app.db)
-        .await?;
-    let Some(barcode) = barcode else {
-        return Err(ApiError(StatusCode::NOT_FOUND, "找不到這件異常口包裹".into()));
-    };
-    let now = crate::db::now_ms();
-    sqlx::query("INSERT INTO abnormal_handling (parcel_id, state, handled_ms, handled_by) VALUES (?, ?, ?, 'web')
-                 ON CONFLICT(parcel_id) DO UPDATE SET state = excluded.state, handled_ms = excluded.handled_ms, handled_by = excluded.handled_by")
-        .bind(id)
-        .bind(&body.state)
-        .bind(now)
-        .execute(&state.app.db)
-        .await?;
-    let what = if body.state == "removed" { "已下架" } else { "已重投" };
-    event_log::log(&state.app.db, Level::Info, "chute", "abnormal_handled", format!("異常件 {barcode} {what}（網頁）"));
-    crate::event_bus::emit("abnormal-updated", serde_json::json!({ "id": id, "state": body.state }));
-    Ok(Json(serde_json::json!({ "ok": true })))
-}
-
-/// 按錯了：取消處理紀錄，回到待處理
-async fn abnormal_reopen(State(state): State<ServerState>, Path(id): Path<i64>) -> ApiResult<serde_json::Value> {
-    let n = sqlx::query("DELETE FROM abnormal_handling WHERE parcel_id = ?").bind(id).execute(&state.app.db).await?.rows_affected();
-    if n == 0 {
-        return Err(ApiError(StatusCode::NOT_FOUND, "這件沒有處理紀錄".into()));
-    }
-    crate::event_bus::emit("abnormal-updated", serde_json::json!({ "id": id, "state": null }));
-    Ok(Json(serde_json::json!({ "ok": true })))
+    Ok(Json(serde_json::json!({
+        "day": day.format("%Y-%m-%d").to_string(),
+        "items": rows,
+        "total": total,
+        "day_total": day_total,
+        "by_kind": by_kind,
+        "cause_counts": NOREAD_CAUSES.iter().map(|c| serde_json::json!({ "cause": c, "count": cause_counts[c] })).collect::<Vec<_>>(),
+    })))
 }
 
 async fn chutes_put(State(state): State<ServerState>, Json(list): Json<Vec<ChuteApi>>) -> ApiResult<serde_json::Value> {

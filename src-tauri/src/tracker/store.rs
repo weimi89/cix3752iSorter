@@ -17,8 +17,8 @@ pub enum StoreOp {
     Event { ulid: String, ts_ms: i64, source: &'static str, kind: String, raw: Option<String> },
     /// 終態已寫入，之後不會再有這件的更新；釋放 ulid→id 對應
     Forget(String),
-    /// 終態件計入當日統計
-    Daily(Parcel),
+    /// 終態件計入當日統計；帶當時的預設格口（異常口），歸類才知道件是不是落在異常口
+    Daily(Parcel, String),
     /// 一次堵塞開始（統計用）
     Jam { ts_ms: i64, cart: u32, pos: i32, ulid: Option<String>, barcode: Option<String>, chute_code: Option<String> },
 }
@@ -105,8 +105,8 @@ async fn run(db: DbPool, mut rx: mpsc::Receiver<StoreOp>) {
             StoreOp::Forget(ulid) => {
                 ids.remove(&ulid);
             }
-            StoreOp::Daily(p) => {
-                if let Err(e) = daily(&db, &p).await {
+            StoreOp::Daily(p, default_chute) => {
+                if let Err(e) = daily(&db, &p, &default_chute).await {
                     tracing::error!("daily_stats 更新失敗: {e}");
                 }
             }
@@ -183,22 +183,29 @@ async fn update(db: &DbPool, p: &Parcel) -> Result<(), sqlx::Error> {
     Ok(())
 }
 
-async fn daily(db: &DbPool, p: &Parcel) -> Result<(), sqlx::Error> {
+async fn daily(db: &DbPool, p: &Parcel, default_chute: &str) -> Result<(), sqlx::Error> {
     use super::parcel::{ChuteSource, Status};
+    use crate::db::abnormal_kind::{classify, AbnormalKind};
     let day = local_ts(p.p_ms)[..10].to_string();
     let done = (p.status == Status::Done) as i64;
     let noread = (p.barcode.is_none() || p.barcode.as_deref() == Some(crate::device::camera::NO_READ)) as i64;
     let defaulted = p.chute.as_ref().is_some_and(|c| !matches!(c.source, ChuteSource::Api | ChuteSource::Manual)) as i64;
     let abnormal = (p.status != Status::Done) as i64;
+    let kind = classify(done == 1, p.chute.as_ref().map(|c| c.code.as_str()), p.barcode.as_deref(), p.chute.as_ref().and_then(|c| c.reason.as_deref()), default_chute);
+    let middleware = (kind == Some(AbnormalKind::Middleware)) as i64;
+    let noread_landed = (kind == Some(AbnormalKind::NoRead)) as i64;
     sqlx::query(
-        "INSERT INTO daily_stats (day, total, done, noread, defaulted, abnormal) VALUES (?1, 1, ?2, ?3, ?4, ?5)
-         ON CONFLICT(day) DO UPDATE SET total = total + 1, done = done + ?2, noread = noread + ?3, defaulted = defaulted + ?4, abnormal = abnormal + ?5",
+        "INSERT INTO daily_stats (day, total, done, noread, defaulted, abnormal, middleware, noread_landed) VALUES (?1, 1, ?2, ?3, ?4, ?5, ?6, ?7)
+         ON CONFLICT(day) DO UPDATE SET total = total + 1, done = done + ?2, noread = noread + ?3, defaulted = defaulted + ?4, abnormal = abnormal + ?5,
+                                        middleware = middleware + ?6, noread_landed = noread_landed + ?7",
     )
     .bind(day)
     .bind(done)
     .bind(noread)
     .bind(defaulted)
     .bind(abnormal)
+    .bind(middleware)
+    .bind(noread_landed)
     .execute(db)
     .await?;
     Ok(())

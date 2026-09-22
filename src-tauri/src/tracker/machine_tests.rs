@@ -45,7 +45,7 @@ impl Outputs for Fake {
     fn store_forget(&mut self, p: &super::parcel::Parcel) {
         self.forgotten.push(p.ulid.clone());
     }
-    fn store_daily(&mut self, _p: &super::parcel::Parcel) {}
+    fn store_daily(&mut self, _p: &super::parcel::Parcel, _default_chute: &str) {}
     fn request_chute(&mut self, p: &super::parcel::Parcel) {
         self.chute_requests.push((p.key, p.barcode_or_noread().to_string()));
     }
@@ -310,6 +310,19 @@ fn 平時j到g超過550ms_不停線() {
     s.at(1100).belt("~O1 1").at(14).sorter("~c5 5 410 1").at(12).sorter("~j5 1");
     s.at(800).sorter("~g5 -1 1");
     assert!(s.out.belt.is_empty(), "沒有堵塞時 ~j→~g 慢一點是正常的");
+}
+
+#[test]
+fn 堵塞中再判到堵到頭部_指令照送但只記一次停線() {
+    let mut s = Sim::new();
+    s.belt("~P1 1").at(200).barcode("I0000000001").chute(1, "L1");
+    s.at(1100).belt("~O1 1").at(14).sorter("~c5 5 410 1").at(12).sorter("~j5 1");
+    s.at(100).sorter("~k9 42 42");
+    assert_eq!(s.out.belt, vec!["KM998 1"], "堵塞 → 停線");
+    s.at(500);
+    assert_eq!(s.out.belt, vec!["KM998 1", "KM998 1"], "堵到頭部：停止指令照送");
+    assert_eq!(s.out.logs.iter().filter(|l| l.starts_with("stop:")).count(), 1, "同一次卡件只記一筆停線 {:?}", s.out.logs);
+    assert!(s.out.logs.iter().any(|l| l.starts_with("stop_hold:") && l.contains("堵塞到分揀機頭部")), "{:?}", s.out.logs);
 }
 
 #[test]

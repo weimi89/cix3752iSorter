@@ -61,16 +61,20 @@ const loadHourly = async () => {
   try { hourly.value = await api.hourlyStats(12) } catch (e) { console.warn(e) }
 }
 
+// 與統計頁同一套四類：正常完成／讀碼失敗／仲介機回傳／分揀機異常（「完成」含落異常口的件，扣掉才是正常）
+const CHART_SERIES = [
+  { key: 'done', color: '#76C043', pick: d => d.done - (d.middleware || 0) - (d.noread_landed || 0) },
+  { key: 'noread', color: '#FFB400', pick: d => d.noread_landed || 0 },
+  { key: 'middleware', color: '#16B1FF', pick: d => d.middleware || 0 },
+  { key: 'abnormal', color: '#FF4C51', pick: d => d.abnormal },
+]
 const chartOption = computed(() => ({
   tooltip: { trigger: 'axis' },
-  legend: { top: 0, data: [t('page.dashboard.chart.done'), t('page.dashboard.chart.abnormal')] },
+  legend: { top: 0, data: CHART_SERIES.map(s => t(`page.dashboard.chart.${s.key}`)) },
   grid: { left: 40, right: 16, top: 36, bottom: 28 },
   xAxis: { type: 'category', data: hourly.value.map(d => d.hour.slice(11)) },
   yAxis: { type: 'value', minInterval: 1 },
-  series: [
-    { name: t('page.dashboard.chart.done'), type: 'bar', stack: 'a', data: hourly.value.map(d => d.done), itemStyle: { color: '#76C043' } },
-    { name: t('page.dashboard.chart.abnormal'), type: 'bar', stack: 'a', data: hourly.value.map(d => d.abnormal), itemStyle: { color: '#FF4C51' } },
-  ],
+  series: CHART_SERIES.map(s => ({ name: t(`page.dashboard.chart.${s.key}`), type: 'bar', stack: 'a', data: hourly.value.map(s.pick), itemStyle: { color: s.color } })),
 }))
 
 onMounted(async () => {
@@ -109,11 +113,6 @@ const noread1hPct = computed(() => {
   const n = status.noread1h
   return n?.total ? Math.round((n.noread / n.total) * 1000) / 10 : null
 })
-// 等待多久：不到 1 小時給分鐘，超過給「幾小時幾分」
-const fmtWait = ms => {
-  const m = Math.max(0, Math.floor(ms / 60000))
-  return m < 60 ? t('page.abnormal.minutes', { n: m }) : t('page.abnormal.hours', { h: Math.floor(m / 60), m: m % 60 })
-}
 const stats = computed(() => [
   { key: 'today', icon: 'tabler-packages', color: 'primary', value: status.todayCount, label: t('page.dashboard.today'), hint: t('page.dashboard.todayHint') },
   { key: 'done', icon: 'tabler-circle-check', color: 'success', value: counters.value.done || 0, label: t('page.dashboard.doneSinceStart') },
@@ -123,8 +122,7 @@ const stats = computed(() => [
     color: 'error',
     value: counters.value.abnormal || 0,
     label: t('page.dashboard.abnormal'),
-    // 異常口還有幾件沒人處理、最久等多久；點卡片進處理清單
-    sub: status.abnormalPending.count ? t('page.dashboard.abnormalPending', { n: status.abnormalPending.count, age: fmtWait(now.value + status.serverOffsetMs - status.abnormalPending.oldest_ms) }) : '',
+    // 點卡片進存證頁翻照片；細分數字不放這裡，看板上沒人看小字
     to: { name: 'abnormal' },
   },
   {
@@ -167,7 +165,7 @@ const stats = computed(() => [
     <!-- 件數 -->
     <VRow density="compact" class="mt-1">
       <VCol v-for="s in stats" :key="s.key" cols="6" md="4" lg="2">
-        <VCard class="card-shadow h-100" :class="{ 'cursor-pointer': s.to }" :to="s.to" :link="!!s.to">
+        <VCard class="card-shadow h-100 stat-card" :class="{ 'cursor-pointer': s.to }" :to="s.to" :link="!!s.to">
           <VCardItem>
             <template #prepend><VAvatar :color="s.color" variant="tonal"><VIcon :icon="s.icon" /></VAvatar></template>
             <VCardTitle>{{ s.value }}</VCardTitle>
@@ -177,7 +175,7 @@ const stats = computed(() => [
         </VCard>
       </VCol>
       <VCol cols="6" md="4" lg="2">
-        <VCard class="card-shadow h-100">
+        <VCard class="card-shadow h-100 stat-card">
           <VCardItem>
             <template #prepend><VAvatar :color="status.print.failed || status.report.failed ? 'error' : 'info'" variant="tonal"><VIcon icon="tabler-stack-2" /></VAvatar></template>
             <VCardTitle class="d-flex ga-2 flex-wrap">
@@ -286,6 +284,10 @@ const stats = computed(() => [
 </template>
 
 <style scoped>
+/* 數字卡：圖示一律貼齊第一行（數字），不隨內容行數浮動；六張卡的圖示才會在同一條線上 */
+.stat-card :deep(.v-card-item) { align-items: flex-start; }
+.stat-card :deep(.v-card-item__prepend) { padding-block-start: 2px; }
+
 /* 「目前處理中」有無包裹都撐同一高度，內容變動不影響下方表格位置 */
 .current-body { min-height: 64px; }
 .barcode-cell { max-width: 160px; }

@@ -90,6 +90,9 @@ pub struct GeneralConfig {
     pub retention_days: u32,
     /// 拿不到格口時的預設格口代號（查 `chutes` 表）
     pub default_chute: String,
+    /// 同一條碼在這段時間內剛正常分過又進線 → 不問中介機、直接走異常口讓人看（讀到鄰件條碼的件）。
+    /// 9/21 實測：讀到鄰件的間隔 1.7–5.8 秒，正常撿回重投最快 7.9 秒——預設 6 秒落在中間；設到 8 秒以上會攔到正常重投。0 = 關閉
+    pub reentry_hold_ms: i64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -167,6 +170,11 @@ pub struct CameraConfig {
     pub bind_expected_ms: i64,
     /// 同一條碼多久內不重複觸發
     pub dedup_ms: u64,
+    /// 相機畫面像素尺寸；同幀有多個合法 QR 時取離畫面中心最近的（貼邊的是鄰件）。任一邊 0 = 不用座標，照字典序。
+    /// 預設 0：解析度填錯（例如實際 2592×1944 卻用 4600×3400）會把「中心」算到畫面外，固定挑靠角落的那個、比不看座標更糟，
+    /// 所以一定要人依相機輸出的座標範圍填（桃園 MV-ID6200M 約 4600×3400）
+    pub frame_width: u32,
+    pub frame_height: u32,
 }
 
 /// 讀碼站照片：讀碼器每件拍的圖用 FTP 上傳到本程式，當「這件我們有收到」的證據。
@@ -187,7 +195,8 @@ pub struct CameraFtpConfig {
     pub passive_port_max: u16,
     /// 照片對回包裹的時間窗口：照片上傳完成時間往前找這麼多毫秒內綁到條碼的件
     pub match_window_ms: i64,
-    /// 證據圖長邊像素；0 = 不縮、存原圖（硬碟會很快滿）
+    /// 證據圖長邊像素；0 = 不縮、存原圖。業主 9/22 裁示全部存原圖（縮圖看不清楚），
+    /// 原圖一張約 620 KB、一天 9 千件≈5.7 GB，保留天數要跟著硬碟算（203 GB 約放 30 天）
     pub max_edge_px: u32,
     /// 證據圖 JPEG 品質 1–100
     pub jpeg_quality: u8,
@@ -298,6 +307,7 @@ impl Default for GeneralConfig {
         Self {
             retention_days: 15,
             default_chute: "RS".into(),
+            reentry_hold_ms: 6000,
         }
     }
 }
@@ -372,6 +382,8 @@ impl Default for CameraConfig {
             bind_ceiling_ms: 2000,
             bind_expected_ms: 226,
             dedup_ms: 5000,
+            frame_width: 0,
+            frame_height: 0,
         }
     }
 }
@@ -386,7 +398,7 @@ impl Default for CameraFtpConfig {
             passive_port_min: 50000,
             passive_port_max: 50100,
             match_window_ms: 5000,
-            max_edge_px: 1600,
+            max_edge_px: 0,
             jpeg_quality: 80,
             keep_original_noread: true,
             retention_days: 90,

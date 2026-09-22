@@ -23,6 +23,10 @@ pub async fn bootstrap(config_path: &Path, data_dir: &Path, cancel: Cancellation
     crate::log::attach_file(&logs_dir);
     device::signal_log::init(logs_dir, config.subscribe());
     let db = db::init(data_dir).await?;
+    // 統計用的一次性回填，失敗只記錄，不能擋分揀開機
+    if let Err(e) = db::abnormal_kind::backfill_daily_stats(&db, &cfg.general.default_chute).await {
+        tracing::error!("daily_stats 異常三分類回填失敗（下次啟動再試）: {e}");
+    }
     db::retention::start(db.clone(), data_dir.to_path_buf(), config.subscribe(), cancel.clone());
 
     let app = AppState {

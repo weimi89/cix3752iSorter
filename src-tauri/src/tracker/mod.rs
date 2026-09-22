@@ -322,8 +322,8 @@ impl machine::Outputs for LiveOutputs {
     fn store_forget(&mut self, p: &Parcel) {
         self.store.forget(p);
     }
-    fn store_daily(&mut self, p: &Parcel) {
-        self.store.send(store::StoreOp::Daily(p.clone()));
+    fn store_daily(&mut self, p: &Parcel, default_chute: &str) {
+        self.store.send(store::StoreOp::Daily(p.clone(), default_chute.to_string()));
     }
     fn request_chute(&mut self, p: &Parcel) {
         let barcode = p.barcode_or_noread().to_string();

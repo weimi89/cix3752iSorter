@@ -5,6 +5,7 @@
 mod assets;
 mod auth;
 mod events;
+mod report;
 mod routes;
 mod stats;
 
