@@ -54,7 +54,7 @@ pub fn findings(o: &Overview) -> Vec<Finding> {
         }
         let action = match top.map(|c| c.key.as_str()) {
             Some("no_code") => "讀碼器有拍但讀不到：投料時面單朝上、放皮帶中央；亮面袋反光就調讀碼站曝光",
-            Some("neighbor") => "讀碼器的讀碼區域（ROI）排除畫面上緣進料區；投料時前後件別靠太近",
+            Some("neighbor") => "投料時前後件別靠太近、下一件別先推進讀碼站視野；系統設定的畫面尺寸要填才會自動挑離中心近的碼",
             Some("no_frame") => "讀碼器沒回應：檢查觸發光電與讀碼器連線",
             Some("bad_code") => "讀到的是包材條碼或內部序號：面單貼在最大面、別被其他條碼蓋到",
             _ => "翻「異常存證」的照片看是投料還是讀碼站的問題",
@@ -70,7 +70,7 @@ pub fn findings(o: &Overview) -> Vec<Finding> {
                 code: "reentry",
                 title: format!("讀到鄰件條碼 {} 件，已攔到異常口", r.count),
                 detail: "同一條碼幾秒內又進線＝讀碼站把還在進料區那件的面單當成這件的".into(),
-                action: "讀碼器的讀碼區域（ROI）排除畫面上緣進料區；投料時前後件別靠太近".into(),
+                action: "投料時前後件別靠太近、下一件別先推進讀碼站視野；程式已改成同幀多碼取離畫面中心近的（要填畫面尺寸）".into(),
             });
         }
     }
