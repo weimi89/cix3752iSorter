@@ -10,7 +10,8 @@ export const useStatusStore = defineStore('status', {
     version: '',
     devices: { belt: { connected: false }, sorter: { connected: false }, camera: { connected: false } },
     tracker: null,
-    print: { pending: 0, failed: 0 },
+    // enabled：分揀機自己印面單。關閉時面單由中介機印，畫面上跟印單有關的設定與頁面都隱藏
+    print: { enabled: false, pending: 0, failed: 0 },
     report: { pending: 0, failed: 0 },
     chuteLatency: null,
     // 近一小時 { total, noread }，看板讀碼失敗卡用來標紅
@@ -34,7 +35,7 @@ export const useStatusStore = defineStore('status', {
         this.version = d.version
         this.devices = d.devices
         this.setTracker(d.tracker)
-        this.print = d.print
+        this.print = { enabled: false, ...d.print }
         this.report = d.report
         this.chuteLatency = d.chute_latency ?? null
         this.noread1h = d.noread_1h ?? { total: 0, noread: 0 }

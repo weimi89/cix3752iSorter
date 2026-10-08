@@ -107,7 +107,8 @@ async fn status(State(state): State<ServerState>) -> ApiResult<serde_json::Value
     .await
     .unwrap_or((0, 0));
     let (report_pending, report_failed): (i64, i64) = sqlx::query_as(
-        "SELECT COALESCE(SUM(status IN ('pending','sending')),0), COALESCE(SUM(status='failed'),0) FROM report_queue",
+        "SELECT (SELECT COUNT(*) FROM report_queue WHERE status IN ('pending','sending')),
+                (SELECT COUNT(*) FROM report_queue WHERE status = 'failed')",
     )
     .fetch_one(&state.app.db)
     .await
@@ -127,7 +128,7 @@ async fn status(State(state): State<ServerState>) -> ApiResult<serde_json::Value
         "devices": { "belt": rt.belt, "sorter": rt.sorter, "camera": rt.camera },
         "tracker": tracker,
         "chute_latency": state.app.resolver.get().map(|r| r.latency_stats()),
-        "print": { "pending": print_pending, "failed": print_failed },
+        "print": { "enabled": state.app.config.current().print.enabled, "pending": print_pending, "failed": print_failed },
         "report": { "pending": report_pending, "failed": report_failed },
     })))
 }

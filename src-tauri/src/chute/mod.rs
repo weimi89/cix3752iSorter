@@ -109,9 +109,13 @@ pub struct PriorParcel {
 }
 
 impl PriorParcel {
-    /// 上次真的分到正常格口並完成：走異常口的件狀態也是「完成」，那是重投迴圈的常態，不算
+    /// 上次真的分到一般格口並完成：走異常口、直通口的件狀態也是「完成」，那是撿出重投的常態，不算
+    /// （中介機把物流沒指派格口的件分到直通口時，原因代碼是空的，只能看格口本身）
     fn completed_normally(&self) -> bool {
-        self.status == 3 && self.chute_reason.is_none() && self.decided_normally()
+        self.status == 3
+            && self.chute_reason.is_none()
+            && self.decided_normally()
+            && self.chute_code.as_deref().is_some_and(is_regular_chute)
     }
 
     /// 中介機正常給過格口（不論有沒有走完——幾秒前才分的件多半還在路上）
@@ -183,6 +187,18 @@ pub fn history_verdict(prior: &[PriorParcel], source: ChuteSource, reason: Optio
         .iter()
         .find(|p| p.completed_normally())
         .map(|p| HistoryAlert::ReEntry { prev_chute: p.chute_code.clone().unwrap_or_else(|| "?".into()), prev_started_ms: p.started_ms })
+}
+
+/// 這件要不要向中介機抓面單：分揀機有負責印單、而且目標格口接了印表機才要
+pub fn needs_label(printing_enabled: bool, chute: Option<&ChuteRow>) -> bool {
+    printing_enabled && chute.is_some_and(|r| r.printer_port.is_some())
+}
+
+/// 一般格口：代號是 L 或 R 加數字（L1…R5）；其他（LS、RS、NG…）是直通與異常口，
+/// 跟格口對照頁的分法一致
+pub fn is_regular_chute(code: &str) -> bool {
+    let mut chars = code.chars();
+    matches!(chars.next(), Some('L' | 'R')) && chars.next().is_some_and(|c| c.is_ascii_digit())
 }
 
 /// 原因代碼的現場說法（提示訊息與語音用；統計頁另有 i18n）
@@ -324,9 +340,11 @@ impl ChuteResolver {
             Err(e) => self.fallback(&default_code, e.to_string(), "MW_UNREACHABLE"),
         };
         // 面單先抓下來才算決定；抓不到就改走預設口、不回報、不印（對齊舊版）。
-        // 目標格口沒接印表機（L5／R5／直通口）就不需要面單，不抓、也不因圖片服務故障被拖去異常口
+        // 分揀機不負責印單（面單由中介機印），或目標格口沒接印表機（L5／R5／直通口）就不需要面單，
+        // 不抓、也不因圖片服務故障被拖去異常口
         let mut payload = None;
-        let has_printer = self.chutes.read().unwrap().get(&decision.code).is_some_and(|r| r.printer_port.is_some());
+        let printing = self.app.config.current().print.enabled;
+        let has_printer = needs_label(printing, self.chutes.read().unwrap().get(&decision.code));
         if !has_printer {
             decision.label = None;
         }
@@ -546,6 +564,39 @@ mod tests {
         assert_eq!(history_verdict(&[prior(4, "L2", None, 2000)], ChuteSource::Api, None), None);
         // 沒前科
         assert_eq!(history_verdict(&[], ChuteSource::Api, None), None);
+    }
+
+    #[test]
+    fn 上次落在直通或異常口的再進線是正常重投_不提示() {
+        // 10/2～10/8 共 807 次「已完成又進線」，254 次上次落在 LS（物流沒指派格口的件，撿出重投是常態）
+        assert_eq!(history_verdict(&[prior(3, "LS", None, 1000)], ChuteSource::Api, None), None);
+        assert_eq!(history_verdict(&[prior(3, "RS", None, 1000)], ChuteSource::Api, None), None);
+        assert_eq!(history_verdict(&[prior(3, "NG", None, 1000)], ChuteSource::Api, None), None);
+        // 更早之前落在一般格口的照樣提示
+        assert_eq!(
+            history_verdict(&[prior(3, "LS", None, 2000), prior(3, "R4", None, 1000)], ChuteSource::Api, None),
+            Some(HistoryAlert::ReEntry { prev_chute: "R4".into(), prev_started_ms: 1000 })
+        );
+    }
+
+    #[test]
+    fn 分揀機不負責印單時_有接印表機的格口也不抓面單() {
+        let with_printer = ChuteRow { code: "L1".into(), cid: Cid(1000323), printer_port: Some("1-8.1".into()), enabled: true, label: "左1".into(), sort_order: 1 };
+        let without = ChuteRow { printer_port: None, ..with_printer.clone() };
+        assert!(needs_label(true, Some(&with_printer)));
+        assert!(!needs_label(false, Some(&with_printer)), "面單由中介機印：不抓、也不會因抓不到被送去異常口");
+        assert!(!needs_label(true, Some(&without)));
+        assert!(!needs_label(true, None));
+    }
+
+    #[test]
+    fn 一般格口與直通異常口的分法跟格口對照頁一致() {
+        for c in ["L1", "L5", "R1", "R10"] {
+            assert!(is_regular_chute(c), "{c}");
+        }
+        for c in ["LS", "RS", "NG", "L", "", "X1"] {
+            assert!(!is_regular_chute(c), "{c}");
+        }
     }
 
     #[test]

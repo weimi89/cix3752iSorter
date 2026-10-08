@@ -242,6 +242,9 @@ pub struct NgConfig {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct PrintConfig {
+    /// 分揀機自己印面單（貼標機接在工控機 USB）。關閉時面單一律由中介機處理：
+    /// 查格口不抓面單、不送印，就算格口對照還留著印表機埠位也不印
+    pub enabled: bool,
     pub dpi: u32,
     /// 送印延遲 = (格口號 - 1) * 此值
     pub per_chute_delay_ms: u64,
@@ -449,7 +452,7 @@ impl Default for PrintConfig {
             "PAPER-01#100*150".into(),
             PrintProfile { cmd: "DIRECTION 1\r\nSPEED 6\r\nDENSITY 11".into(), ..Default::default() },
         );
-        Self { dpi: 203, per_chute_delay_ms: 400, profiles }
+        Self { enabled: false, dpi: 203, per_chute_delay_ms: 400, profiles }
     }
 }
 

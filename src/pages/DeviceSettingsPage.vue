@@ -111,6 +111,8 @@ const save = async () => {
   try {
     await api.saveConfig(cfg.value)
     saved.value = JSON.stringify(cfg.value)
+    // 印單開關會改變選單與其他頁面顯示的項目，存完立刻更新
+    status.refresh()
     toast(t('common.saved'), { type: 'success' })
   } catch (e) {
     toast(e.message, { type: 'error' })
@@ -213,7 +215,7 @@ onBeforeUnmount(() => window.removeEventListener('beforeunload', beforeUnload))
           <VRow density="compact">
             <VCol cols="12" md="4"><VLabel class="mb-1 text-body-medium">{{ $t('page.settings.mw.baseUrl') }}</VLabel><VTextField v-model="cfg.middleware.base_url" :error-messages="urlError(cfg.middleware.base_url)" placeholder="http://192.168.0.37:18080/" /></VCol>
             <VCol cols="6" md="2"><VLabel class="mb-1 text-body-medium">{{ $t('page.settings.mw.parcelTimeout') }}（ms）</VLabel><VNumberInput v-model="cfg.middleware.parcel_timeout_ms" :min="200" :max="5000" :step="50" /></VCol>
-            <VCol cols="6" md="2"><VLabel class="mb-1 text-body-medium">{{ $t('page.settings.mw.labelTimeout') }}（ms）</VLabel><VNumberInput v-model="cfg.middleware.label_timeout_ms" :min="200" :max="10000" :step="50" /></VCol>
+            <VCol v-if="cfg.print.enabled" cols="6" md="2"><VLabel class="mb-1 text-body-medium">{{ $t('page.settings.mw.labelTimeout') }}（ms）</VLabel><VNumberInput v-model="cfg.middleware.label_timeout_ms" :min="200" :max="10000" :step="50" /></VCol>
             <VCol cols="6" md="2"><VLabel class="mb-1 text-body-medium">{{ $t('page.settings.mw.reportTimeout') }}（ms）</VLabel><VNumberInput v-model="cfg.middleware.report_timeout_ms" :min="500" :max="30000" :step="500" /></VCol>
             <VCol cols="6" md="2"><VLabel class="mb-1 text-body-medium">{{ $t('page.settings.mw.jamThrottle') }}（ms）</VLabel><VNumberInput v-model="cfg.middleware.jam_alert_throttle_ms" :min="1000" :max="600000" :step="1000" /></VCol>
           </VRow>
@@ -405,10 +407,18 @@ onBeforeUnmount(() => window.removeEventListener('beforeunload', beforeUnload))
       <VCard id="sec-print" class="mb-4 card-shadow">
         <VCardTitle class="d-flex align-center justify-space-between px-4 py-3">
           <div class="d-flex align-center"><VIcon icon="tabler-printer" size="22" class="me-2" />{{ $t('page.settings.print.title') }}</div>
-          <VBtn variant="tonal" size="small" @click="addProfile"><VIcon icon="tabler-plus" size="16" class="me-1" />{{ $t('page.settings.print.addProfile') }}</VBtn>
+          <VBtn v-if="cfg.print.enabled" variant="tonal" size="small" @click="addProfile"><VIcon icon="tabler-plus" size="16" class="me-1" />{{ $t('page.settings.print.addProfile') }}</VBtn>
         </VCardTitle>
         <VDivider />
         <VCardText class="pt-4">
+          <div class="d-flex align-center ga-3" :class="{ 'mb-4': cfg.print.enabled }">
+            <div class="flex-grow-1">
+              <div class="text-body-medium font-weight-medium">{{ $t('page.settings.print.enabled') }}</div>
+              <div class="text-body-small text-medium-emphasis">{{ $t(cfg.print.enabled ? 'page.settings.print.enabledHint' : 'page.settings.print.disabledHint') }}</div>
+            </div>
+            <VSwitch v-model="cfg.print.enabled" color="primary" hide-details class="flex-shrink-0" />
+          </div>
+          <template v-if="cfg.print.enabled">
           <VRow density="compact" class="mb-2">
             <VCol cols="6" md="2"><VLabel class="mb-1 text-body-medium">DPI</VLabel><VNumberInput v-model="cfg.print.dpi" :min="72" :max="600" /></VCol>
             <VCol cols="6" md="3"><VLabel class="mb-1 text-body-medium">{{ $t('page.settings.print.delay') }}（ms）</VLabel><VNumberInput v-model="cfg.print.per_chute_delay_ms" :min="0" :max="10000" :step="100" /></VCol>
@@ -435,6 +445,7 @@ onBeforeUnmount(() => window.removeEventListener('beforeunload', beforeUnload))
             </VCol>
           </VRow>
           <div class="text-body-small text-medium-emphasis mt-3">{{ $t('page.settings.print.profileHint') }}</div>
+          </template>
         </VCardText>
       </VCard>
 

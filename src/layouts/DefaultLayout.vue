@@ -15,6 +15,7 @@ import { useI18n } from 'vue-i18n'
 const { layoutAttrs } = useSkins()
 const configStore = useLayoutConfigStore()
 const status = useStatusStore()
+const visibleNavItems = computed(() => navItems.filter(i => !i.printing || status.print.enabled))
 const { t } = useI18n()
 
 let unlistenAlert = null
@@ -45,7 +46,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <VerticalNavLayout :home-url="'/'" :nav-items="navItems" :vertical-nav-attrs="layoutAttrs.verticalNavAttrs">
+  <VerticalNavLayout :home-url="'/'" :nav-items="visibleNavItems" :vertical-nav-attrs="layoutAttrs.verticalNavAttrs">
     <template #vertical-nav-header>
       <RouterLink to="/" class="app-logo app-title-wrapper">
         <AppLogo />

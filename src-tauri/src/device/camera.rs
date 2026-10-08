@@ -80,13 +80,20 @@ fn is_blacklisted(code: &str) -> bool {
 }
 
 fn is_valid_qr(bc: &Barcode) -> bool {
-    bc.kind == "QRCode" && !bc.code.contains('^') && bc.len > 9
+    bc.kind == "QRCode" && !bc.code.contains('^') && bc.len > 9 && !is_url(&bc.code)
+}
+
+/// 網址不會是物流單號:紙箱、廣告貼紙上的 QR(拼多多、中通、WhatsApp…)常跟面單出現在同一幀,
+/// 比面單的碼更靠近畫面中央時會被當成單號,拿去查件一定查不到
+fn is_url(code: &str) -> bool {
+    let lower = code.trim().to_ascii_lowercase();
+    lower.contains("://") || lower.starts_with("www.")
 }
 
 /// 依優先序挑出物流單號（移植 `checkcode1`）：
 /// 1. 順豐 `SF` + 13 碼最優先
-/// 2. 合法 QRCode（無 `^` 且長度 >9）；同幀不只一個且知道畫面中心時，取離中心最近的（貼邊的是鄰件）
-/// 3. 一維碼：去掉長度 <9 與黑名單；同時有 16 碼與 9 碼 → 拼成 `9碼+16碼`（超商）；否則取最短的第一個
+/// 2. 合法 QRCode（無 `^`、長度 >9、不是網址）；同幀不只一個且知道畫面中心時，取離中心最近的（貼邊的是鄰件）
+/// 3. 一維碼：去掉長度 <9、黑名單與網址；同時有 16 碼與 9 碼 → 拼成 `9碼+16碼`（超商）；否則取最短的第一個
 /// 4. 都沒有 → `NoRead`
 ///
 /// `frame_center` 是畫面中心像素座標；None 或條碼沒座標時退回字典序（舊行為）
@@ -111,7 +118,7 @@ pub fn pick_barcode(mut codes: Vec<Barcode>, frame_center: Option<(f64, f64)>) -
     let mut c9 = None;
     let mut all = Vec::new();
     for bc in &codes {
-        if bc.kind == "QRCode" || bc.len < 9 || is_blacklisted(&bc.code) {
+        if bc.kind == "QRCode" || bc.len < 9 || is_blacklisted(&bc.code) || is_url(&bc.code) {
             continue;
         }
         if bc.len == 16 {
@@ -282,6 +289,17 @@ mod tests {
     }
 
     #[test]
+    fn 網址不當單號_挑同幀的面單碼() {
+        // 現場 10/8 讀碼站實際送來的一幀：面單 QR（620744687140）與紙箱上的 WhatsApp QR，網址比較靠近畫面中央
+        let frame = "620744687140;(1596,984)(1832,909)(1767,622)(1533,695);QRCode;https://wa.me/qr/M7MDL3I4R6O6I1;(2465,1671)(2577,1651)(2558,1537)(2447,1556);QRCode@";
+        assert_eq!(pick_barcode(parse_frame(frame), frame_center(5440, 3648)), "620744687140");
+        assert_eq!(pick_barcode(parse_frame(frame), None), "620744687140");
+        // 只讀到網址 → 讀碼失敗，不拿網址去查件
+        assert_eq!(pick_barcode(vec![bc("https://q.zto.com/c/idx?customChannel=xianxiawuliao", "QRCode")], None), NO_READ);
+        assert_eq!(pick_barcode(vec![bc("www.example.com/abc", "Code128")], None), NO_READ);
+    }
+
+    #[test]
     fn 幀拆解每三段一組() {
         let v = parse_frame("99K00064643;(1,2)(3,4)(5,6)(7,8);Code128;ABC;(0,0)(0,0)(0,0)(0,0);QRCode@");
         assert_eq!(v.len(), 2);
@@ -301,8 +319,11 @@ mod tests {
 
     #[test]
     fn 合法qr優先於一維() {
+        let code = pick_barcode(vec![bc("99K00064643", "Code128"), bc("620744687140", "QRCode")], None);
+        assert_eq!(code, "620744687140");
+        // 網址 QR 不算單號：同幀有一維碼就用一維碼
         let code = pick_barcode(vec![bc("99K00064643", "Code128"), bc("https://x.y/abc", "QRCode")], None);
-        assert_eq!(code, "https://x.y/abc");
+        assert_eq!(code, "99K00064643");
         // 含 ^ 的 QR 不算
         let code = pick_barcode(vec![bc("99K00064643", "Code128"), bc("a^b^c^d^e^f^g", "QRCode")], None);
         assert_eq!(code, "99K00064643");

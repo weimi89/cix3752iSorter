@@ -1,6 +1,7 @@
 import { createRouter, createWebHashHistory } from 'vue-router'
 import { isTauriRuntime } from '@/api/runtime'
 import { useWebAuth } from '@/composables/useWebAuth'
+import { useStatusStore } from '@/stores/status'
 
 // 頁面動態載入：現場手機走 Wi-Fi 開網頁，只載該頁需要的部分
 const routes = [
@@ -9,11 +10,11 @@ const routes = [
   { path: '/stats', name: 'stats', component: () => import('@/pages/StatsPage.vue'), meta: { title: 'nav.stats' } },
   { path: '/abnormal', name: 'abnormal', component: () => import('@/pages/AbnormalPage.vue'), meta: { title: 'nav.abnormal' } },
   { path: '/parcels', name: 'parcels', component: () => import('@/pages/ParcelsPage.vue'), meta: { title: 'nav.parcels' } },
-  { path: '/print-jobs', name: 'print-jobs', component: () => import('@/pages/PrintJobsPage.vue'), meta: { title: 'nav.printJobs' } },
+  { path: '/print-jobs', name: 'print-jobs', component: () => import('@/pages/PrintJobsPage.vue'), meta: { title: 'nav.printJobs', printing: true } },
   { path: '/report-queue', name: 'report-queue', component: () => import('@/pages/ReportQueuePage.vue'), meta: { title: 'nav.reportQueue' } },
   { path: '/event-log', name: 'event-log', component: () => import('@/pages/EventLogPage.vue'), meta: { title: 'nav.eventLog' } },
   { path: '/chutes', name: 'chutes', component: () => import('@/pages/ChutesPage.vue'), meta: { title: 'nav.chutes' } },
-  { path: '/printers', name: 'printers', component: () => import('@/pages/PrinterSettingsPage.vue'), meta: { title: 'nav.printers' } },
+  { path: '/printers', name: 'printers', component: () => import('@/pages/PrinterSettingsPage.vue'), meta: { title: 'nav.printers', printing: true } },
   { path: '/devices', name: 'devices', component: () => import('@/pages/DeviceSettingsPage.vue'), meta: { title: 'nav.devices' } },
   { path: '/ir', name: 'ir', component: () => import('@/pages/IrCheckPage.vue'), meta: { title: 'nav.ir' } },
   { path: '/switch-demo', name: 'switch-demo', component: () => import('@/pages/SwitchDemoPage.vue') },
@@ -41,6 +42,14 @@ router.beforeEach(async to => {
   if (await refresh()) return true
 
   return { name: 'login', query: to.fullPath === '/' ? {} : { redirect: to.fullPath } }
+})
+
+// 分揀機不負責印單時，印單相關頁面（列印工作、印表機）不開放，直接打網址也導回首頁
+router.beforeEach(async to => {
+  if (!to.meta.printing) return true
+  const status = useStatusStore()
+  if (!status.lastRefreshAt) await status.refresh()
+  return status.print.enabled ? true : { name: 'dashboard' }
 })
 
 export default router

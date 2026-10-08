@@ -2,6 +2,7 @@
 /** 格口對照：左右兩欄卡片（對齊 cix3752iLabelPrint「分揀通道」頁），其餘特殊口另成一區。 */
 import { useI18n } from 'vue-i18n'
 import { api } from '@/api/http'
+import { useStatusStore } from '@/stores/status'
 import AppHeader from '@/components/AppHeader.vue'
 import PageActions from '@/components/PageActions.vue'
 import { toast } from 'vue3-toastify'
@@ -13,14 +14,19 @@ const loading = ref(false)
 const saving = ref(false)
 const errorMsg = ref('')
 const dirty = ref(false)
+// 分揀機不負責印單時（面單由中介機印），印表機埠位用不到，不顯示也不查 USB
+const status = useStatusStore()
+const printing = computed(() => status.print.enabled)
 
 const load = async () => {
   loading.value = true
   errorMsg.value = ''
   try {
     list.value = await api.chutes()
-    const p = await api.printers()
-    printers.value = p.attached.map(a => a.port)
+    if (printing.value) {
+      const p = await api.printers()
+      printers.value = p.attached.map(a => a.port)
+    }
     dirty.value = false
   } catch (e) { errorMsg.value = e.message } finally { loading.value = false }
 }
@@ -69,7 +75,7 @@ onMounted(load)
       <template #actions><PageActions :items="actions" /></template>
     </AppHeader>
     <VAlert v-if="errorMsg" type="error" variant="tonal" class="mb-3">{{ errorMsg }}</VAlert>
-    <VAlert type="info" variant="tonal" class="mb-3" icon="tabler-info-circle">{{ $t('page.chutes.hint') }}</VAlert>
+    <VAlert type="info" variant="tonal" class="mb-3" icon="tabler-info-circle">{{ $t(printing ? 'page.chutes.hint' : 'page.chutes.hintNoPrinting') }}</VAlert>
 
     <VRow>
       <VCol v-for="col in [{ key: 'left', items: left, icon: 'tabler-arrow-narrow-left', cls: 'channel-card--left' }, { key: 'right', items: right, icon: 'tabler-arrow-narrow-right', cls: 'channel-card--right' }]" :key="col.key" cols="12" md="6">
@@ -95,7 +101,7 @@ onMounted(load)
               <VCol cols="6" md="3" class="px-1"><div class="search-field"><label>{{ $t('page.chutes.label') }}</label><VTextField v-model="c.label" density="compact" variant="outlined" hide-details @update:model-value="mark" /></div></VCol>
               <VCol cols="6" md="3" class="px-1"><div class="search-field"><label>CID</label><VNumberInput v-model="c.cid" :min="1000000" :max="1999999" :step="1" control-variant="hidden" density="compact" variant="outlined" hide-details @update:model-value="mark" /></div></VCol>
               <VCol cols="6" md="3" class="px-1"><div class="search-field"><label>{{ $t('page.chutes.order') }}</label><VNumberInput v-model="c.sort_order" :min="0" density="compact" variant="outlined" hide-details @update:model-value="mark" /></div></VCol>
-              <VCol cols="12" class="px-1"><div class="search-field"><label>{{ $t('page.chutes.printer') }}</label><VCombobox v-model="c.printer_port" :items="portItems" :placeholder="$t('page.chutes.noPrinter')" :error="printerMissing(c)" density="compact" variant="outlined" hide-details clearable @update:model-value="mark" />
+              <VCol v-if="printing" cols="12" class="px-1"><div class="search-field"><label>{{ $t('page.chutes.printer') }}</label><VCombobox v-model="c.printer_port" :items="portItems" :placeholder="$t('page.chutes.noPrinter')" :error="printerMissing(c)" density="compact" variant="outlined" hide-details clearable @update:model-value="mark" />
                 <div v-if="printerMissing(c)" class="text-body-small text-error mt-1 d-flex align-center"><VIcon icon="tabler-alert-triangle" size="13" class="me-1" />{{ $t('page.chutes.printerMissingHint') }}</div></div></VCol>
             </VRow>
             <div class="pause-row" :class="c.enabled ? 'pause-row--on' : 'pause-row--off'">
@@ -130,7 +136,7 @@ onMounted(load)
             <VCol cols="6" class="px-1"><div class="search-field"><label>{{ $t('page.chutes.label') }}</label><VTextField v-model="c.label" density="compact" variant="outlined" hide-details @update:model-value="mark" /></div></VCol>
             <VCol cols="6" class="px-1"><div class="search-field"><label>CID</label><VNumberInput v-model="c.cid" :min="1000000" :max="1999999" :step="1" control-variant="hidden" density="compact" variant="outlined" hide-details @update:model-value="mark" /></div></VCol>
             <VCol cols="6" class="px-1"><div class="search-field"><label>{{ $t('page.chutes.order') }}</label><VNumberInput v-model="c.sort_order" :min="0" density="compact" variant="outlined" hide-details @update:model-value="mark" /></div></VCol>
-            <VCol cols="12" class="px-1"><div class="search-field"><label>{{ $t('page.chutes.printer') }}</label><VCombobox v-model="c.printer_port" :items="portItems" :placeholder="$t('page.chutes.noPrinter')" density="compact" variant="outlined" hide-details clearable @update:model-value="mark" /></div></VCol>
+            <VCol v-if="printing" cols="12" class="px-1"><div class="search-field"><label>{{ $t('page.chutes.printer') }}</label><VCombobox v-model="c.printer_port" :items="portItems" :placeholder="$t('page.chutes.noPrinter')" density="compact" variant="outlined" hide-details clearable @update:model-value="mark" /></div></VCol>
           </VRow>
           <div class="pause-row" :class="c.enabled ? 'pause-row--on' : 'pause-row--off'">
             <VIcon :icon="c.enabled ? 'tabler-player-play' : 'tabler-player-pause'" size="20" :color="c.enabled ? 'success' : 'warning'" />

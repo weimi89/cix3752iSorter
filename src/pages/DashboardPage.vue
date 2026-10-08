@@ -177,9 +177,9 @@ const stats = computed(() => [
       <VCol cols="6" md="4" lg="2">
         <VCard class="card-shadow h-100 stat-card">
           <VCardItem>
-            <template #prepend><VAvatar :color="status.print.failed || status.report.failed ? 'error' : 'info'" variant="tonal"><VIcon icon="tabler-stack-2" /></VAvatar></template>
+            <template #prepend><VAvatar :color="(status.print.enabled && status.print.failed) || status.report.failed ? 'error' : 'info'" variant="tonal"><VIcon icon="tabler-stack-2" /></VAvatar></template>
             <VCardTitle class="d-flex ga-2 flex-wrap">
-              <VChip size="small" :color="status.print.failed ? 'error' : 'secondary'" variant="tonal" :to="{ name: 'print-jobs' }" label><VIcon icon="tabler-printer" size="14" start />{{ status.print.pending }} / {{ status.print.failed }}</VChip>
+              <VChip v-if="status.print.enabled" size="small" :color="status.print.failed ? 'error' : 'secondary'" variant="tonal" :to="{ name: 'print-jobs' }" label><VIcon icon="tabler-printer" size="14" start />{{ status.print.pending }} / {{ status.print.failed }}</VChip>
               <VChip size="small" :color="status.report.failed ? 'error' : 'secondary'" variant="tonal" :to="{ name: 'report-queue' }" label><VIcon icon="tabler-cloud-upload" size="14" start />{{ status.report.pending }} / {{ status.report.failed }}</VChip>
             </VCardTitle>
             <VCardSubtitle>{{ $t('page.dashboard.queues') }}</VCardSubtitle>
