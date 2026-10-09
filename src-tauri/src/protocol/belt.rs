@@ -25,8 +25,10 @@ pub fn parse_belt(raw: &str) -> Option<BeltSignal> {
     if line.len() < 2 || !line.starts_with('~') {
         return if line.is_empty() { None } else { Some(BeltSignal::Unknown(line.to_string())) };
     }
-    let kind = line.as_bytes()[1] as char;
-    let rest = &line[2..];
+    // 依字元取，不可用位元組位置切：雜訊換成的替代字元佔 3 個位元組，切在中間會恐慌
+    let mut chars = line[1..].chars();
+    let kind = chars.next().unwrap_or('\0');
+    let rest = chars.as_str();
     let nums = ints(rest);
 
     let sig = match (kind, nums.as_slice()) {
@@ -66,4 +68,13 @@ mod tests {
         assert_eq!(parse_belt("   "), None);
         assert_eq!(parse_belt("garbage"), Some(BeltSignal::Unknown("garbage".into())));
     }
+
+    #[test]
+    fn 波浪號後面是多位元組字元_歸入未知不恐慌() {
+        // 線路雜訊的壞位元組會被換成替代字元（3 位元組），正好落在第二個字元的位置
+        assert_eq!(parse_belt("~\u{FFFD}12 3"), Some(BeltSignal::Unknown("~\u{FFFD}12 3".into())));
+        assert_eq!(parse_belt("~é1 1"), Some(BeltSignal::Unknown("~é1 1".into())));
+        assert_eq!(parse_belt("~中"), Some(BeltSignal::Unknown("~中".into())));
+    }
+
 }

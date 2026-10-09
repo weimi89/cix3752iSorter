@@ -2,7 +2,7 @@
 import { useI18n } from 'vue-i18n'
 import { useStatusStore } from '@/stores/status'
 import { api } from '@/api/http'
-import { listen } from '@/api/events'
+import { useServerEvent } from '@/composables/useServerEvent'
 import { fmtMs, fmtTimeMs, fmtDuration, statusMeta, sourceMeta } from '@/composables/useFormat'
 import AppHeader from '@/components/AppHeader.vue'
 import PageActions from '@/components/PageActions.vue'
@@ -21,7 +21,6 @@ const messages = ref([])
 const hourly = ref([])
 const busy = ref(false)
 const now = ref(Date.now())
-let unlistenMsg = null
 let clock = null
 let hourlyTimer = null
 
@@ -77,20 +76,23 @@ const chartOption = computed(() => ({
   series: CHART_SERIES.map(s => ({ name: t(`page.dashboard.chart.${s.key}`), type: 'bar', stack: 'a', data: hourly.value.map(s.pick), itemStyle: { color: s.color } })),
 }))
 
+useServerEvent('system-message', ({ payload }) => {
+  messages.value.unshift(payload)
+  if (messages.value.length > 60) messages.value.length = 60
+})
+// 訂閱與定時器都在掛載當下建立（卸載時才清得掉）；最近訊息晚到時接在即時收到的後面
 onMounted(async () => {
-  try {
-    const d = await api.logs({ limit: 30 })
-    messages.value = d.list.map(l => ({ level: l.level, category: l.category, message: l.message, created_at: l.created_at }))
-  } catch (e) { console.warn(e) }
-  unlistenMsg = listen('system-message', ({ payload }) => {
-    messages.value.unshift(payload)
-    if (messages.value.length > 60) messages.value.length = 60
-  })
   clock = setInterval(() => { now.value = Date.now() }, 500)
   loadHourly()
   hourlyTimer = setInterval(loadHourly, 60_000)
+  try {
+    const d = await api.logs({ limit: 30 })
+    const oldest = messages.value.at(-1)?.created_at
+    const earlier = d.list.filter(l => !oldest || l.created_at < oldest).map(l => ({ level: l.level, category: l.category, message: l.message, created_at: l.created_at }))
+    messages.value = [...messages.value, ...earlier].slice(0, 60)
+  } catch (e) { console.warn(e) }
 })
-onBeforeUnmount(() => { unlistenMsg?.(); clearInterval(clock); clearInterval(hourlyTimer) })
+onBeforeUnmount(() => { clearInterval(clock); clearInterval(hourlyTimer) })
 
 const levelColor = { info: 'info', warn: 'warning', error: 'error' }
 // 皮帶線卡片直接顯示運轉／停止／堵塞細狀態（beltState 已含未連線），分揀機與讀碼站只有連線與否

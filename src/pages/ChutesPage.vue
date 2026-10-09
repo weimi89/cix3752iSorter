@@ -3,6 +3,7 @@
 import { useI18n } from 'vue-i18n'
 import { api } from '@/api/http'
 import { useStatusStore } from '@/stores/status'
+import { useUnsavedGuard } from '@/composables/useUnsavedGuard'
 import AppHeader from '@/components/AppHeader.vue'
 import PageActions from '@/components/PageActions.vue'
 import { toast } from 'vue3-toastify'
@@ -14,29 +15,49 @@ const loading = ref(false)
 const saving = ref(false)
 const errorMsg = ref('')
 const dirty = ref(false)
+// 每次修改加一：儲存途中又改了，存完就不能重新載入蓋掉那些修改
+let editSeq = 0
 // 分揀機不負責印單時（面單由中介機印），印表機埠位用不到，不顯示也不查 USB
 const status = useStatusStore()
 const printing = computed(() => status.print.enabled)
+// 真的查過接著哪些印表機才判斷「掉線」：沒查過就說掉線，等於每個格口都誤報
+const printersLoaded = ref(false)
+
+// 每列一個只在畫面上用的固定編號當 v-for 的 key：拿可編輯的代號當 key 的話，
+// 改代號時每打一個字整張卡片就重建一次，游標跟著不見。存檔時拿掉，不送給後端
+let uidSeq = 0
+const withUid = c => ({ ...c, _uid: ++uidSeq })
 
 const load = async () => {
   loading.value = true
   errorMsg.value = ''
+  const seqAtLoad = editSeq
   try {
-    list.value = await api.chutes()
-    if (printing.value) {
-      const p = await api.printers()
-      printers.value = p.attached.map(a => a.port)
+    const rows = await api.chutes()
+    // 等回應期間又改了（例如存檔後的那次重新載入）：保留畫面上的修改、維持「未儲存」，不拿伺服器的舊內容蓋掉
+    if (editSeq === seqAtLoad) {
+      list.value = rows.map(withUid)
+      dirty.value = false
     }
-    dirty.value = false
   } catch (e) { errorMsg.value = e.message } finally { loading.value = false }
+  if (printing.value) loadPrinters()
 }
+const loadPrinters = async () => {
+  try {
+    const p = await api.printers()
+    printers.value = p.attached.map(a => a.port)
+    printersLoaded.value = true
+  } catch (e) { errorMsg.value = e.message }
+}
+// 直接開這頁時狀態可能還沒載入（列印開關先當成關），載入後才知道要不要查印表機
+watch(printing, v => { if (v && !printersLoaded.value) loadPrinters() })
 
 const portItems = computed(() => {
   const set = new Set(printers.value)
   for (const c of list.value) if (c.printer_port) set.add(c.printer_port)
   return [...set].sort()
 })
-const printerMissing = c => !!c.printer_port && !printers.value.includes(c.printer_port)
+const printerMissing = c => printing.value && printersLoaded.value && !!c.printer_port && !printers.value.includes(c.printer_port)
 
 const side = c => /^L\d/.test(c.code) ? 'left' : /^R\d/.test(c.code) ? 'right' : 'other'
 const numOf = c => Number((c.code.match(/\d+/) || [0])[0])
@@ -45,16 +66,18 @@ const left = computed(() => sorted('left'))
 const right = computed(() => sorted('right'))
 const other = computed(() => sorted('other'))
 
-const add = () => { list.value.push({ code: '', label: '', cid: 1000323, printer_port: null, enabled: true, sort_order: (list.value.at(-1)?.sort_order || 0) + 1 }); dirty.value = true }
-const remove = c => { list.value.splice(list.value.indexOf(c), 1); dirty.value = true }
-const mark = () => { dirty.value = true }
+const mark = () => { dirty.value = true; editSeq++ }
+const add = () => { list.value.push(withUid({ code: '', label: '', cid: 1000323, printer_port: null, enabled: true, sort_order: (list.value.at(-1)?.sort_order || 0) + 1 })); mark() }
+const remove = c => { list.value.splice(list.value.indexOf(c), 1); mark() }
 
 const save = async () => {
   saving.value = true
+  const seqAtSave = editSeq
   try {
-    await api.saveChutes(list.value.map(c => ({ ...c, cid: Number(c.cid), sort_order: Number(c.sort_order) })))
+    await api.saveChutes(list.value.map(({ _uid, ...c }) => ({ ...c, cid: Number(c.cid), sort_order: Number(c.sort_order) })))
     toast(t('common.saved'), { type: 'success' })
-    load()
+    // 儲存途中又改了：保留畫面上的修改、維持「未儲存」，不重新載入
+    if (editSeq === seqAtSave) load()
   } catch (e) {
     toast(e.message, { type: 'error' })
   } finally { saving.value = false }
@@ -66,6 +89,7 @@ const actions = computed(() => [
   { key: 'save', label: t('common.save'), icon: 'tabler-device-floppy', loading: saving.value, disabled: !dirty.value, onClick: save },
 ])
 
+useUnsavedGuard(dirty)
 onMounted(load)
 </script>
 
@@ -84,7 +108,7 @@ onMounted(load)
           <span>{{ $t(`page.chutes.${col.key}Column`) }}</span>
         </div>
         <div class="d-flex flex-column ga-4">
-          <div v-for="c in col.items" :key="c.code || c.sort_order" class="channel-card" :class="[col.cls, { 'channel-card--paused': !c.enabled }]">
+          <div v-for="c in col.items" :key="c._uid" class="channel-card" :class="[col.cls, { 'channel-card--paused': !c.enabled }]">
             <div class="channel-card__head">
               <VIcon class="channel-card__icon" :icon="col.icon" size="18" :color="col.key === 'left' ? 'primary' : 'warning'" />
               <span class="channel-card__title">{{ c.code || '—' }}</span>
@@ -119,7 +143,7 @@ onMounted(load)
       <span>{{ $t('page.chutes.otherColumn') }}</span>
     </div>
     <VRow>
-      <VCol v-for="c in other" :key="c.code || c.sort_order" cols="12" md="4">
+      <VCol v-for="c in other" :key="c._uid" cols="12" md="4">
         <div class="channel-card" :class="{ 'channel-card--paused': !c.enabled }">
           <div class="channel-card__head">
             <VIcon class="channel-card__icon" icon="tabler-arrows-split-2" size="18" color="secondary" />

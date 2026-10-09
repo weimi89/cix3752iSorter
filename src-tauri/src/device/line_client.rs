@@ -11,7 +11,7 @@
 
 use std::time::Duration;
 
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
@@ -109,7 +109,7 @@ pub fn spawn(
     let (ev_tx, ev_rx) = mpsc::channel::<LineEvent>(1024);
     let (conn_tx, conn_rx) = watch::channel(false);
 
-    tokio::spawn(run(name, addr_rx, opts, cancel, cmd_rx, ev_tx, conn_tx));
+    crate::supervise::spawn(format!("{name} 連線"), run(name, addr_rx, opts, cancel, cmd_rx, ev_tx, conn_tx));
 
     (LineClient { name, cmd_tx, connected: conn_rx }, ev_rx)
 }
@@ -128,6 +128,12 @@ async fn run(
 
     loop {
         if cancel.is_cancelled() {
+            break;
+        }
+        // 解析端 task 已經不在（例如恐慌）：再連上也只是讀到第一行就斷，
+        // 而每次連上都會送初始化指令（皮帶「停止＋重置」、分揀機重置）——寧可停在未連線讓畫面看得到
+        if ev_tx.is_closed() {
+            tracing::error!(device = name, "訊號接收端已關閉，停止連線、不再重連");
             break;
         }
         let addr = addr_rx.borrow_and_update().clone();
@@ -212,6 +218,95 @@ fn configure_socket(stream: &TcpStream, opts: &LineOpts) -> std::io::Result<()> 
     sock.set_tcp_keepalive(&ka)
 }
 
+/// 一行訊號的上限：實際訊號不到 120 位元組，超過這個長度一定是線路雜訊或裝置異常
+const MAX_LINE_BYTES: usize = 4096;
+
+/// 寫一條指令的上限
+const WRITE_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// 寫一條指令（自動補 `;\n`）。對方不收資料（TCP 視窗塞滿）時 `write_all` 會永遠等下去，
+/// 而收發同在一個迴圈：不設上限，讀取也跟著停、斷線永遠判不出來
+async fn write_frame<W: tokio::io::AsyncWrite + Unpin>(wr: &mut W, cmd: &str, timeout: Duration) -> Result<(), String> {
+    match tokio::time::timeout(timeout, wr.write_all(frame(cmd).as_bytes())).await {
+        Ok(r) => r.map_err(|e| e.to_string()),
+        Err(_) => Err(format!("{timeout:?} 內寫不出去（逾時）")),
+    }
+}
+
+/// 讀到的一段資料
+#[derive(Debug, PartialEq)]
+enum Chunk {
+    Line(String),
+    /// 超過 `MAX_LINE_BYTES` 還沒換行，整段丟掉；帶丟掉的位元組數
+    TooLong(usize),
+}
+
+/// 逐行切割。不用 `Lines::next_line` 的原因：它遇到不合法 UTF-8 回錯誤（整條連線被當斷線，
+/// 重連時分揀機會被重置），也不限行長（沒有換行的雜訊會一直吃記憶體）。
+/// 唯一的 await 是 `fill_buf`（取消安全），讀到一半的行留在 `buf`，放進 `select!` 不會掉資料
+struct LineReader<R> {
+    inner: BufReader<R>,
+    buf: Vec<u8>,
+    /// 正在丟棄一段超長資料，直到下一個換行
+    discarding: bool,
+    dropped: usize,
+}
+
+impl<R: AsyncRead + Unpin> LineReader<R> {
+    fn new(rd: R) -> Self {
+        Self { inner: BufReader::new(rd), buf: Vec::new(), discarding: false, dropped: 0 }
+    }
+
+    /// `Ok(None)` = 對方關閉連線
+    async fn next(&mut self) -> std::io::Result<Option<Chunk>> {
+        loop {
+            let avail = self.inner.fill_buf().await?;
+            if avail.is_empty() {
+                if self.discarding || self.buf.is_empty() {
+                    return Ok(None);
+                }
+                let line = String::from_utf8_lossy(&self.buf).into_owned();
+                self.buf.clear();
+                return Ok(Some(Chunk::Line(line)));
+            }
+            match avail.iter().position(|&b| b == b'\n') {
+                Some(pos) => {
+                    let chunk = if self.discarding {
+                        let n = self.dropped + pos;
+                        self.discarding = false;
+                        self.dropped = 0;
+                        Chunk::TooLong(n)
+                    } else if self.buf.len() + pos > MAX_LINE_BYTES {
+                        let n = self.buf.len() + pos;
+                        self.buf.clear();
+                        Chunk::TooLong(n)
+                    } else {
+                        self.buf.extend_from_slice(&avail[..pos]);
+                        let line = String::from_utf8_lossy(&self.buf).into_owned();
+                        self.buf.clear();
+                        Chunk::Line(line)
+                    };
+                    self.inner.consume(pos + 1);
+                    return Ok(Some(chunk));
+                }
+                None => {
+                    let n = avail.len();
+                    if self.discarding {
+                        self.dropped += n;
+                    } else if self.buf.len() + n > MAX_LINE_BYTES {
+                        self.dropped = self.buf.len() + n;
+                        self.buf.clear();
+                        self.discarding = true;
+                    } else {
+                        self.buf.extend_from_slice(avail);
+                    }
+                    self.inner.consume(n);
+                }
+            }
+        }
+    }
+}
+
 /// 單一條連線的收發迴圈；回傳結束原因。
 async fn serve_connection(
     name: &'static str,
@@ -223,16 +318,15 @@ async fn serve_connection(
     addr_rx: &mut watch::Receiver<String>,
 ) -> String {
     let (rd, mut wr) = stream.into_split();
-    // 讀取必須用 cancel-safe 的 `Lines::next_line`：select! 被寫指令分支搶先時，
-    // 讀到一半的行留在內部緩衝、下一輪接著讀。若改用 `read_line`，送 Kn 那一刻剛好
-    // 抵達的 ~c 會整行遺失，接著就是一連串誤判的「收不到 ~c」停線與取消。
-    let mut lines = BufReader::new(rd).lines();
+    // 讀取必須取消安全：select! 被寫指令分支搶先時，讀到一半的行要留到下一輪接著讀。
+    // 若改用 `read_line`，送 Kn 那一刻剛好抵達的 ~c 會整行遺失，接著就是一連串誤判的「收不到 ~c」停線與取消。
+    let mut lines = LineReader::new(rd);
 
     let init_cmds = opts.on_connect.borrow().clone();
     for cmd in &init_cmds {
         tracing::info!(device = name, %cmd, "連線初始化指令");
         signal_log::record(name, Dir::Out, cmd);
-        if let Err(e) = wr.write_all(frame(cmd).as_bytes()).await {
+        if let Err(e) = write_frame(&mut wr, cmd, WRITE_TIMEOUT).await {
             return format!("初始化指令寫入失敗: {e}");
         }
     }
@@ -251,15 +345,21 @@ async fn serve_connection(
                 let Some((after, cmd)) = opts.idle_probe.as_ref() else { continue };
                 tracing::debug!(device = name, %cmd, "閒置探詢");
                 signal_log::record(name, Dir::Out, cmd);
-                if let Err(e) = wr.write_all(frame(cmd).as_bytes()).await {
+                if let Err(e) = write_frame(&mut wr, cmd, WRITE_TIMEOUT).await {
                     return format!("閒置探詢寫入失敗: {e}");
                 }
                 next_probe = Some(probe_at + *after);
             }
-            r = tokio::time::timeout_at(last_rx + idle, lines.next_line()) => match r {
+            r = tokio::time::timeout_at(last_rx + idle, lines.next()) => match r {
                 Err(_) => return format!("{idle:?} 內無任何資料（讀逾時）"),
                 Ok(Ok(None)) => return "對方關閉連線".into(),
-                Ok(Ok(Some(line))) => {
+                Ok(Ok(Some(Chunk::TooLong(n)))) => {
+                    last_rx = tokio::time::Instant::now();
+                    next_probe = opts.idle_probe.as_ref().map(|(after, _)| last_rx + *after);
+                    tracing::warn!(device = name, bytes = n, "收到超長且沒有換行的資料，已丟棄");
+                    signal_log::record(name, Dir::Info, &format!("dropped {n} bytes without newline"));
+                }
+                Ok(Ok(Some(Chunk::Line(line)))) => {
                     last_rx = tokio::time::Instant::now();
                     next_probe = opts.idle_probe.as_ref().map(|(after, _)| last_rx + *after);
                     let ts_ms = crate::db::now_ms();
@@ -278,7 +378,7 @@ async fn serve_connection(
                 Some(cmd) => {
                     tracing::debug!(device = name, %cmd, "送出");
                     signal_log::record(name, Dir::Out, &cmd);
-                    if let Err(e) = wr.write_all(frame(&cmd).as_bytes()).await {
+                    if let Err(e) = write_frame(&mut wr, &cmd, WRITE_TIMEOUT).await {
                         return format!("寫入失敗: {e}");
                     }
                 }
@@ -374,6 +474,151 @@ mod tests {
             other => panic!("{other:?}"),
         }
         cancel.cancel();
+    }
+}
+
+#[cfg(test)]
+mod framing_tests {
+    use super::*;
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::TcpListener;
+
+    async fn connect_pair() -> (tokio::net::TcpStream, mpsc::Receiver<LineEvent>, CancellationToken, (watch::Sender<String>, LineClient)) {
+        let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let (addr_tx, addr_rx) = watch::channel(l.local_addr().unwrap().to_string());
+        let cancel = CancellationToken::new();
+        let opts = LineOpts { reconnect_min: Duration::from_millis(20), reconnect_max: Duration::from_millis(20), ..Default::default() };
+        let (client, mut events) = spawn("framing", addr_rx, opts, cancel.clone());
+        let (s, _) = l.accept().await.unwrap();
+        assert!(matches!(events.recv().await.unwrap(), LineEvent::Connected { .. }));
+        (s, events, cancel, (addr_tx, client))
+    }
+
+    async fn next(events: &mut mpsc::Receiver<LineEvent>) -> LineEvent {
+        tokio::time::timeout(Duration::from_secs(2), events.recv()).await.expect("應在 2 秒內收到事件").unwrap()
+    }
+
+    #[tokio::test]
+    async fn 線路雜訊的不合法位元組_不斷線_該行照轉出_前後行不受影響() {
+        let (mut s, mut events, cancel, _a) = connect_pair().await;
+        s.write_all(b"~P1 1\n\xff\xfe~X\n~L1 25 111\n").await.unwrap();
+        let mut texts = Vec::new();
+        for _ in 0..3 {
+            match next(&mut events).await {
+                LineEvent::Line { text, .. } => texts.push(text),
+                other => panic!("不該斷線：{other:?}，已收 {texts:?}"),
+            }
+        }
+        assert_eq!(texts[0], "~P1 1");
+        assert!(texts[1].ends_with("~X"), "壞位元組換成替代字元，其餘照轉：{:?}", texts[1]);
+        assert_eq!(texts[2], "~L1 25 111");
+        cancel.cancel();
+    }
+
+    #[tokio::test]
+    async fn 沒有換行的超長資料_丟棄後照收下一行_不斷線也不無限吃記憶體() {
+        let (mut s, mut events, cancel, _a) = connect_pair().await;
+        let junk = vec![b'A'; MAX_LINE_BYTES * 3];
+        s.write_all(&junk).await.unwrap();
+        s.write_all(b"\n~P2 1\n").await.unwrap();
+        match next(&mut events).await {
+            LineEvent::Line { text, .. } => assert!(text == "~P2 1", "超長那段要整段丟掉，不能當成一行訊號轉出（收到 {} 位元組）", text.len()),
+            other => panic!("不該斷線：{other:?}"),
+        }
+        cancel.cancel();
+    }
+
+    async fn chunks(input: &[u8]) -> Vec<Chunk> {
+        let mut r = LineReader::new(input);
+        let mut out = Vec::new();
+        while let Some(c) = r.next().await.unwrap() {
+            out.push(c);
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn 行長邊界_剛好上限照收_多一個位元組整段丟棄_之後照常() {
+        let mut input = vec![b'A'; MAX_LINE_BYTES];
+        input.push(b'\n');
+        input.extend(vec![b'B'; MAX_LINE_BYTES + 1]);
+        input.extend_from_slice(b"\n~P3 1\n");
+        let got = chunks(&input).await;
+        assert_eq!(got.len(), 3, "{:?}", got.iter().map(|c| match c { Chunk::Line(l) => l.len(), Chunk::TooLong(n) => *n }).collect::<Vec<_>>());
+        assert_eq!(got[0], Chunk::Line("A".repeat(MAX_LINE_BYTES)));
+        assert_eq!(got[1], Chunk::TooLong(MAX_LINE_BYTES + 1));
+        assert_eq!(got[2], Chunk::Line("~P3 1".into()));
+    }
+
+    #[tokio::test]
+    async fn 連線結束時沒有換行的最後半行照轉出_丟棄中的超長段不轉出() {
+        assert_eq!(chunks(b"~P1 1\n~E1 1").await, vec![Chunk::Line("~P1 1".into()), Chunk::Line("~E1 1".into())]);
+        let mut junk = vec![b'Z'; MAX_LINE_BYTES * 2];
+        junk.splice(0..0, b"~P1 1\n".iter().copied());
+        assert_eq!(chunks(&junk).await, vec![Chunk::Line("~P1 1".into())]);
+    }
+
+    #[tokio::test]
+    async fn 一行分兩段到達_中間插入送指令_不掉資料() {
+        let (mut s, mut events, cancel, (_a, client)) = connect_pair().await;
+        s.write_all(b"~c2 2 4").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(client.send("Kn 101 01 03 100 23 1"), "送指令讓 select! 先走寫入分支");
+        let mut got = [0u8; 64];
+        let n = tokio::io::AsyncReadExt::read(&mut s, &mut got).await.unwrap();
+        assert_eq!(&got[..n], b"Kn 101 01 03 100 23 1;\n");
+        s.write_all(b"10 1\n").await.unwrap();
+        match next(&mut events).await {
+            LineEvent::Line { text, .. } => assert_eq!(text, "~c2 2 410 1", "前半段要留著接上後半段"),
+            other => panic!("{other:?}"),
+        }
+        cancel.cancel();
+    }
+
+    #[tokio::test]
+    async fn 事件接收端已不在時_不再重連_不會一再送初始化指令() {
+        let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let (_addr_tx, addr_rx) = watch::channel(l.local_addr().unwrap().to_string());
+        let cancel = CancellationToken::new();
+        let opts = LineOpts {
+            on_connect: fixed_on_connect(vec!["KM998 1".into(), "KM999".into()]),
+            reconnect_min: Duration::from_millis(20),
+            reconnect_max: Duration::from_millis(20),
+            ..Default::default()
+        };
+        let (_client, events) = spawn("orphan", addr_rx, opts, cancel.clone());
+        let (mut s, _) = l.accept().await.unwrap();
+        // 解析端 task 死掉（例如恐慌）：接收端被丟掉
+        drop(events);
+        s.write_all(b"~P1 1\n").await.unwrap();
+        let again = tokio::time::timeout(Duration::from_millis(600), l.accept()).await;
+        assert!(again.is_err(), "接收端已不在還重連：每次重連都會再送一次停止＋重置");
+        cancel.cancel();
+    }
+
+    /// 永遠寫不進去的對端（裝置不收資料、TCP 視窗塞滿）
+    struct StuckWriter;
+    impl tokio::io::AsyncWrite for StuckWriter {
+        fn poll_write(self: std::pin::Pin<&mut Self>, _: &mut std::task::Context<'_>, _: &[u8]) -> std::task::Poll<std::io::Result<usize>> {
+            std::task::Poll::Pending
+        }
+        fn poll_flush(self: std::pin::Pin<&mut Self>, _: &mut std::task::Context<'_>) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Pending
+        }
+        fn poll_shutdown(self: std::pin::Pin<&mut Self>, _: &mut std::task::Context<'_>) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Pending
+        }
+    }
+
+    #[tokio::test]
+    async fn 對端不收資料時寫入會逾時_不會讓收發迴圈永久卡住() {
+        let mut w = StuckWriter;
+        let r = tokio::time::timeout(Duration::from_secs(2), write_frame(&mut w, "Kn 101 01 03 100 23 1", Duration::from_millis(200))).await;
+        match r {
+            Ok(Err(e)) => assert!(e.contains("逾時"), "{e}"),
+            Ok(Ok(())) => panic!("不可能寫成功"),
+            Err(_) => panic!("寫入沒有逾時：2 秒後仍卡著"),
+        }
     }
 }
 

@@ -1,7 +1,7 @@
 <script setup>
 import { useI18n } from 'vue-i18n'
 import { api } from '@/api/http'
-import { listen } from '@/api/events'
+import { useServerEvent } from '@/composables/useServerEvent'
 import { fmtDuration, statusMeta, sourceMeta, STATUS, SOURCE } from '@/composables/useFormat'
 import AppHeader from '@/components/AppHeader.vue'
 import PageActions from '@/components/PageActions.vue'
@@ -11,38 +11,24 @@ import ParcelImageViewer from '@/components/ParcelImageViewer.vue'
 import AppDatePicker from '@/components/AppDatePicker.vue'
 import MultiNoField from '@/components/MultiNoField.vue'
 import { toast } from 'vue3-toastify'
+import { usePagedList } from '@/composables/usePagedList'
 
 const { t } = useI18n()
 // 日期用日曆選；送後端時起日 00:00、迄日 23:59:59.999（整天）
 const filters = reactive({ startDate: '', endDate: '', barcode: '', chute: '', status: null, source: null })
 const startAt = () => filters.startDate ? `${filters.startDate} 00:00:00` : ''
 const endAt = () => filters.endDate ? `${filters.endDate} 23:59:59.999` : ''
-const page = ref(1)
-const pageSize = ref(25)
-const total = ref(0)
-const list = ref([])
-const loading = ref(false)
-const errorMsg = ref('')
 const detailId = ref(null)
 const detailOpen = ref(false)
 const chutes = ref([])
 const searchOpen = ref(0)
 
-const params = () => ({
+const filterParams = () => ({
   start: startAt(), end: endAt(), barcode: filters.barcode, chute: filters.chute,
-  status: filters.status, source: filters.source, page: page.value, limit: pageSize.value,
+  status: filters.status, source: filters.source,
 })
-
-const load = async () => {
-  loading.value = true
-  errorMsg.value = ''
-  try {
-    const d = await api.parcels(params())
-    total.value = d.total
-    list.value = d.list
-  } catch (e) { errorMsg.value = e.message } finally { loading.value = false }
-}
-const search = () => { page.value = 1; load() }
+const { page, pageSize, total, list, loading, errorMsg, load, search, refreshSoon } = usePagedList(p => api.parcels({ ...filterParams(), ...p }))
+const params = () => ({ ...filterParams(), page: page.value, limit: pageSize.value })
 const resetSearch = () => { Object.assign(filters, { startDate: '', endDate: '', barcode: '', chute: '', status: null, source: null }); search() }
 const open = id => { detailId.value = id; detailOpen.value = true }
 // 照片按鈕直接放大，不經包裹詳情
@@ -60,21 +46,15 @@ const actions = computed(() => [
   { key: 'reload', label: t('common.reload'), icon: 'tabler-refresh', loading: loading.value, onClick: load },
 ])
 
-watch(pageSize, () => { page.value = 1; load() })
-watch(page, load)
-
-let unlisten = null
-onMounted(async () => {
-  try { chutes.value = (await api.chutes()).map(c => c.code) } catch {}
-  load()
-  let timer = null
-  unlisten = listen('parcel-updated', ({ payload }) => {
-    if (page.value !== 1 || filters.barcode || !payload.ended_ms) return
-    clearTimeout(timer)
-    timer = setTimeout(load, 1500)
-  })
+useServerEvent('parcel-updated', ({ payload }) => {
+  if (page.value !== 1 || filters.barcode || !payload.ended_ms) return
+  refreshSoon(1500)
 })
-onBeforeUnmount(() => unlisten?.())
+// 格口清單只給篩選選單用，清單不用等它
+onMounted(async () => {
+  load()
+  try { chutes.value = (await api.chutes()).map(c => c.code) } catch {}
+})
 </script>
 
 <template>

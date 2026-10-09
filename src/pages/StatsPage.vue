@@ -4,6 +4,7 @@ import { useTheme } from 'vuetify'
 import { api } from '@/api/http'
 import { onConnection } from '@/api/events'
 import { fmtDate, fmtDuration, fmtTime, statusMeta, sourceMeta } from '@/composables/useFormat'
+import { useLatestRequest } from '@/composables/useLatestRequest'
 import AppHeader from '@/components/AppHeader.vue'
 import AppDatePicker from '@/components/AppDatePicker.vue'
 import PageActions from '@/components/PageActions.vue'
@@ -58,20 +59,28 @@ const lastLoadedAt = ref(null)
 // 自動更新不亮整頁的載入狀態，避免每 30 秒閃一次
 const AUTO_REFRESH_MS = 30_000
 const includesToday = computed(() => endDate.value >= dateOffset(0))
+// 改日期時上一筆可能還沒回來（自動更新、連點快選）：新的一律送出、只採用最後一次的結果。
+// 自動更新遇到還在載入就跳過，不疊加
+const latest = useLatestRequest()
 let inFlight = false
 const load = async (silent = false) => {
-  if (inFlight) return
+  if (silent && inFlight) return
+  const id = latest.start()
   inFlight = true
   if (!silent) loading.value = true
   errorMsg.value = ''
   try {
-    data.value = await api.statsOverview(startDate.value, endDate.value)
+    const d = await api.statsOverview(startDate.value, endDate.value)
+    if (!latest.isLatest(id)) return
+    data.value = d
     lastLoadedAt.value = Date.now()
   } catch (e) {
-    errorMsg.value = e.message
+    if (latest.isLatest(id)) errorMsg.value = e.message
   } finally {
-    loading.value = false
-    inFlight = false
+    if (latest.isLatest(id)) {
+      loading.value = false
+      inFlight = false
+    }
   }
 }
 const reload = () => load(false)
@@ -115,6 +124,8 @@ const actions = computed(() => [
 const partialNote = computed(() => {
   const d = data.value
   if (!d || !d.parcels_since || d.parcels_since <= d.from) return ''
+  // 保留天數 0＝不清理：明細晚於區間起點是因為那時還沒開始記錄，不能說成「只保留 0 天」
+  if (!d.retention_days) return t('page.stats.partialNoteNoPurge', { since: d.parcels_since })
   return t('page.stats.partialNote', { since: d.parcels_since, days: d.retention_days })
 })
 

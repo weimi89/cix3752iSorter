@@ -175,7 +175,7 @@ impl Dedup {
 
 pub fn spawn(cfg_rx: watch::Receiver<AppConfig>, out: mpsc::Sender<DeviceEvent>, cancel: CancellationToken) {
     let listen_rx = super::derive_addr(cfg_rx.clone(), |c| c.camera.listen.clone(), cancel.clone());
-    tokio::spawn(run(listen_rx, cfg_rx, out, cancel));
+    crate::supervise::spawn("讀碼站連線", run(listen_rx, cfg_rx, out, cancel));
 }
 
 async fn run(

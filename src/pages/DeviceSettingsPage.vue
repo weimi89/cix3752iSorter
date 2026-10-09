@@ -7,9 +7,9 @@
  * - 位址／網址格式即時檢查，錯誤時不送出
  */
 import { useI18n } from 'vue-i18n'
-import { onBeforeRouteLeave } from 'vue-router'
 import { api } from '@/api/http'
 import { useStatusStore } from '@/stores/status'
+import { useUnsavedGuard } from '@/composables/useUnsavedGuard'
 import AppHeader from '@/components/AppHeader.vue'
 import PageActions from '@/components/PageActions.vue'
 import { toast } from 'vue3-toastify'
@@ -108,9 +108,11 @@ const errors = computed(() => {
 const save = async () => {
   if (errors.value.length) { toast(errors.value[0], { type: 'error' }); return }
   saving.value = true
+  // 記下真正送出去的那一份：儲存途中又改了欄位，那些變更還沒存，不能一起標成已儲存
+  const sent = JSON.stringify(cfg.value)
   try {
-    await api.saveConfig(cfg.value)
-    saved.value = JSON.stringify(cfg.value)
+    await api.saveConfig(JSON.parse(sent))
+    saved.value = sent
     // 印單開關會改變選單與其他頁面顯示的項目，存完立刻更新
     status.refresh()
     toast(t('common.saved'), { type: 'success' })
@@ -154,10 +156,8 @@ const actions = computed(() => [
 ])
 
 const deviceChip = key => status.devices[key]?.connected
-onBeforeRouteLeave(() => { if (dirty.value && !confirm(t('page.settings.leaveConfirm'))) return false })
-const beforeUnload = e => { if (dirty.value) { e.preventDefault(); e.returnValue = '' } }
-onMounted(() => { load(); window.addEventListener('beforeunload', beforeUnload) })
-onBeforeUnmount(() => window.removeEventListener('beforeunload', beforeUnload))
+useUnsavedGuard(dirty)
+onMounted(load)
 </script>
 
 <template>

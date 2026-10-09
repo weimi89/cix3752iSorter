@@ -72,6 +72,17 @@ pub fn run(config: Option<PathBuf>, data_dir: Option<PathBuf>) {
             let desktop = Arc::new(Desktop { app: started.app.clone(), bind: started.bind.clone() });
             handle.manage(desktop);
 
+            // 關機、切換腳本 to-old、系統停服務送的是 SIGTERM，視窗框架不處理就直接結束程序；
+            // 轉成跟關視窗一樣的正常結束，下面 RunEvent::Exit 的收尾（等寫入佇列寫完）才跑得到
+            {
+                let h = handle.clone();
+                tauri::async_runtime::spawn(async move {
+                    app::wait_terminate().await;
+                    tracing::info!("收到結束訊號，照關視窗的流程結束");
+                    h.exit(0);
+                });
+            }
+
             // 工控機重開機、使用者登入後自動把程式帶起來（舊系統靠 supervisor 做這件事，桌面版靠這個）；
             // 每次啟動都登記一次，失敗只記錄——沒有它現場要記得自己去點圖示
             {
@@ -106,10 +117,19 @@ pub fn run(config: Option<PathBuf>, data_dir: Option<PathBuf>) {
         .invoke_handler(tauri::generate_handler![backend_base_url])
         .build(tauri::generate_context!())
         .expect("建立 Tauri 應用失敗")
-        .run(move |_handle, event| {
-            // 視窗關閉＝整個程式結束：先通知所有 task 收線，裝置連線才會乾淨關掉
+        .run(move |handle, event| {
+            // 視窗關閉、安裝更新後重啟＝整個程式結束：先通知所有 task 收線，裝置連線才會乾淨關掉；
+            // 這個回呼一返回程序就結束或重啟（`main` 之後的程式跑不到），寫入佇列裡的包裹與剛定格口的回報
+            // 要在這裡等它寫完，日誌也要在這裡落檔，否則最後這幾行（包括寫不完的告警）會留在緩衝裡
             if let tauri::RunEvent::Exit = event {
                 cancel_for_exit.cancel();
+                if let Some(d) = handle.try_state::<Arc<Desktop>>() {
+                    let tasks = d.app.tasks.clone();
+                    if !tauri::async_runtime::block_on(crate::supervise::drain(&tasks, crate::supervise::DRAIN_LIMIT)) {
+                        tracing::error!("結束時寫入佇列沒在時限內寫完，部分包裹狀態或回報可能遺失");
+                    }
+                }
+                crate::log::flush();
             }
         });
 }

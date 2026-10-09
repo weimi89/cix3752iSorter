@@ -36,7 +36,7 @@ pub fn images_dir(cfg: &CameraFtpConfig, data_dir: &Path) -> PathBuf {
 
 pub fn spawn(db: DbPool, data_dir: PathBuf, cfg_rx: watch::Receiver<AppConfig>, cancel: CancellationToken) {
     let ftp_rx = super::derive(cfg_rx, |c| c.camera_ftp.clone(), cancel.clone());
-    tokio::spawn(run(db, data_dir, ftp_rx, cancel));
+    crate::supervise::spawn("讀碼站照片 FTP", run(db, data_dir, ftp_rx, cancel));
 }
 
 async fn run(db: DbPool, data_dir: PathBuf, mut cfg_rx: watch::Receiver<CameraFtpConfig>, cancel: CancellationToken) {
@@ -409,7 +409,7 @@ async fn ingest(db: &DbPool, images_dir: &Path, cfg: &CameraFtpConfig, file_name
     let stem = file_name.rsplit_once('.').map(|(s, _)| s).unwrap_or(file_name);
     let evidence_name = unique_name(&day_dir, stem, "jpg").await;
     let evidence_path = day_dir.join(&evidence_name);
-    crate::fs_atomic::write_async(&evidence_path, &evidence).await?;
+    crate::fs_atomic::write_async(&evidence_path, &evidence, crate::fs_atomic::Durability::Unsynced).await?;
     let rel_path = format!("{day}/{evidence_name}");
 
     let parcel = match_parcel(db, cfg, file_name, received_ms).await?;
@@ -421,42 +421,55 @@ async fn ingest(db: &DbPool, images_dir: &Path, cfg: &CameraFtpConfig, file_name
         tokio::fs::create_dir_all(&orig_dir).await?;
         let ext = file_name.rsplit_once('.').map(|(_, e)| e).unwrap_or("jpg");
         let orig_name = unique_name(&orig_dir, stem, ext).await;
-        crate::fs_atomic::write_async(&orig_dir.join(&orig_name), &orig_bytes).await?;
+        crate::fs_atomic::write_async(&orig_dir.join(&orig_name), &orig_bytes, crate::fs_atomic::Durability::Unsynced).await?;
         orig_rel = Some(format!("{day}/orig/{orig_name}"));
     }
 
     let parcel_id = parcel.as_ref().map(|(id, _)| *id);
-    let image_id: i64 = sqlx::query_scalar(
-        "INSERT INTO parcel_images (parcel_id, file_name, rel_path, orig_path, size, orig_size, received_ms, received_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
-    )
-    .bind(parcel_id)
-    .bind(file_name)
-    .bind(&rel_path)
-    .bind(&orig_rel)
-    .bind(evidence.len() as i64)
-    .bind(orig_size)
-    .bind(received_ms)
-    .bind(crate::db::local_ts(received_ms))
-    .fetch_one(db)
-    .await?;
+    let (image_id, parcel_id) = insert_image(db, parcel_id, file_name, &rel_path, &orig_rel, evidence.len() as i64, orig_size, received_ms).await?;
 
-    match &parcel {
-        Some((id, barcode)) => {
-            sqlx::query("INSERT INTO parcel_events (parcel_id, ts_ms, source, kind, raw) VALUES (?, ?, 'camera', 'image', ?)")
-                .bind(id)
-                .bind(received_ms)
-                .bind(format!("{file_name} ({} KB)", evidence.len() / 1024))
-                .execute(db)
-                .await?;
-            tracing::debug!(file = %file_name, parcel = id, %barcode, "讀碼站照片已對到包裹");
+    match parcel_id {
+        Some(id) => {
+            image_event(db, id, received_ms, &format!("{file_name} ({} KB)", evidence.len() / 1024)).await?;
+            tracing::debug!(file = %file_name, parcel = id, "讀碼站照片已對到包裹");
         }
         None => {
-            // 對不到才記事件：正常一天幾千張，逐張記會淹掉事件記錄
-            event_log::log(db, Level::Warn, "camera", "image", format!("照片 {file_name} 對不到包裹（{} 秒內沒有剛綁條碼的件），已存檔", cfg.match_window_ms / 1000));
+            // 寫入端忙的時候綁碼事件會晚幾秒到：先存檔，稍後再對；兩次都對不到才記事件
+            // （正常一天幾千張，逐張記會淹掉事件記錄）
+            let (db, cfg, file_name) = (db.clone(), cfg.clone(), file_name.to_string());
+            tokio::spawn(async move {
+                for delay in REMATCH_AFTER {
+                    tokio::time::sleep(delay).await;
+                    match rematch(&db, &cfg, image_id, &file_name, received_ms).await {
+                        Ok(Some(pid)) => {
+                            tracing::info!(file = %file_name, parcel = pid, "讀碼站照片稍後補對上包裹");
+                            return;
+                        }
+                        Ok(None) => {}
+                        Err(e) => tracing::warn!(file = %file_name, "照片補對失敗: {e}"),
+                    }
+                }
+                event_log::log(&db, Level::Warn, "camera", "image", format!("照片 {file_name} 對不到包裹（{} 秒內沒有剛綁條碼的件），已存檔", cfg.match_window_ms / 1000));
+            });
         }
     }
     crate::event_bus::emit("parcel-image", serde_json::json!({ "image_id": image_id, "parcel_id": parcel_id, "file_name": file_name }));
+    Ok(())
+}
+
+/// 收到時對不到包裹的照片，隔這些時間再對一次：寫入停頓時綁碼事件會晚好幾秒到幾十秒才寫進來
+const REMATCH_AFTER: [Duration; 2] = [Duration::from_secs(5), Duration::from_secs(30)];
+
+/// 包裹時間軸上的「照片」事件
+async fn image_event(db: &DbPool, parcel_id: i64, received_ms: i64, raw: &str) -> Result<(), sqlx::Error> {
+    crate::db::retry_busy("照片事件", || {
+        sqlx::query("INSERT INTO parcel_events (parcel_id, ts_ms, source, kind, raw) VALUES (?, ?, 'camera', 'image', ?)")
+            .bind(parcel_id)
+            .bind(received_ms)
+            .bind(raw)
+            .execute(db)
+    })
+    .await?;
     Ok(())
 }
 
@@ -495,20 +508,47 @@ async fn unique_name(dir: &Path, stem: &str, ext: &str) -> String {
     name
 }
 
+/// 一件只配一張照片：比對與寫入之間別張可能已經綁上同一件（同時收到、或寫入停頓時好幾張排在寫鎖上），
+/// 所以綁定的條件要在寫入當下、寫鎖之內再看一次。這張被搶先就存成未對上，交給稍後補對找下一件。
+/// 回傳照片編號與實際綁上的包裹
+#[allow(clippy::too_many_arguments)]
+async fn insert_image(db: &DbPool, parcel_id: Option<i64>, file_name: &str, rel_path: &str, orig_rel: &Option<String>, size: i64, orig_size: i64, received_ms: i64) -> Result<(i64, Option<i64>), sqlx::Error> {
+    let received_at = crate::db::local_ts(received_ms);
+    crate::db::retry_busy("照片存檔", || {
+        sqlx::query_as(
+            "INSERT INTO parcel_images (parcel_id, file_name, rel_path, orig_path, size, orig_size, received_ms, received_at)
+             VALUES ((SELECT ?1 WHERE NOT EXISTS (SELECT 1 FROM parcel_images WHERE parcel_id = ?1)), ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             RETURNING id, parcel_id",
+        )
+        .bind(parcel_id)
+        .bind(file_name)
+        .bind(rel_path)
+        .bind(orig_rel)
+        .bind(size)
+        .bind(orig_size)
+        .bind(received_ms)
+        .bind(&received_at)
+        .fetch_one(db)
+    })
+    .await
+}
+
+/// 照片對包裹的候選查詢：每張照片都會跑，必須走綁碼事件的時間索引（`idx_parcel_events_bind_ts`）。
+/// `source`／`kind` 要寫成字面值，SQLite 才認得出能用那個部分索引
+const MATCH_SQL: &str = "SELECT p.id, p.barcode
+       FROM parcels p
+       JOIN parcel_events e ON e.parcel_id = p.id AND e.source = 'camera' AND e.kind = 'bind'
+      WHERE e.ts_ms BETWEEN ? AND ?
+        AND NOT EXISTS (SELECT 1 FROM parcel_images i WHERE i.parcel_id = p.id)
+      ORDER BY e.ts_ms ASC";
+
 /// 照片對回包裹：窗口內剛綁條碼、還沒有照片的件。檔名含其中某件的條碼就對那件；
 /// 否則取最早的那件（讀碼器照拍照順序上傳）。
 /// 只認有綁碼事件的件：讀碼器一次觸發同時拍照與送幀，沒送幀的件通常也沒照片，
 /// 把它列進候選會讓下一件的照片錯配給它、之後同窗口內每件都錯位一件——錯的證據比沒有更糟
 pub async fn match_parcel(db: &DbPool, cfg: &CameraFtpConfig, file_name: &str, received_ms: i64) -> Result<Option<(i64, String)>, sqlx::Error> {
     let since = received_ms - cfg.match_window_ms.max(0);
-    let candidates: Vec<(i64, String)> = sqlx::query_as(
-        "SELECT p.id, p.barcode
-           FROM parcels p
-           JOIN parcel_events e ON e.parcel_id = p.id AND e.source = 'camera' AND e.kind = 'bind'
-          WHERE e.ts_ms BETWEEN ? AND ?
-            AND NOT EXISTS (SELECT 1 FROM parcel_images i WHERE i.parcel_id = p.id)
-          ORDER BY e.ts_ms ASC",
-    )
+    let candidates: Vec<(i64, String)> = sqlx::query_as(MATCH_SQL)
     .bind(since)
     .bind(received_ms + 500)
     .fetch_all(db)
@@ -519,21 +559,64 @@ pub async fn match_parcel(db: &DbPool, cfg: &CameraFtpConfig, file_name: &str, r
     Ok(candidates.into_iter().next())
 }
 
+/// 收到時對不到包裹的照片再對一次，規則與收到當下相同（同一個收到時間窗口）。
+/// 照片已經有包裹（被別人補上）就不動；候選在寫入當下已被別張搶先就再比對下一件（理由見 [`insert_image`]）。
+/// 回傳這次對上的包裹
+pub async fn rematch(db: &DbPool, cfg: &CameraFtpConfig, image_id: i64, file_name: &str, received_ms: i64) -> Result<Option<i64>, sqlx::Error> {
+    let pid = loop {
+        let Some((pid, _)) = match_parcel(db, cfg, file_name, received_ms).await? else { return Ok(None) };
+        let n = crate::db::retry_busy("照片補對", || {
+            sqlx::query(
+                "UPDATE parcel_images SET parcel_id = ?1
+                  WHERE id = ?2 AND parcel_id IS NULL AND NOT EXISTS (SELECT 1 FROM parcel_images WHERE parcel_id = ?1)",
+            )
+            .bind(pid)
+            .bind(image_id)
+            .execute(db)
+        })
+        .await?
+        .rows_affected();
+        if n == 1 {
+            break pid;
+        }
+        // 沒寫成：這張已經有包裹就收手；否則是候選被搶先，下一輪比對會排除它
+        let linked: Option<i64> = sqlx::query_scalar("SELECT parcel_id FROM parcel_images WHERE id = ?").bind(image_id).fetch_optional(db).await?.flatten();
+        if linked.is_some() {
+            return Ok(None);
+        }
+    };
+    image_event(db, pid, received_ms, &format!("{file_name}（稍後補對）")).await?;
+    crate::event_bus::emit("parcel-image", serde_json::json!({ "image_id": image_id, "parcel_id": pid, "file_name": file_name }));
+    Ok(Some(pid))
+}
+
 /// 清掉 `days` 天前的照片（檔案與資料列），順手移除空掉的日期目錄
 pub async fn purge(db: &DbPool, images_dir: &Path, days: u32) -> Result<u64, sqlx::Error> {
-    if days == 0 {
+    let Some(cutoff_day) = (days > 0).then(|| crate::db::retention_cutoff_day(days)).flatten() else {
         return Ok(0);
-    }
-    let cutoff_day = (chrono::Local::now() - chrono::Duration::days(days as i64)).format("%Y-%m-%d").to_string();
+    };
     let cutoff_ts = format!("{cutoff_day} 00:00:00");
-    let rows: Vec<(i64, String, Option<String>)> = sqlx::query_as("SELECT id, rel_path, orig_path FROM parcel_images WHERE received_at < ?").bind(&cutoff_ts).fetch_all(db).await?;
-    for (_, rel, orig) in &rows {
-        let _ = tokio::fs::remove_file(images_dir.join(rel)).await;
-        if let Some(o) = orig {
-            let _ = tokio::fs::remove_file(images_dir.join(o)).await;
+    // 一批一批來：照片表一天就有上萬列，一次全讀進記憶體、一道 DELETE 刪完會長時間擋住其他寫入
+    let mut n = 0;
+    loop {
+        let rows: Vec<(i64, String, Option<String>)> = sqlx::query_as("SELECT id, rel_path, orig_path FROM parcel_images WHERE received_at < ? ORDER BY id LIMIT ?")
+            .bind(&cutoff_ts)
+            .bind(crate::db::PURGE_BATCH)
+            .fetch_all(db)
+            .await?;
+        for (_, rel, orig) in &rows {
+            let _ = tokio::fs::remove_file(images_dir.join(rel)).await;
+            if let Some(o) = orig {
+                let _ = tokio::fs::remove_file(images_dir.join(o)).await;
+            }
         }
+        let Some(last) = rows.last().map(|r| r.0) else { break };
+        n += sqlx::query("DELETE FROM parcel_images WHERE received_at < ? AND id <= ?").bind(&cutoff_ts).bind(last).execute(db).await?.rows_affected();
+        if (rows.len() as i64) < crate::db::PURGE_BATCH {
+            break;
+        }
+        tokio::time::sleep(crate::db::PURGE_PAUSE).await;
     }
-    let n = sqlx::query("DELETE FROM parcel_images WHERE received_at < ?").bind(&cutoff_ts).execute(db).await?.rows_affected();
     // 日期目錄名就是 YYYY-MM-DD，早於截止日且已空的一併拿掉
     if let Ok(mut rd) = tokio::fs::read_dir(images_dir).await {
         while let Ok(Some(ent)) = rd.next_entry().await {
@@ -712,6 +795,10 @@ mod tests {
                 }
             });
         }
+        // 測試圖先產生好：除錯版編 2400×1800 的 JPEG 可能要好幾秒，放在建件之後會把「綁碼到收妥」
+        // 拉長到超出 5 秒比對窗口，全套平行跑時偶爾失敗
+        let big = test_jpeg(2400, 1800);
+        let small = test_jpeg(800, 600);
         let now = crate::db::now_ms();
         let p_noread = seed_parcel(&db, "NoRead", now - 1500).await;
         let p_ok = seed_parcel(&db, "SF9876543210123", now - 1000).await;
@@ -740,7 +827,7 @@ mod tests {
         wr.write_all(b"STOR 20260921_151130123_5_1.jpg\r\n").await.unwrap();
         let mut data = TcpStream::connect(("127.0.0.1", data_port)).await.unwrap();
         expect(&mut lines, "150").await;
-        data.write_all(&test_jpeg(2400, 1800)).await.unwrap();
+        data.write_all(&big).await.unwrap();
         data.shutdown().await.unwrap();
         drop(data);
         expect(&mut lines, "226").await;
@@ -753,7 +840,7 @@ mod tests {
         wr.write_all(b"STOR SF9876543210123_20260921_151131000.jpg\r\n").await.unwrap();
         let (mut data, _) = dl.accept().await.unwrap();
         expect(&mut lines, "150").await;
-        data.write_all(&test_jpeg(800, 600)).await.unwrap();
+        data.write_all(&small).await.unwrap();
         data.shutdown().await.unwrap();
         drop(data);
         expect(&mut lines, "226").await;
@@ -805,4 +892,144 @@ mod tests {
         assert_eq!(left, 1);
         assert_eq!(purge(&db, &images_dir, 0).await.unwrap(), 0, "0 = 不清");
     }
+
+    #[tokio::test]
+    async fn 照片比對查詢走綁碼時間索引_不全表掃描事件表() {
+        let (db, _dir) = test_db().await;
+        let plan: Vec<(i64, i64, i64, String)> = sqlx::query_as(sqlx::AssertSqlSafe(format!("EXPLAIN QUERY PLAN {MATCH_SQL}")))
+            .bind(0i64)
+            .bind(1i64)
+            .fetch_all(&db)
+            .await
+            .unwrap();
+        let detail: Vec<&str> = plan.iter().map(|r| r.3.as_str()).collect();
+        assert!(detail.iter().any(|d| d.contains("idx_parcel_events_bind_ts")), "{detail:?}");
+        assert!(!detail.iter().any(|d| d.starts_with("SCAN e")), "不可逐筆掃事件表：{detail:?}");
+    }
+
+
+    #[tokio::test]
+    async fn 照片先到_綁碼事件晚寫入_稍後補對上() {
+        let (db, dir) = test_db().await;
+        let cfg = CameraFtpConfig::default();
+        let now = crate::db::now_ms();
+        // 包裹列已在，但綁碼事件還沒寫進來（寫入端落後）
+        let pid: i64 = sqlx::query_scalar("INSERT INTO parcels (ulid, barcode, status, started_at, started_ms, updated_ms) VALUES ('LAG', 'A12345678', 2, ?, ?, ?) RETURNING id")
+            .bind(crate::db::local_ts(now - 400)).bind(now - 400).bind(now - 400).fetch_one(&db).await.unwrap();
+        ingest(&db, &dir.join("images"), &cfg, "20261008_181040814_165_165.jpg", test_jpeg(64, 48), now).await.unwrap();
+        let (image_id, linked): (i64, Option<i64>) = sqlx::query_as("SELECT id, parcel_id FROM parcel_images").fetch_one(&db).await.unwrap();
+        assert_eq!(linked, None, "收到當下對不到");
+        sqlx::query("INSERT INTO parcel_events (parcel_id, ts_ms, source, kind, raw) VALUES (?, ?, 'camera', 'bind', 'A12345678')").bind(pid).bind(now - 200).execute(&db).await.unwrap();
+        assert_eq!(rematch(&db, &cfg, image_id, "20261008_181040814_165_165.jpg", now).await.unwrap(), Some(pid));
+        let linked: Option<i64> = sqlx::query_scalar("SELECT parcel_id FROM parcel_images WHERE id = ?").bind(image_id).fetch_one(&db).await.unwrap();
+        assert_eq!(linked, Some(pid));
+        let ev: i64 = sqlx::query_scalar("SELECT count(*) FROM parcel_events WHERE parcel_id = ? AND kind = 'image'").bind(pid).fetch_one(&db).await.unwrap();
+        assert_eq!(ev, 1, "包裹詳情的時間軸也要有這張照片");
+        assert_eq!(rematch(&db, &cfg, image_id, "x.jpg", now).await.unwrap(), None, "已對上的不重複處理");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn 寫入停頓時兩張照片同時補對_不可綁到同一件() {
+        let (db, _dir) = test_db().await;
+        let cfg = CameraFtpConfig::default();
+        let now = crate::db::now_ms();
+        let p1 = seed_parcel(&db, "A10000001", now - 900).await;
+        let p2 = seed_parcel(&db, "A10000002", now - 400).await;
+        let mut imgs = vec![];
+        for name in ["20261009_000001_1_1.jpg", "20261009_000002_2_2.jpg"] {
+            let id: i64 = sqlx::query_scalar("INSERT INTO parcel_images (parcel_id, file_name, rel_path, size, orig_size, received_ms, received_at) VALUES (NULL, ?, ?, 1, 1, ?, ?) RETURNING id")
+                .bind(name).bind(name).bind(now).bind(crate::db::local_ts(now)).fetch_one(&db).await.unwrap();
+            imgs.push((id, name));
+        }
+        // 寫入停頓：兩個補對都先查完候選，更新卡在寫鎖上，鎖一放開兩筆接連寫入
+        let mut holder = db.acquire().await.unwrap();
+        sqlx::query("BEGIN IMMEDIATE").execute(&mut *holder).await.unwrap();
+        let tasks: Vec<_> = imgs
+            .iter()
+            .map(|&(id, name)| {
+                let (db, cfg) = (db.clone(), cfg.clone());
+                tokio::spawn(async move { rematch(&db, &cfg, id, name, now).await.unwrap() })
+            })
+            .collect();
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        sqlx::query("COMMIT").execute(&mut *holder).await.unwrap();
+        for t in tasks {
+            t.await.unwrap();
+        }
+        let mut linked: Vec<Option<i64>> = sqlx::query_scalar("SELECT parcel_id FROM parcel_images ORDER BY parcel_id").fetch_all(&db).await.unwrap();
+        linked.sort();
+        assert_eq!(linked, vec![Some(p1), Some(p2)], "一件一張照片：第二張要對到下一件");
+    }
+
+    #[tokio::test]
+    async fn 收到照片時候選已被別張搶先_存成未對上_交給稍後補對() {
+        let (db, _dir) = test_db().await;
+        let now = crate::db::now_ms();
+        let p1 = seed_parcel(&db, "A20000001", now - 900).await;
+        // 比對完、寫入前，另一張已經綁上 p1
+        sqlx::query("INSERT INTO parcel_images (parcel_id, file_name, rel_path, size, orig_size, received_ms, received_at) VALUES (?, 'other.jpg', 'other.jpg', 1, 1, ?, ?)")
+            .bind(p1).bind(now).bind(crate::db::local_ts(now)).execute(&db).await.unwrap();
+        let (id, _) = insert_image(&db, Some(p1), "late.jpg", "x/late.jpg", &None, 1, 1, now).await.unwrap();
+        let linked: Option<i64> = sqlx::query_scalar("SELECT parcel_id FROM parcel_images WHERE id = ?").bind(id).fetch_one(&db).await.unwrap();
+        assert_eq!(linked, None, "已經有照片的件不可再綁第二張");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn 資料庫被握住超過等待上限時_照片存檔重試_不遺失證據() {
+        let (db, dir) = test_db().await;
+        let cfg = CameraFtpConfig::default();
+        let mut holder = db.acquire().await.unwrap();
+        sqlx::query("BEGIN IMMEDIATE").execute(&mut *holder).await.unwrap();
+        let release = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(6_000)).await;
+            sqlx::query("COMMIT").execute(&mut *holder).await.unwrap();
+        });
+        let r = ingest(&db, &dir.join("images"), &cfg, "20260926_174923086_677_677.jpg", test_jpeg(64, 48), crate::db::now_ms()).await;
+        release.await.unwrap();
+        assert!(r.is_ok(), "{r:?}");
+        let n: i64 = sqlx::query_scalar("SELECT count(*) FROM parcel_images").fetch_one(&db).await.unwrap();
+        assert_eq!(n, 1);
+    }
+
+
+    #[tokio::test]
+    async fn 清理_過期照片超過一批_每一張檔案與紀錄都刪掉_新照片保留() {
+        let (db, dir) = test_db().await;
+        let images_dir = dir.join("images");
+        let old_day = (chrono::Local::now() - chrono::Duration::days(100)).format("%Y-%m-%d").to_string();
+        let new_day = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let old_n = crate::db::PURGE_BATCH * 2 + 200; // 跨三批，最後一批不滿
+        std::fs::create_dir_all(images_dir.join(&old_day)).unwrap();
+        std::fs::create_dir_all(images_dir.join(&new_day)).unwrap();
+        // 新舊交錯寫入，id 也交錯：每批以 id 為界刪除時不可誤刪到新照片
+        for i in 0..old_n {
+            for (day, keep) in [(&old_day, false), (&new_day, true)] {
+                if keep && i % 100 != 0 {
+                    continue;
+                }
+                let name = format!("{i}.jpg");
+                std::fs::write(images_dir.join(day).join(&name), b"x").unwrap();
+                sqlx::query("INSERT INTO parcel_images (file_name, rel_path, size, orig_size, received_ms, received_at) VALUES (?, ?, 1, 0, 0, ?)")
+                    .bind(&name)
+                    .bind(format!("{day}/{name}"))
+                    .bind(format!("{day} 12:00:00.000"))
+                    .execute(&db)
+                    .await
+                    .unwrap();
+            }
+        }
+        let new_n = (old_n + 99) / 100;
+        assert_eq!(purge(&db, &images_dir, 90).await.unwrap(), old_n as u64);
+        assert!(!images_dir.join(&old_day).exists(), "舊日期的檔案全刪、目錄拿掉");
+        let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM parcel_images").fetch_one(&db).await.unwrap();
+        assert_eq!(left, new_n, "新照片的紀錄全留著");
+        assert_eq!(std::fs::read_dir(images_dir.join(&new_day)).unwrap().count() as i64, new_n, "新照片的檔案全留著");
+    }
+
+    #[tokio::test]
+    async fn 照片保留天數大到超出日期範圍_不可崩潰() {
+        let (db, dir) = test_db().await;
+        assert_eq!(purge(&db, &dir, u32::MAX).await.unwrap(), 0);
+    }
+
 }

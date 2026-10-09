@@ -24,7 +24,8 @@
     "keyword": "關鍵字",
     "advancedSearch": "進階查詢",
     "clearAll": "全部清除",
-    "multiNoPlaceholder": "可貼多個單號，用逗號、空白或換行分隔"
+    "multiNoPlaceholder": "可貼多個單號，用逗號、空白或換行分隔",
+    "leaveConfirm": "有尚未儲存的變更，確定要離開？"
   },
   "pagination": {
     "pagePrefix": "第",
@@ -274,6 +275,7 @@
       "noread": "讀碼失敗",
       "defaulted": "走預設口",
       "partialNote": "包裹明細只保留 {days} 天（最早到 {since}），更早的日期只有每日件數，格口、來源、時段等分項不含那段期間。",
+      "partialNoteNoPurge": "包裹明細從 {since} 才開始有，更早的日期只有每日件數，格口、來源、時段等分項不含那段期間。",
       "dailyTrend": "每日趨勢",
       "dailyTrendHint": "區間內每天的正常完成、讀碼失敗、仲介機回傳與分揀機異常件數",
       "hourlyTrend": "小時趨勢",
@@ -648,7 +650,6 @@
       "advanced": "進階時序參數（一般不用改）",
       "unsaved": "有尚未儲存的變更",
       "discard": "放棄變更",
-      "leaveConfirm": "有尚未儲存的變更，確定要離開？",
       "v": {
         "addr": "格式要是 IP:埠，例如 192.168.177.100:10006",
         "url": "格式要是 http:// 開頭的網址",

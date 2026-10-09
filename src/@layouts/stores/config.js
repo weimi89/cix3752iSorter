@@ -45,7 +45,9 @@ export const useLayoutConfigStore = defineStore('layoutConfig', () => {
   const footerType = ref(layoutConfig.footer.type)
 
   // 👉 Misc
-  const isLessThanOverlayNavBreakpoint = computed(() => useMediaQuery(`(max-width: ${layoutConfig.app.overlayNavFromBreakpoint-0.02}px)`).value)
+  // 媒體查詢在 store 建立時建一次：寫在 computed 裡的話每次跨過斷點重算就再建一個監聽，舊的不會移除
+  const overlayNavQuery = useMediaQuery(`(max-width: ${layoutConfig.app.overlayNavFromBreakpoint-0.02}px)`)
+  const isLessThanOverlayNavBreakpoint = computed(() => overlayNavQuery.value)
 
   const { y: windowScrollY } = useWindowScroll()
 

@@ -40,6 +40,7 @@ pub fn init() {
         .with_thread_ids(false)
         .compact();
     tracing_subscriber::registry().with(filter()).with(file_layer).with(stdout).init();
+    install_panic_hook();
 }
 
 /// 加上 `dir/sorter.YYYY-MM-DD.log` 逐日輪替檔。舊檔清理交給 `device::signal_log`（同目錄、同天數、可熱套用）。
@@ -74,9 +75,66 @@ pub fn attach_file(dir: &Path) {
     }
 }
 
+/// 崩潰時把原因與位置寫進日誌。預設只印到標準錯誤，桌面版從選單啟動時那裡沒人接，
+/// 崩潰就完全不留紀錄。原本的處理照樣接著跑（開發時終端機仍看得到）；重複呼叫只裝一次
+pub fn install_panic_hook() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let reason = panic_text(info.payload());
+            let location = info.location().map(|l| format!("{}:{}", l.file(), l.line())).unwrap_or_default();
+            let thread = std::thread::current().name().unwrap_or("未命名").to_string();
+            tracing::error!(%thread, %location, "程式崩潰：{reason}");
+            prev(info);
+        }));
+    });
+}
+
+/// 崩潰內容轉成文字（`panic!` 帶的是 `&str` 或 `String`）
+pub fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
+    payload
+        .downcast_ref::<&str>()
+        .map(|s| s.to_string())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "（無法辨識的崩潰內容）".to_string())
+}
+
 /// 程式結束前呼叫：把背景寫檔執行緒的緩衝全部落檔，收尾訊息與 panic 前最後幾行才不會丟
 pub fn flush() {
     if let Ok(mut g) = FILE_GUARD.lock() {
         drop(g.take());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    /// 收集 tracing 事件文字的測試用寫入端
+    #[derive(Clone, Default)]
+    struct Capture(Arc<Mutex<Vec<u8>>>);
+    impl std::io::Write for Capture {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn 崩潰要寫進日誌_桌面版沒有終端機_只印標準錯誤等於沒留紀錄() {
+        super::install_panic_hook();
+        let cap = Capture::default();
+        let c2 = cap.clone();
+        let sub = tracing_subscriber::fmt().with_writer(move || c2.clone()).with_ansi(false).finish();
+        tracing::subscriber::with_default(sub, || {
+            let _ = std::panic::catch_unwind(|| panic!("日誌崩潰測試 {}", 42));
+        });
+        let text = String::from_utf8(cap.0.lock().unwrap().clone()).unwrap();
+        assert!(text.contains("日誌崩潰測試 42"), "日誌要有崩潰原因，實際：{text:?}");
+        assert!(text.contains("log.rs"), "日誌要有崩潰位置，實際：{text:?}");
     }
 }

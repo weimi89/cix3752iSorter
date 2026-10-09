@@ -2,6 +2,8 @@
 //!
 //! - 印表機找不到（USB 掉線）或寫入失敗：任務留著重試，不丟；重試到設定次數就發告警並拉長間隔
 //! - 寫裝置檔放 `spawn_blocking` 並設逾時，卡住的 USB 不會拖住其他印表機或主迴圈
+//! - 同一台印表機同一時間只能有一個寫入（佇列與測試頁共用一把鎖，寫入真正結束才放）：
+//!   卡住的寫入無法取消，再開一個的話印表機恢復時兩份都會印出、內容還可能夾在一起
 //! - 超過一小時仍印不出來的任務標為失敗，網頁可手動重送
 
 use std::collections::HashMap;
@@ -33,7 +35,11 @@ pub struct PrintService {
     mw: Middleware,
     spool_dir: PathBuf,
     cancel: CancellationToken,
+    tasks: tokio_util::task::TaskTracker,
     workers: Arc<Mutex<HashMap<String, Arc<Notify>>>>,
+    /// 每台印表機的寫入鎖（見模組說明）
+    writing: Arc<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
+    write_timeout: Duration,
 }
 
 pub struct NewJob<'a> {
@@ -57,10 +63,10 @@ pub fn resolve_device(port: &str) -> Option<PathBuf> {
 }
 
 impl PrintService {
-    pub fn new(db: DbPool, cfg: watch::Receiver<AppConfig>, mw: Middleware, data_dir: &Path, cancel: CancellationToken) -> Self {
+    pub fn new(db: DbPool, cfg: watch::Receiver<AppConfig>, mw: Middleware, data_dir: &Path, cancel: CancellationToken, tasks: tokio_util::task::TaskTracker) -> Self {
         let spool_dir = data_dir.join("print");
         let _ = std::fs::create_dir_all(&spool_dir);
-        let me = Self { db, cfg, mw, spool_dir, cancel, workers: Arc::new(Mutex::new(HashMap::new())) };
+        let me = Self { db, cfg, mw, spool_dir, cancel, tasks, workers: Arc::new(Mutex::new(HashMap::new())), writing: Arc::new(Mutex::new(HashMap::new())), write_timeout: WRITE_TIMEOUT };
         me.resume();
         me
     }
@@ -85,7 +91,7 @@ impl PrintService {
         let now = now_ms();
         let name = format!("{}-{}.tspl", now, ulid::Ulid::generate());
         let path = self.spool_dir.join(&name);
-        crate::fs_atomic::write_async(&path, job.tspl).await?;
+        crate::fs_atomic::write_async(&path, job.tspl, crate::fs_atomic::Durability::Synced).await?;
         let row: (i64,) = sqlx::query_as(
             "INSERT INTO print_jobs (parcel_id, barcode, chute_code, printer_port, profile, tspl_path, status, not_before_ms, created_ms)
              VALUES ((SELECT id FROM parcels WHERE ulid = ?1), ?2, ?3, ?4, ?5, ?6, 'pending', ?7, ?8) RETURNING id",
@@ -117,16 +123,24 @@ impl PrintService {
         Ok(())
     }
 
-    /// 直接送一段 TSPL（測試頁），不進佇列
+    /// 直接送一段 TSPL（測試頁），不進佇列。這台正在寫（列印中或卡住）就不送，不排隊
     pub async fn print_raw(&self, port: &str, data: Vec<u8>) -> anyhow::Result<()> {
         let dev = resolve_device(port).ok_or_else(|| anyhow::anyhow!("找不到埠位 {port} 的印表機"))?;
-        let r = tokio::time::timeout(WRITE_TIMEOUT, tokio::task::spawn_blocking(move || usb::write_device(&dev, &data))).await;
-        match r {
+        let guard = self.port_lock(port).try_lock_owned().map_err(|_| anyhow::anyhow!("這台印表機正在列印或沒有回應，請稍後再試"))?;
+        let write = tokio::task::spawn_blocking(move || {
+            let _writing = guard;
+            usb::write_device(&dev, &data)
+        });
+        match tokio::time::timeout(self.write_timeout, write).await {
             Ok(Ok(Ok(()))) => Ok(()),
             Ok(Ok(Err(e))) => Err(anyhow::anyhow!("寫入失敗: {e}")),
             Ok(Err(e)) => Err(anyhow::anyhow!("寫入工作中斷: {e}")),
-            Err(_) => Err(anyhow::anyhow!("寫入逾時（{}s）", WRITE_TIMEOUT.as_secs())),
+            Err(_) => Err(anyhow::anyhow!("印表機沒有回應（{}s），恢復後會印出這張測試頁", self.write_timeout.as_secs())),
         }
+    }
+
+    fn port_lock(&self, port: &str) -> Arc<tokio::sync::Mutex<()>> {
+        self.writing.lock().unwrap().entry(port.to_string()).or_default().clone()
     }
 
     fn wake(&self, port: &str) {
@@ -137,7 +151,7 @@ impl PrintService {
                 None => {
                     let n = Arc::new(Notify::new());
                     w.insert(port.to_string(), n.clone());
-                    tokio::spawn(self.clone().worker(port.to_string(), n.clone()));
+                    crate::supervise::spawn_tracked(format!("列印佇列 {port}"), &self.tasks, self.clone().worker(port.to_string(), n.clone()));
                     n
                 }
             }
@@ -192,9 +206,9 @@ impl PrintService {
                 if attempts >= retry {
                     attempts = 0;
                     self.alert(&mut last_alert, "USB_DISCONNECT", &format!("{chute} 斷線"), &port).await;
-                    tokio::time::sleep(Duration::from_secs(3)).await;
+                    self.pause(Duration::from_secs(3)).await;
                 } else {
-                    tokio::time::sleep(retry_interval).await;
+                    self.pause(retry_interval).await;
                 }
                 continue;
             };
@@ -207,13 +221,31 @@ impl PrintService {
                     continue;
                 }
             };
+            // 測試頁還卡著時在這裡等它寫完；鎖跟著寫入走，寫入真正結束才放
+            let guard = tokio::select! {
+                _ = self.cancel.cancelled() => break,
+                g = self.port_lock(&port).lock_owned() => g,
+            };
             let dev2 = dev.clone();
-            let r = tokio::time::timeout(WRITE_TIMEOUT, tokio::task::spawn_blocking(move || usb::write_device(&dev2, &data))).await;
+            let mut write = tokio::task::spawn_blocking(move || {
+                let _writing = guard;
+                usb::write_device(&dev2, &data)
+            });
+            let r = match tokio::time::timeout(self.write_timeout, &mut write).await {
+                Ok(r) => r,
+                Err(_) => {
+                    // 卡住的寫入無法取消：這時再開第二次寫入，印表機恢復時兩次都會印出來（同一張面單多張）。
+                    // 先告警，等這一次真正結束再決定成功或重試。關閉中也照樣等（結束流程最多等 DRAIN_LIMIT）：
+                    // 不等的話收尾期間印出來的面單還標著列印中，重開時會再印一次
+                    self.mark(id, "printing", Some(&format!("寫入逾時（{}s），等待印表機", self.write_timeout.as_secs()))).await;
+                    self.alert(&mut last_alert, "PRINTER_ERROR", &format!("{chute} 印表機無回應"), &port).await;
+                    write.await
+                }
+            };
             let err = match r {
-                Ok(Ok(Ok(()))) => None,
-                Ok(Ok(Err(e))) => Some(format!("寫入失敗: {e}")),
-                Ok(Err(e)) => Some(format!("寫入工作中斷: {e}")),
-                Err(_) => Some(format!("寫入逾時（{}s）", WRITE_TIMEOUT.as_secs())),
+                Ok(Ok(())) => None,
+                Ok(Err(e)) => Some(format!("寫入失敗: {e}")),
+                Err(e) => Some(format!("寫入工作中斷: {e}")),
             };
             match err {
                 None => {
@@ -230,12 +262,20 @@ impl PrintService {
                     if attempts >= retry {
                         attempts = 0;
                         self.alert(&mut last_alert, "PRINTER_ERROR", &format!("{chute} 印表機寫入失敗"), &port).await;
-                        tokio::time::sleep(Duration::from_secs(5)).await;
+                        self.pause(Duration::from_secs(5)).await;
                     } else {
-                        tokio::time::sleep(retry_interval).await;
+                        self.pause(retry_interval).await;
                     }
                 }
             }
+        }
+    }
+
+    /// 重試前的等待；收到結束通知就提早結束（迴圈開頭會看到通知而收工）
+    async fn pause(&self, d: Duration) {
+        tokio::select! {
+            _ = self.cancel.cancelled() => {}
+            _ = tokio::time::sleep(d) => {}
         }
     }
 
@@ -260,5 +300,135 @@ impl PrintService {
         event_log::log(&self.db, Level::Error, "printer", kind, format!("{message}（埠位 {port}）"));
         event_bus::emit("printer-alert", serde_json::json!({ "type": kind, "message": message, "port": port }));
         self.mw.device_alert(kind, message).await;
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    /// 假印表機目錄：環境變數是整個測試程式共用的，只設一次，各測試用不同埠位
+    fn fake_dir() -> &'static Path {
+        static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+        DIR.get_or_init(|| {
+            let d = std::env::temp_dir().join(format!("printq-fake-{}", ulid::Ulid::generate()));
+            std::fs::create_dir_all(&d).unwrap();
+            // SAFETY: 只在這裡設一次，其他測試只讀
+            unsafe { std::env::set_var("CIX_PRINT_FAKE_DIR", &d) };
+            d
+        })
+    }
+
+    /// 具名管道沒有讀者時，開啟寫入會一直卡住：模擬印表機無回應
+    fn stuck_printer(port: &str) -> PathBuf {
+        let fifo = fake_dir().join(port);
+        assert!(std::process::Command::new("mkfifo").arg(&fifo).status().unwrap().success());
+        fifo
+    }
+
+    /// 印表機恢復：開讀取端，讀到所有寫入端都關閉為止
+    async fn recover(fifo: PathBuf) -> String {
+        let got = tokio::task::spawn_blocking(move || {
+            use std::io::Read;
+            let mut f = std::fs::File::open(&fifo).unwrap();
+            let mut buf = Vec::new();
+            let deadline = std::time::Instant::now() + Duration::from_millis(1_500);
+            let mut chunk = [0u8; 256];
+            while std::time::Instant::now() < deadline {
+                match f.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                    Err(_) => break,
+                }
+            }
+            buf
+        })
+        .await
+        .unwrap();
+        String::from_utf8_lossy(&got).into_owned()
+    }
+
+    async fn service(write_timeout: Duration) -> (PrintService, DbPool, CancellationToken, tokio_util::task::TaskTracker) {
+        let dir = std::env::temp_dir().join(format!("printq-{}", ulid::Ulid::generate()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = crate::db::init(&dir).await.unwrap();
+        let mut cfg = AppConfig::default();
+        cfg.middleware.base_url = "http://127.0.0.1:1/".into(); // 告警不要真的送出去
+        let (_tx, rx) = watch::channel(cfg);
+        let cancel = CancellationToken::new();
+        let tasks = tokio_util::task::TaskTracker::new();
+        let mut svc = PrintService::new(db.clone(), rx.clone(), Middleware::new(rx), &dir, cancel.clone(), tasks.clone());
+        svc.write_timeout = write_timeout;
+        (svc, db, cancel, tasks)
+    }
+
+    async fn wait_status(db: &DbPool, want: &str) -> String {
+        let mut status = String::new();
+        for _ in 0..40 {
+            status = sqlx::query_scalar("SELECT status FROM print_jobs").fetch_one(db).await.unwrap();
+            if status == want {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        status
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn 印表機卡住時不重複送印_恢復後只印一張() {
+        let port = "9-9.9";
+        let fifo = stuck_printer(port);
+        let (svc, db, cancel, _tasks) = service(Duration::from_millis(300)).await;
+        svc.enqueue(NewJob { parcel_ulid: None, barcode: "A1", chute_code: "L1", printer_port: port, profile: None, tspl: b"<JOB-1>", delay_ms: 0 }).await.unwrap();
+        // 讓 worker 經歷好幾次逾時
+        tokio::time::sleep(Duration::from_millis(2_000)).await;
+        let got = recover(fifo).await;
+        let copies = got.matches("<JOB-1>").count();
+        assert_eq!(copies, 1, "印表機恢復後收到 {copies} 份同一張面單");
+        // 寫入結束後 worker 才標完成，等它一下再收工
+        let status = wait_status(&db, "done").await;
+        cancel.cancel();
+        assert_eq!(status, "done");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn 印表機卡住時連按測試頁_不疊寫入_佇列的面單也等前一次寫完() {
+        let port = "9-9.8";
+        let fifo = stuck_printer(port);
+        let (svc, db, cancel, _tasks) = service(Duration::from_millis(300)).await;
+        let first = svc.print_raw(port, b"<TEST>".to_vec()).await;
+        assert!(first.is_err(), "印表機沒回應時第一次測試頁要回逾時");
+        let second = svc.print_raw(port, b"<TEST>".to_vec()).await;
+        assert!(second.is_err(), "前一次還卡著，第二次不能再開一個寫入");
+        svc.enqueue(NewJob { parcel_ulid: None, barcode: "A1", chute_code: "L1", printer_port: port, profile: None, tspl: b"<JOB-2>", delay_ms: 0 }).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(1_000)).await;
+        let got = recover(fifo).await;
+        assert_eq!((got.matches("<TEST>").count(), got.matches("<JOB-2>").count()), (1, 0), "恢復當下只能有卡住的那一次測試頁，收到：{got:?}");
+        // 測試頁寫完才輪到面單：佇列這時才開始寫，接著再讀一次
+        let fifo = fake_dir().join(port);
+        let got = recover(fifo).await;
+        assert_eq!(got, "<JOB-2>", "面單在測試頁之後單獨寫出");
+        let status = wait_status(&db, "done").await;
+        cancel.cancel();
+        assert_eq!(status, "done");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn 關閉時寫入還卡著_印表機在收尾期間恢復_要記成已印_重開不可再印() {
+        let port = "9-9.7";
+        let fifo = stuck_printer(port);
+        let (svc, db, cancel, tasks) = service(Duration::from_millis(300)).await;
+        svc.enqueue(NewJob { parcel_ulid: None, barcode: "A1", chute_code: "L1", printer_port: port, profile: None, tspl: b"<JOB-3>", delay_ms: 0 }).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(1_000)).await;
+        // 關閉：結束通知送出，收尾期間印表機恢復、把這張收完
+        cancel.cancel();
+        let reader = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            recover(fifo).await
+        });
+        assert!(crate::supervise::drain(&tasks, Duration::from_secs(10)).await, "收尾要等到這次寫入有結果");
+        assert_eq!(reader.await.unwrap(), "<JOB-3>");
+        let status: String = sqlx::query_scalar("SELECT status FROM print_jobs").fetch_one(&db).await.unwrap();
+        assert_eq!(status, "done", "已經印出的面單要記成已印，否則重開時 resume 會再印一次");
     }
 }

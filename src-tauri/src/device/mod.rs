@@ -25,7 +25,7 @@ pub fn derive<T: Clone + PartialEq + Send + Sync + 'static>(
 ) -> watch::Receiver<T> {
     let initial = pick(&cfg_rx.borrow());
     let (tx, rx) = watch::channel(initial);
-    tokio::spawn(async move {
+    crate::supervise::spawn("設定分派", async move {
         loop {
             tokio::select! {
                 _ = cancel.cancelled() => break,

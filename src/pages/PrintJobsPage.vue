@@ -1,7 +1,7 @@
 <script setup>
 import { useI18n } from 'vue-i18n'
 import { api } from '@/api/http'
-import { listen } from '@/api/events'
+import { useServerEvent } from '@/composables/useServerEvent'
 import { fmtMs } from '@/composables/useFormat'
 import AppHeader from '@/components/AppHeader.vue'
 import PageActions from '@/components/PageActions.vue'
@@ -9,6 +9,8 @@ import TablePagination from '@/components/TablePagination.vue'
 import MultiNoField from '@/components/MultiNoField.vue'
 import AppDatePicker from '@/components/AppDatePicker.vue'
 import { toast } from 'vue3-toastify'
+import { usePagedList } from '@/composables/usePagedList'
+import ProtectedImg from '@/components/ProtectedImg.vue'
 
 const { t } = useI18n()
 const status = ref(null)
@@ -19,26 +21,11 @@ const endDate = ref('')
 const chute = ref('')
 const chutes = ref([])
 const chuteItems = computed(() => [{ value: '', title: t('common.all') }, ...chutes.value.map(c => ({ value: c, title: c }))])
-const page = ref(1)
-const pageSize = ref(25)
-const total = ref(0)
-const list = ref([])
-const loading = ref(false)
-const errorMsg = ref('')
 const searchOpen = ref(0)
 const statusColor = { pending: 'secondary', printing: 'info', done: 'success', failed: 'error' }
 const STATUSES = computed(() => [{ value: null, title: t('common.all') }, ...['pending', 'printing', 'done', 'failed'].map(s => ({ value: s, title: t(`print.s.${s}`) }))])
 
-const load = async () => {
-  loading.value = true
-  errorMsg.value = ''
-  try {
-    const d = await api.printJobs({ status: status.value, q: q.value, barcode: barcode.value, start: startDate.value ? `${startDate.value} 00:00:00` : '', end: endDate.value ? `${endDate.value} 23:59:59.999` : '', chute: chute.value, page: page.value, limit: pageSize.value })
-    total.value = d.total
-    list.value = d.list
-  } catch (e) { errorMsg.value = e.message } finally { loading.value = false }
-}
-const search = () => { page.value = 1; load() }
+const { page, pageSize, total, list, loading, errorMsg, load, search, refreshSoon } = usePagedList(p => api.printJobs({ status: status.value, q: q.value, barcode: barcode.value, start: startDate.value ? `${startDate.value} 00:00:00` : '', end: endDate.value ? `${endDate.value} 23:59:59.999` : '', chute: chute.value, ...p }))
 const resetSearch = () => { status.value = null; q.value = ''; barcode.value = ''; startDate.value = ''; endDate.value = ''; chute.value = ''; search() }
 const retry = async id => {
   try { await api.printJobRetry(id); toast(t('common.done'), { type: 'success' }); load() } catch (e) { toast(e.message, { type: 'error' }) }
@@ -50,16 +37,12 @@ const preview = ref({ open: false, job: null, src: '', error: '' })
 const openPreview = j => { preview.value = { open: true, job: j, src: api.printJobPreviewUrl(j.id), error: '' } }
 const previewFailed = () => { preview.value.error = t('print.previewHint') }
 
-watch(pageSize, () => { page.value = 1; load() })
-watch(page, load)
-let unlisten = null
-let timer = null
+useServerEvent('print-job', () => { if (page.value !== 1) return; refreshSoon(800) })
+// 格口清單只給篩選選單用，清單不用等它
 onMounted(async () => {
-  try { chutes.value = (await api.chutes()).map(c => c.code) } catch {}
   load()
-  unlisten = listen('print-job', () => { if (page.value !== 1) return; clearTimeout(timer); timer = setTimeout(load, 800) })
+  try { chutes.value = (await api.chutes()).map(c => c.code) } catch {}
 })
-onBeforeUnmount(() => { unlisten?.(); clearTimeout(timer) })
 </script>
 
 <template>
@@ -128,7 +111,8 @@ onBeforeUnmount(() => { unlisten?.(); clearTimeout(timer) })
         </VCardTitle>
         <VCardText class="text-center">
           <VAlert v-if="preview.error" type="warning" variant="tonal" density="compact">{{ preview.error }}</VAlert>
-          <img v-else :src="preview.src" :alt="$t('print.previewTitle')" class="label-preview" @error="previewFailed">
+          <!-- 桌面視窗用 <img> 直接載後台網址會被跨站防護擋成 403，經由 ProtectedImg 先抓回來 -->
+          <ProtectedImg v-else :src="preview.src" :alt="$t('print.previewTitle')" class="label-preview" @error="previewFailed" />
           <div class="text-body-small text-medium-emphasis mt-2">{{ $t('print.previewHint') }}</div>
         </VCardText>
       </VCard>

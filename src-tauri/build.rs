@@ -15,6 +15,9 @@ fn main() {
 
     // 前端重新建置後要讓 Rust 這側跟著重編，否則 binary 內嵌的還是上一版畫面
     println!("cargo:rerun-if-changed=../dist");
+    // `sqlx::migrate!` 在編譯期把 migrations 嵌進程式；不登記的話新增 migration 檔不會觸發重編，
+    // 增量建置出來的程式還是舊的 migration 清單
+    println!("cargo:rerun-if-changed=migrations");
 
     tauri_build::build()
 }

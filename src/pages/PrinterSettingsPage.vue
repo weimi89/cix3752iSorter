@@ -2,7 +2,7 @@
 /** 印表機：各格口對應的 USB 埠位與在線狀態、測試頁；目前接著的 USB 印表機清單 */
 import { useI18n } from 'vue-i18n'
 import { api } from '@/api/http'
-import { listen } from '@/api/events'
+import { useServerEvent } from '@/composables/useServerEvent'
 import AppHeader from '@/components/AppHeader.vue'
 import PageActions from '@/components/PageActions.vue'
 import { toast } from 'vue3-toastify'
@@ -27,9 +27,8 @@ const offlineCount = computed(() => data.value.configured.filter(c => !c.online)
 // 後端照偵測順序回，孔位打散難對照；依 bus-port 數字排
 const attachedSorted = computed(() => [...data.value.attached].sort((a, b) => a.port.localeCompare(b.port, undefined, { numeric: true })))
 
-let unlisten = null
-onMounted(() => { load(); unlisten = listen('printer-alert', load) })
-onBeforeUnmount(() => unlisten?.())
+useServerEvent('printer-alert', load)
+onMounted(load)
 </script>
 
 <template>

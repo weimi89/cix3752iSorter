@@ -23,6 +23,8 @@ pub async fn bootstrap(config_path: &Path, data_dir: &Path, cancel: Cancellation
     crate::log::attach_file(&logs_dir);
     device::signal_log::init(logs_dir, config.subscribe());
     let db = db::init(data_dir).await?;
+    crate::supervise::log_panics_to(db.clone());
+    let read_db = db::init_read(data_dir, &db).await?;
     // 統計用的一次性回填，失敗只記錄，不能擋分揀開機
     if let Err(e) = db::abnormal_kind::backfill_daily_stats(&db, &cfg.general.default_chute).await {
         tracing::error!("daily_stats 異常三分類回填失敗（下次啟動再試）: {e}");
@@ -32,12 +34,14 @@ pub async fn bootstrap(config_path: &Path, data_dir: &Path, cancel: Cancellation
     let app = AppState {
         config: config.clone(),
         db: db.clone(),
+        read_db,
         data_dir: data_dir.to_path_buf(),
         started_at: Instant::now(),
         runtime: runtime::Runtime::default(),
         tracker: std::sync::Arc::new(std::sync::OnceLock::new()),
         resolver: std::sync::Arc::new(std::sync::OnceLock::new()),
         printer: std::sync::Arc::new(std::sync::OnceLock::new()),
+        tasks: tokio_util::task::TaskTracker::new(),
     };
     event_log::log(&db, event_log::Level::Info, "server", "start", format!("版本 {} 啟動", env!("CARGO_PKG_VERSION")));
 
@@ -64,7 +68,7 @@ pub async fn bootstrap(config_path: &Path, data_dir: &Path, cancel: Cancellation
         let db = db.clone();
         let mw = mw.clone();
         let mut jam_rx = ports.jam_rx;
-        tokio::spawn(async move {
+        crate::supervise::spawn("卡件告警", async move {
             while let Some(alert) = jam_rx.recv().await {
                 match alert {
                     tracker::JamAlert::Chute(chute_no) => {
@@ -83,15 +87,66 @@ pub async fn bootstrap(config_path: &Path, data_dir: &Path, cancel: Cancellation
     }
 
     // 列印：已下載的面單 → 點陣 → 每台印表機各自的佇列 worker
-    let printer = label::PrintService::new(db.clone(), config.subscribe(), mw.clone(), data_dir, cancel.clone());
+    let printer = label::PrintService::new(db.clone(), config.subscribe(), mw.clone(), data_dir, cancel.clone(), app.tasks.clone());
     let _ = app.printer.set(printer.clone());
     label::spawn_pipeline(app.clone(), printer, label_rx, cancel.clone());
 
     Ok(Started { app, bind: cfg.server.bind.clone() })
 }
 
+/// 等到收到結束訊號（Ctrl-C 或 SIGTERM）為止。
+///
+/// 關機、systemd／supervisor 停服務、`sorter-switch to-old` 送的都是 SIGTERM；沒有登記處理的話系統直接結束程序，
+/// 結束前等寫入佇列寫完那一步（`supervise::drain`）根本跑不到。桌面視窗框架本身不處理這個訊號，要自己接
+pub async fn wait_terminate() {
+    #[cfg(unix)]
+    {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut term) => {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {}
+                    _ = term.recv() => {}
+                }
+            }
+            Err(e) => {
+                tracing::error!("登記 SIGTERM 處理失敗，只能接 Ctrl-C: {e}");
+                let _ = tokio::signal::ctrl_c().await;
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
 /// 桌面模式的預設路徑：跟 LabelPrint 一樣放在使用者的應用資料夾，
 /// 不依賴工作目錄（從應用選單啟動時工作目錄是家目錄）
 pub fn default_paths(app_data_dir: &Path) -> (PathBuf, PathBuf) {
     (app_data_dir.join("config.toml"), app_data_dir.join("data"))
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    #[tokio::test]
+    async fn 收到_sigterm_要走收尾流程_不可被系統直接結束() {
+        // 桌面版沒登記處理的話，SIGTERM 照系統預設直接結束程序：關機、切換腳本 to-old、systemd 停服務
+        // 都是送這個訊號，寫入佇列裡還沒寫的包裹就沒了。這個測試對自己送 SIGTERM——沒處理的話整個測試程序會被結束
+        let got = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let g = got.clone();
+        tokio::spawn(async move {
+            super::wait_terminate().await;
+            g.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let st = std::process::Command::new("kill").arg("-TERM").arg(std::process::id().to_string()).status().unwrap();
+        assert!(st.success());
+        for _ in 0..40 {
+            if got.load(std::sync::atomic::Ordering::SeqCst) {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        panic!("送了 SIGTERM 兩秒內沒有收到通知");
+    }
 }

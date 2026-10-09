@@ -103,14 +103,14 @@ async fn status(State(state): State<ServerState>) -> ApiResult<serde_json::Value
     let (print_pending, print_failed): (i64, i64) = sqlx::query_as(
         "SELECT COALESCE(SUM(status IN ('pending','printing')),0), COALESCE(SUM(status='failed'),0) FROM print_jobs",
     )
-    .fetch_one(&state.app.db)
+    .fetch_one(&state.app.read_db)
     .await
     .unwrap_or((0, 0));
     let (report_pending, report_failed): (i64, i64) = sqlx::query_as(
         "SELECT (SELECT COUNT(*) FROM report_queue WHERE status IN ('pending','sending')),
                 (SELECT COUNT(*) FROM report_queue WHERE status = 'failed')",
     )
-    .fetch_one(&state.app.db)
+    .fetch_one(&state.app.read_db)
     .await
     .unwrap_or((0, 0));
     // 近一小時讀碼失敗率：看板即時顯示，超過門檻標紅（2026-09-18 讀碼失敗率一晚從 1.9% 爬到 3.6% 沒人發現）
@@ -118,7 +118,7 @@ async fn status(State(state): State<ServerState>) -> ApiResult<serde_json::Value
         "SELECT COUNT(*), COALESCE(SUM(barcode = 'NoRead'), 0) FROM parcels WHERE started_ms >= ?",
     )
     .bind(crate::db::now_ms() - 3_600_000)
-    .fetch_one(&state.app.db)
+    .fetch_one(&state.app.read_db)
     .await
     .unwrap_or((0, 0));
     Ok(Json(serde_json::json!({
@@ -251,13 +251,13 @@ async fn parcels_list(State(state): State<ServerState>, Query(q): Query<ParcelsQ
     for b in &binds {
         count = count.bind(b);
     }
-    let total = count.fetch_one(&state.app.db).await?;
+    let total = count.fetch_one(&state.app.read_db).await?;
 
     let mut list = sqlx::query_as::<_, ParcelRow>(sqlx::AssertSqlSafe(format!("SELECT {PARCEL_COLS} FROM parcels{where_sql} ORDER BY id DESC LIMIT ? OFFSET ?")));
     for b in &binds {
         list = list.bind(b);
     }
-    let rows = list.bind(limit).bind(offset).fetch_all(&state.app.db).await?;
+    let rows = list.bind(limit).bind(offset).fetch_all(&state.app.read_db).await?;
     Ok(Json(serde_json::json!({ "total": total, "list": rows })))
 }
 
@@ -272,20 +272,20 @@ struct EventRow {
 async fn parcel_detail(State(state): State<ServerState>, Path(id): Path<i64>) -> ApiResult<serde_json::Value> {
     let parcel = sqlx::query_as::<_, ParcelRow>(sqlx::AssertSqlSafe(format!("SELECT {PARCEL_COLS} FROM parcels WHERE id = ?")))
         .bind(id)
-        .fetch_optional(&state.app.db)
+        .fetch_optional(&state.app.read_db)
         .await?
         .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "找不到這件包裹".into()))?;
     let events = sqlx::query_as::<_, EventRow>("SELECT ts_ms, source, kind, raw FROM parcel_events WHERE parcel_id = ? ORDER BY ts_ms, id")
         .bind(id)
-        .fetch_all(&state.app.db)
+        .fetch_all(&state.app.read_db)
         .await?;
     let prints: Vec<PrintJobRow> = sqlx::query_as("SELECT id, barcode, chute_code, printer_port, profile, status, attempts, last_error, not_before_ms, created_ms, finished_ms FROM print_jobs WHERE parcel_id = ? ORDER BY id")
         .bind(id)
-        .fetch_all(&state.app.db)
+        .fetch_all(&state.app.read_db)
         .await?;
     let images: Vec<ParcelImageRow> = sqlx::query_as("SELECT id, file_name, size, received_at, (orig_path IS NOT NULL) AS has_orig FROM parcel_images WHERE parcel_id = ? ORDER BY id")
         .bind(id)
-        .fetch_all(&state.app.db)
+        .fetch_all(&state.app.read_db)
         .await?;
     Ok(Json(serde_json::json!({ "parcel": parcel, "events": events, "print_jobs": prints, "images": images })))
 }
@@ -329,14 +329,14 @@ async fn parcel_image_meta(State(state): State<ServerState>, Path(id): Path<i64>
           WHERE i.id = ?",
     )
         .bind(id)
-        .fetch_optional(&state.app.db)
+        .fetch_optional(&state.app.read_db)
         .await?;
     Ok(Json(row.ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "找不到這張照片".into()))?))
 }
 
 /// 讀碼站照片本體；路徑只從資料表拿，不吃網址上的檔名
 async fn parcel_image_file(State(state): State<ServerState>, Path(id): Path<i64>, Query(q): Query<ImageQuery>) -> Result<Response, ApiError> {
-    let row: Option<(String, Option<String>)> = sqlx::query_as("SELECT rel_path, orig_path FROM parcel_images WHERE id = ?").bind(id).fetch_optional(&state.app.db).await?;
+    let row: Option<(String, Option<String>)> = sqlx::query_as("SELECT rel_path, orig_path FROM parcel_images WHERE id = ?").bind(id).fetch_optional(&state.app.read_db).await?;
     let (rel, orig) = row.ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "找不到這張照片".into()))?;
     let rel = if q.orig == 1 { orig.ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "這件沒有保留原圖".into()))? } else { rel };
     let path = crate::device::camera_ftp::images_dir(&state.app.config.current().camera_ftp, &state.app.data_dir).join(&rel);
@@ -351,7 +351,7 @@ async fn parcels_export(State(state): State<ServerState>, Query(q): Query<Parcel
     for b in &binds {
         list = list.bind(b);
     }
-    let rows = list.fetch_all(&state.app.db).await?;
+    let rows = list.fetch_all(&state.app.read_db).await?;
 
     let bytes = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<u8>> {
         use rust_xlsxwriter::Workbook;
@@ -438,7 +438,7 @@ struct DailyRow {
 async fn stats_daily(State(state): State<ServerState>, Query(q): Query<DaysQuery>) -> ApiResult<Vec<DailyRow>> {
     let rows = sqlx::query_as::<_, DailyRow>("SELECT day, total, done, noread, defaulted, abnormal FROM daily_stats ORDER BY day DESC LIMIT ?")
         .bind(q.days.clamp(1, 365))
-        .fetch_all(&state.app.db)
+        .fetch_all(&state.app.read_db)
         .await?;
     Ok(Json(rows))
 }
@@ -485,7 +485,7 @@ async fn stats_hourly(State(state): State<ServerState>, Query(q): Query<HoursQue
     .bind(&default_chute)
     .bind(&default_chute)
     .bind(&since)
-    .fetch_all(&state.app.db)
+    .fetch_all(&state.app.read_db)
     .await?;
     let mut out: Vec<HourlyRow> = (0..hours)
         .map(|i| HourlyRow { hour: (first + Duration::hours(i)).format("%Y-%m-%d %H:00").to_string(), ..Default::default() })
@@ -513,7 +513,7 @@ async fn stats_overview(State(state): State<ServerState>, Query(q): Query<RangeQ
     let from = super::stats::parse_day(q.from.as_deref()).map_err(bad)?;
     let to = super::stats::parse_day(q.to.as_deref()).map_err(bad)?;
     let general = state.app.config.current().general;
-    let overview = super::stats::overview(&state.app.db, general.retention_days, &general.default_chute, from, to)
+    let overview = super::stats::overview(&state.app.read_db, general.retention_days, &general.default_chute, from, to)
         .await
         .map_err(|e| bad(e.to_string()))?;
     Ok(Json(overview))
@@ -524,19 +524,19 @@ async fn report_day(State(state): State<ServerState>, Query(q): Query<RangeQuery
     let day = match q.from.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         Some(s) => super::stats::parse_day(Some(s)).map_err(bad)?,
         None => {
-            let latest: Option<String> = sqlx::query_scalar("SELECT day FROM daily_stats WHERE total > 0 ORDER BY day DESC LIMIT 1").fetch_optional(&state.app.db).await?;
+            let latest: Option<String> = sqlx::query_scalar("SELECT day FROM daily_stats WHERE total > 0 ORDER BY day DESC LIMIT 1").fetch_optional(&state.app.read_db).await?;
             super::stats::parse_day(latest.as_deref()).map_err(bad)?
         }
     };
     let general = state.app.config.current().general;
-    let overview = super::stats::overview(&state.app.db, general.retention_days, &general.default_chute, day, day).await.map_err(|e| bad(e.to_string()))?;
+    let overview = super::stats::overview(&state.app.read_db, general.retention_days, &general.default_chute, day, day).await.map_err(|e| bad(e.to_string()))?;
     let findings = super::report::findings(&overview);
     // 前一天／後一天有沒有資料，前端做翻頁用
     let (prev, next): (Option<String>, Option<String>) = sqlx::query_as(
         "SELECT (SELECT MAX(day) FROM daily_stats WHERE total > 0 AND day < ?1), (SELECT MIN(day) FROM daily_stats WHERE total > 0 AND day > ?1)",
     )
     .bind(day.format("%Y-%m-%d").to_string())
-    .fetch_one(&state.app.db)
+    .fetch_one(&state.app.read_db)
     .await?;
     Ok(Json(serde_json::json!({ "day": overview.from, "prev_day": prev, "next_day": next, "findings": findings, "overview": overview })))
 }
@@ -609,19 +609,8 @@ async fn config_put(
     if !(1..=1440).contains(&w.lock_minutes) {
         return Err(bad("鎖住分鐘數必須在 1–1440"));
     }
-    // 外網來源：不管送來的 web_access 長怎樣，一律以拿到寫入鎖當下的現況為準——
-    // 只比對不覆蓋的話，外網拿著舊快照就能把內網剛改好的設定蓋回去
-    state
-        .app
-        .config
-        .update_with(move |current| {
-            let mut next = cfg;
-            if external {
-                next.web_access = current.web_access.clone();
-            }
-            next
-        })
-        .await?;
+    // 範圍檢查與外網保留網頁存取設定都在寫入鎖內做（見 save_request）
+    state.app.config.save_request(cfg, external).await?.map_err(bad)?;
     event_log::log(&state.app.db, Level::Info, "server", "config", String::from("設定已更新"));
     Ok(Json(serde_json::json!({ "ok": true })))
 }
@@ -737,7 +726,7 @@ struct ChuteApi {
 
 async fn chutes_get(State(state): State<ServerState>) -> ApiResult<Vec<ChuteApi>> {
     let rows = sqlx::query_as::<_, ChuteApi>("SELECT code, label, cid, printer_port, enabled, sort_order FROM chutes ORDER BY sort_order, code")
-        .fetch_all(&state.app.db)
+        .fetch_all(&state.app.read_db)
         .await?;
     Ok(Json(rows))
 }
@@ -821,7 +810,7 @@ async fn abnormal_review(State(state): State<ServerState>, Query(q): Query<Revie
     if !q.cause.is_empty() {
         query = query.bind(&q.cause);
     }
-    let rows = query.bind(q.limit.clamp(1, 200)).bind(q.offset.max(0)).fetch_all(&state.app.db).await?;
+    let rows = query.bind(q.limit.clamp(1, 200)).bind(q.offset.max(0)).fetch_all(&state.app.read_db).await?;
 
     let count_sql = format!("SELECT COUNT(*) FROM ({base}) WHERE {filter}");
     let mut cq = sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(count_sql)).bind(&default_chute).bind(&ts_from).bind(&ts_to);
@@ -831,7 +820,7 @@ async fn abnormal_review(State(state): State<ServerState>, Query(q): Query<Revie
     if !q.cause.is_empty() {
         cq = cq.bind(&q.cause);
     }
-    let total: i64 = cq.fetch_one(&state.app.db).await?;
+    let total: i64 = cq.fetch_one(&state.app.read_db).await?;
 
     // 整天的分類與原因統計（不受篩選影響）
     let summary_sql = format!("SELECT kind, cause, COUNT(*) AS n FROM ({base}) WHERE kind IS NOT NULL GROUP BY kind, cause");
@@ -839,7 +828,7 @@ async fn abnormal_review(State(state): State<ServerState>, Query(q): Query<Revie
         .bind(&default_chute)
         .bind(&ts_from)
         .bind(&ts_to)
-        .fetch_all(&state.app.db)
+        .fetch_all(&state.app.read_db)
         .await?;
     let mut by_kind = serde_json::json!({ "sorter": 0, "middleware": 0, "noread": 0 });
     let mut cause_counts: std::collections::BTreeMap<&str, i64> = NOREAD_CAUSES.iter().map(|c| (*c, 0)).collect();
@@ -865,19 +854,30 @@ async fn abnormal_review(State(state): State<ServerState>, Query(q): Query<Revie
     })))
 }
 
+/// 格口表存檔前的檢查；訊息直接給操作人員看
+fn validate_chutes(list: &[ChuteApi], default_code: &str) -> Result<(), String> {
+    if !list.iter().any(|c| c.code.trim() == default_code) {
+        return Err(format!("格口表必須包含預設格口 {default_code}"));
+    }
+    let mut seen = std::collections::HashSet::new();
+    for c in list {
+        let code = c.code.trim();
+        if code.is_empty() {
+            return Err("格口代號不可空白".into());
+        }
+        if !seen.insert(code) {
+            return Err(format!("格口代號 {code} 重複了，每個格口要用不同的代號"));
+        }
+        if !crate::protocol::Cid::try_from_i64(c.cid).is_some_and(|cid| cid.is_valid()) {
+            return Err(format!("格口 {code} 的 CID {} 格式不合法", c.cid));
+        }
+    }
+    Ok(())
+}
+
 async fn chutes_put(State(state): State<ServerState>, Json(list): Json<Vec<ChuteApi>>) -> ApiResult<serde_json::Value> {
     let default_code = state.app.config.current().general.default_chute;
-    if !list.iter().any(|c| c.code == default_code) {
-        return Err(bad(format!("格口表必須包含預設格口 {default_code}")));
-    }
-    for c in &list {
-        if c.code.trim().is_empty() {
-            return Err(bad("格口代號不可空白"));
-        }
-        if !crate::protocol::Cid(c.cid as u32).is_valid() {
-            return Err(bad(format!("格口 {} 的 CID {} 格式不合法", c.code, c.cid)));
-        }
-    }
+    validate_chutes(&list, &default_code).map_err(bad)?;
     let mut tx = state.app.db.begin().await?;
     sqlx::query("DELETE FROM chutes").execute(&mut *tx).await?;
     for c in &list {
@@ -925,13 +925,17 @@ struct CommandBody {
     command: String,
 }
 
+/// 網頁直送分揀機的指令只准查詢與燈控類。分揀機以 `;` 分隔多條指令，只看開頭的話
+/// `KL …;Kn …` 會把分揀指令一起送出去，所以 `;` 與任何控制字元一律不收
+fn allowed_sorter_command(raw: &str) -> Option<String> {
+    let cmd = raw.trim().to_string();
+    let allowed = cmd.starts_with("KL ") || cmd.starts_with("Kd") || cmd.starts_with("p1 ") || cmd.starts_with("KY");
+    (allowed && !cmd.contains(';') && !cmd.chars().any(char::is_control)).then_some(cmd)
+}
+
 /// 只允許查詢與燈控類指令直送，避免網頁誤下分揀指令
 async fn sorter_command(State(state): State<ServerState>, Json(b): Json<CommandBody>) -> ApiResult<serde_json::Value> {
-    let cmd = b.command.trim().to_string();
-    let allowed = cmd.starts_with("KL ") || cmd.starts_with("Kd") || cmd.starts_with("p1 ") || cmd.starts_with("KY");
-    if !allowed || cmd.contains('\n') {
-        return Err(bad("只允許 KL／Kd／p1／KY 類指令"));
-    }
+    let cmd = allowed_sorter_command(&b.command).ok_or_else(|| bad("只允許 KL／Kd／p1／KY 類指令"))?;
     state.app.tracker.get().ok_or_else(|| unavailable("狀態機"))?.sorter_raw(cmd).await;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
@@ -1092,7 +1096,7 @@ async fn print_jobs(State(state): State<ServerState>, Query(q): Query<StatusQuer
     for b in bc_binds.iter().chain(kw_binds.iter()) {
         count = count.bind(b);
     }
-    let total = count.fetch_one(&state.app.db).await?;
+    let total = count.fetch_one(&state.app.read_db).await?;
     let mut list = sqlx::query_as::<_, PrintJobRow>(sqlx::AssertSqlSafe(format!(
         "SELECT id, barcode, chute_code, printer_port, profile, status, attempts, last_error, not_before_ms, created_ms, finished_ms
          FROM print_jobs {where_sql} ORDER BY id DESC LIMIT ? OFFSET ?"
@@ -1104,7 +1108,7 @@ async fn print_jobs(State(state): State<ServerState>, Query(q): Query<StatusQuer
     let rows = list
     .bind(limit)
     .bind(offset)
-    .fetch_all(&state.app.db)
+    .fetch_all(&state.app.read_db)
     .await?;
     Ok(Json(serde_json::json!({ "total": total, "list": rows })))
 }
@@ -1116,7 +1120,7 @@ async fn print_job_retry(State(state): State<ServerState>, Path(id): Path<i64>) 
 
 /// 補印前看「印出來長怎樣」：從還沒印掉的點陣檔還原成 PNG；印完檔案就清了，只有待印／失敗的看得到
 async fn print_job_preview(State(state): State<ServerState>, Path(id): Path<i64>) -> Result<Response, ApiError> {
-    let row: Option<(String, String)> = sqlx::query_as("SELECT tspl_path, status FROM print_jobs WHERE id = ?").bind(id).fetch_optional(&state.app.db).await?;
+    let row: Option<(String, String)> = sqlx::query_as("SELECT tspl_path, status FROM print_jobs WHERE id = ?").bind(id).fetch_optional(&state.app.read_db).await?;
     let (path, status) = row.ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "找不到這筆列印任務".into()))?;
     let data = tokio::fs::read(&path).await.map_err(|_| {
         ApiError(StatusCode::NOT_FOUND, if status == "done" { "已印出的面單不保留點陣檔".into() } else { "點陣檔不存在".into() })
@@ -1141,7 +1145,7 @@ async fn printers(State(state): State<ServerState>) -> ApiResult<serde_json::Val
         Err(_) => usb::list_printers().into_iter().map(|(p, d)| (p, d.to_string_lossy().into_owned())).collect(),
     };
     let chutes = sqlx::query_as::<_, ChuteApi>("SELECT code, label, cid, printer_port, enabled, sort_order FROM chutes ORDER BY sort_order")
-        .fetch_all(&state.app.db)
+        .fetch_all(&state.app.read_db)
         .await?;
     let configured: Vec<serde_json::Value> = chutes
         .iter()
@@ -1152,7 +1156,7 @@ async fn printers(State(state): State<ServerState>) -> ApiResult<serde_json::Val
 }
 
 async fn printer_test(State(state): State<ServerState>, Path(port): Path<String>) -> ApiResult<serde_json::Value> {
-    let chute: Option<(String,)> = sqlx::query_as("SELECT code FROM chutes WHERE printer_port = ? LIMIT 1").bind(&port).fetch_optional(&state.app.db).await?;
+    let chute: Option<(String,)> = sqlx::query_as("SELECT code FROM chutes WHERE printer_port = ? LIMIT 1").bind(&port).fetch_optional(&state.app.read_db).await?;
     let label = chute.map(|c| c.0).unwrap_or_else(|| port.clone());
     state.app.printer.get().ok_or_else(|| unavailable("列印服務"))?.print_raw(&port, tspl::test_page(&label)).await?;
     event_log::log(&state.app.db, Level::Info, "printer", "test", format!("{label}（{port}）測試頁已送出"));
@@ -1193,7 +1197,7 @@ async fn report_queue(State(state): State<ServerState>, Query(q): Query<StatusQu
     for b in bc_binds.iter().chain(kw_binds.iter()) {
         count = count.bind(b);
     }
-    let total = count.fetch_one(&state.app.db).await?;
+    let total = count.fetch_one(&state.app.read_db).await?;
     let mut list = sqlx::query_as::<_, ReportRow>(sqlx::AssertSqlSafe(format!(
         "SELECT r.id, r.parcel_id, p.barcode, p.chute_code, r.response_id, r.status, r.retry_count, r.next_retry_ms, r.last_error, r.created_ms, r.finished_ms
          FROM report_queue r LEFT JOIN parcels p ON p.id = r.parcel_id {where_sql} ORDER BY r.id DESC LIMIT ? OFFSET ?"
@@ -1205,7 +1209,7 @@ async fn report_queue(State(state): State<ServerState>, Query(q): Query<StatusQu
     let rows = list
     .bind(limit)
     .bind(offset)
-    .fetch_all(&state.app.db)
+    .fetch_all(&state.app.read_db)
     .await?;
     Ok(Json(serde_json::json!({ "total": total, "list": rows })))
 }
@@ -1259,7 +1263,7 @@ async fn logs(State(state): State<ServerState>, Query(q): Query<LogsQuery>) -> A
     for b in &kw_binds {
         count = count.bind(b);
     }
-    let total = count.fetch_one(&state.app.db).await?;
+    let total = count.fetch_one(&state.app.read_db).await?;
     let mut list = sqlx::query_as::<_, LogRow>(sqlx::AssertSqlSafe(format!(
         "SELECT id, level, category, action, message, created_at FROM event_log {where_sql} ORDER BY id DESC LIMIT ? OFFSET ?"
     )))
@@ -1270,7 +1274,7 @@ async fn logs(State(state): State<ServerState>, Query(q): Query<LogsQuery>) -> A
     let rows = list
     .bind(limit)
     .bind(offset)
-    .fetch_all(&state.app.db)
+    .fetch_all(&state.app.read_db)
     .await?;
     Ok(Json(serde_json::json!({ "total": total, "list": rows })))
 }
@@ -1418,4 +1422,41 @@ mod tests {
         assert!(!super::is_log_file_name("sorter.2026-09-15.log.bak"));
         assert!(!super::is_log_file_name("signals-x.log"));
     }
+
+    #[test]
+    fn 分揀機直送指令_不可用分號或控制字元夾帶分揀指令() {
+        assert_eq!(super::allowed_sorter_command(" KL 0 2 3200 ").as_deref(), Some("KL 0 2 3200"));
+        assert_eq!(super::allowed_sorter_command("Kd[").as_deref(), Some("Kd["));
+        // 分揀機以 `;` 分隔多條指令：開頭合法、後面接 Kn 也不行
+        assert_eq!(super::allowed_sorter_command("KL 0 2 3200;Kn 101 01 03 100 23 1"), None);
+        assert_eq!(super::allowed_sorter_command("Kd[;Kx999;Kk2"), None);
+        assert_eq!(super::allowed_sorter_command("KL 0 2 3200\rKn 1"), None);
+        assert_eq!(super::allowed_sorter_command("Kn 101 01 03 100 23 1"), None);
+    }
+
+
+    fn chute(code: &str, cid: i64) -> super::ChuteApi {
+        super::ChuteApi { code: code.into(), label: code.into(), cid, printer_port: None, enabled: true, sort_order: 0 }
+    }
+
+    #[test]
+    fn 格口表存檔_代號重複要擋下並說人話_預設格口比對去空白() {
+        let ok = vec![chute("L1", 1000323), chute("RS", 1007301)];
+        assert_eq!(super::validate_chutes(&ok, "RS"), Ok(()));
+        let dup = vec![chute("L1", 1000323), chute("L1 ", 1002123), chute("RS", 1007301)];
+        assert_eq!(super::validate_chutes(&dup, "RS"), Err("格口代號 L1 重複了，每個格口要用不同的代號".into()));
+        assert_eq!(super::validate_chutes(&[chute("RS ", 1007301)], "RS"), Ok(()), "寫入時會去空白，比對也要去");
+        assert!(super::validate_chutes(&[chute("L1", 1000323)], "RS").is_err());
+        assert!(super::validate_chutes(&[chute("RS", -1)], "RS").is_err());
+    }
+
+
+    #[test]
+    fn 時間字串在日期型別的邊界_不可恐慌() {
+        for s in ["+262142-12-31 23:59:59", "-262143-01-01", "+262142-12-31"] {
+            let _ = super::local_ts_ms(Some(s));
+        }
+        assert!(super::local_ts_ms(Some("2026-10-09")).is_some());
+    }
+
 }

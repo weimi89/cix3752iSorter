@@ -8,13 +8,10 @@
  * 同一則訊息 30 秒內只送一次、每分鐘最多 20 則；回報本身失敗時不再回報，避免陷入迴圈。
  */
 import { api } from '@/api/http'
+import { createThrottle } from '@/api/errorThrottle'
 import { isTauriRuntime } from '@/api/runtime'
 
-const DEDUP_MS = 30_000
-const MAX_PER_MINUTE = 20
-const recent = new Map()
-let windowStart = 0
-let windowCount = 0
+const throttle = createThrottle()
 
 const describe = err => {
   if (err instanceof Error) return { message: err.message || String(err), stack: err.stack || '' }
@@ -24,12 +21,7 @@ const describe = err => {
 
 const report = (err, source, router) => {
   const { message, stack } = describe(err)
-  const now = Date.now()
-  const key = `${source}|${message}`
-  if ((recent.get(key) || 0) > now - DEDUP_MS) return
-  recent.set(key, now)
-  if (now - windowStart > 60_000) { windowStart = now; windowCount = 0 }
-  if (++windowCount > MAX_PER_MINUTE) return
+  if (!throttle.allow(`${source}|${message}`, Date.now())) return
   api.reportClientError({
     message,
     stack,

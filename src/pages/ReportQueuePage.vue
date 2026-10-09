@@ -1,7 +1,7 @@
 <script setup>
 import { useI18n } from 'vue-i18n'
 import { api } from '@/api/http'
-import { listen } from '@/api/events'
+import { useServerEvent } from '@/composables/useServerEvent'
 import { fmtMs } from '@/composables/useFormat'
 import AppHeader from '@/components/AppHeader.vue'
 import PageActions from '@/components/PageActions.vue'
@@ -9,6 +9,7 @@ import TablePagination from '@/components/TablePagination.vue'
 import MultiNoField from '@/components/MultiNoField.vue'
 import AppDatePicker from '@/components/AppDatePicker.vue'
 import { toast } from 'vue3-toastify'
+import { usePagedList } from '@/composables/usePagedList'
 
 const { t } = useI18n()
 const status = ref(null)
@@ -19,42 +20,23 @@ const endDate = ref('')
 const chute = ref('')
 const chutes = ref([])
 const chuteItems = computed(() => [{ value: '', title: t('common.all') }, ...chutes.value.map(c => ({ value: c, title: c }))])
-const page = ref(1)
-const pageSize = ref(25)
-const total = ref(0)
-const list = ref([])
-const loading = ref(false)
-const errorMsg = ref('')
 const searchOpen = ref(0)
 const statusColor = { pending: 'secondary', sending: 'info', success: 'success', failed: 'error' }
 const STATUSES = computed(() => [{ value: null, title: t('common.all') }, ...['pending', 'sending', 'success', 'failed'].map(s => ({ value: s, title: t(`report.s.${s}`) }))])
 
-const load = async () => {
-  loading.value = true
-  errorMsg.value = ''
-  try {
-    const d = await api.reportQueue({ status: status.value, q: q.value, barcode: barcode.value, start: startDate.value ? `${startDate.value} 00:00:00` : '', end: endDate.value ? `${endDate.value} 23:59:59.999` : '', chute: chute.value, page: page.value, limit: pageSize.value })
-    total.value = d.total
-    list.value = d.list
-  } catch (e) { errorMsg.value = e.message } finally { loading.value = false }
-}
-const search = () => { page.value = 1; load() }
+const { page, pageSize, total, list, loading, errorMsg, load, search, refreshSoon } = usePagedList(p => api.reportQueue({ status: status.value, q: q.value, barcode: barcode.value, start: startDate.value ? `${startDate.value} 00:00:00` : '', end: endDate.value ? `${endDate.value} 23:59:59.999` : '', chute: chute.value, ...p }))
 const resetSearch = () => { status.value = null; q.value = ''; barcode.value = ''; startDate.value = ''; endDate.value = ''; chute.value = ''; search() }
 const retry = async id => {
   try { await api.reportRetry(id); toast(t('common.done'), { type: 'success' }); load() } catch (e) { toast(e.message, { type: 'error' }) }
 }
 const actions = computed(() => [{ key: 'reload', label: t('common.reload'), icon: 'tabler-refresh', loading: loading.value, onClick: load }])
 
-watch(pageSize, () => { page.value = 1; load() })
-watch(page, load)
-let unlisten = null
-let timer = null
+useServerEvent('report-queue', () => { if (page.value !== 1) return; refreshSoon(800) })
+// 格口清單只給篩選選單用，清單不用等它
 onMounted(async () => {
-  try { chutes.value = (await api.chutes()).map(c => c.code) } catch {}
   load()
-  unlisten = listen('report-queue', () => { if (page.value !== 1) return; clearTimeout(timer); timer = setTimeout(load, 800) })
+  try { chutes.value = (await api.chutes()).map(c => c.code) } catch {}
 })
-onBeforeUnmount(() => { unlisten?.(); clearTimeout(timer) })
 </script>
 
 <template>

@@ -41,29 +41,23 @@ async fn run_headless(cli: Cli) -> anyhow::Result<()> {
     let data_dir = cli.data_dir.unwrap_or_else(|| PathBuf::from("data"));
     let cancel = CancellationToken::new();
     let started = app::bootstrap(&config_path, &data_dir, cancel.clone()).await?;
+    let tasks = started.app.tasks.clone();
 
     // supervisor／systemd 停服務送的是 SIGTERM，不只 Ctrl-C；兩種都要走乾淨關閉（裝置連線收線、日誌 flush）
     let shutdown = {
         let cancel = cancel.clone();
         tokio::spawn(async move {
-            #[cfg(unix)]
-            {
-                let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).expect("SIGTERM handler");
-                tokio::select! {
-                    _ = tokio::signal::ctrl_c() => {}
-                    _ = term.recv() => {}
-                }
-            }
-            #[cfg(not(unix))]
-            {
-                let _ = tokio::signal::ctrl_c().await;
-            }
+            app::wait_terminate().await;
             tracing::info!("收到結束訊號，開始關閉");
             cancel.cancel();
         })
     };
     server::serve(started.app, &started.bind, cancel.clone()).await?;
     shutdown.abort();
+    // 函式一回傳 runtime 就被丟掉、所有工作中止；寫入佇列裡的包裹與剛定格口的回報要先寫完
+    if !cix3752i_sorter::supervise::drain(&tasks, cix3752i_sorter::supervise::DRAIN_LIMIT).await {
+        tracing::error!("結束時寫入佇列沒在時限內寫完，部分包裹狀態或回報可能遺失");
+    }
     tracing::info!("已關閉");
     Ok(())
 }

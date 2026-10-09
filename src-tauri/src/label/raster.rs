@@ -29,13 +29,18 @@ impl Raster {
     }
 }
 
+/// 標籤紙尺寸上限（mm）：現場用 95×195、100×100、100×150。超過就當成解析不出尺寸——
+/// 名稱打錯多一兩個 0 時照算會配置數 GB 的畫布（配置失敗整個程式終止），乘以每 mm 像素也會溢位
+const MAX_MM_W: u32 = 300;
+const MAX_MM_H: u32 = 1000;
+
 /// 從 profile 名稱取尺寸（mm），如 `PAPER-01#100*150` → (100, 150)
 pub fn profile_size_mm(profile: &str) -> Option<(u32, u32)> {
     let (_, rest) = profile.split_once('#')?;
     let (w, h) = rest.split_once('*')?;
     let w: u32 = w.trim().parse().ok()?;
     let h: u32 = h.trim().chars().take_while(|c| c.is_ascii_digit()).collect::<String>().parse().ok()?;
-    (w > 0 && h > 0).then_some((w, h))
+    ((1..=MAX_MM_W).contains(&w) && (1..=MAX_MM_H).contains(&h)).then_some((w, h))
 }
 
 /// 依 profile 縮放到標籤紙大小；解析不出尺寸就維持原圖
@@ -114,6 +119,17 @@ mod tests {
         assert_eq!(profile_size_mm("PAPER-01#95*195"), Some((95, 195)));
         assert_eq!(profile_size_mm("EPSON L6190"), None);
         assert_eq!(profile_size_mm("X#0*10"), None);
+    }
+
+    #[test]
+    fn 紙張尺寸不合理_比照解析不出尺寸_不配置巨大畫布也不溢位() {
+        // 中介機的 print_profile 打錯時（多打幾個 0），不可讓整個程式因配置幾 GB 畫布而終止
+        assert_eq!(profile_size_mm("PAPER-01#10000*10000"), None);
+        assert_eq!(profile_size_mm("PAPER-01#100*1001"), None);
+        assert_eq!(profile_size_mm("PAPER-01#301*150"), None);
+        assert_eq!(profile_size_mm("PAPER-01#300*1000"), Some((300, 1000)), "上限本身可以");
+        let img = DynamicImage::ImageLuma8(GrayImage::from_pixel(40, 60, Luma([0u8])));
+        assert_eq!(fit_to_profile(&img, Some("X#600000000*1")).dimensions(), (40, 60), "乘以 8 會溢位的寬度");
     }
 
     #[test]

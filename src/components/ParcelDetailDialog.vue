@@ -2,6 +2,7 @@
 /** 單件包裹：訊號時間軸（相對 ~P 的毫秒）與列印任務 */
 import { api } from '@/api/http'
 import { fmtMs, fmtDuration, statusMeta, sourceMeta } from '@/composables/useFormat'
+import { useLatestRequest } from '@/composables/useLatestRequest'
 import { toast } from 'vue3-toastify'
 import { useI18n } from 'vue-i18n'
 
@@ -12,16 +13,20 @@ const { t } = useI18n()
 const loading = ref(false)
 const data = ref(null)
 
+// 關掉改開另一件時，前一件晚到的資料不能顯示在這一件；關掉後才到的也不用顯示
+const latest = useLatestRequest()
 watch(() => [props.modelValue, props.parcelId], async ([open, id]) => {
+  const req = latest.start()
   if (!open || !id) return
   loading.value = true
   data.value = null
   try {
-    data.value = await api.parcel(id)
+    const d = await api.parcel(id)
+    if (latest.isLatest(req)) data.value = d
   } catch (e) {
-    toast(e.message, { type: 'error' })
+    if (latest.isLatest(req)) toast(e.message, { type: 'error' })
   } finally {
-    loading.value = false
+    if (latest.isLatest(req)) loading.value = false
   }
 }, { immediate: true })
 

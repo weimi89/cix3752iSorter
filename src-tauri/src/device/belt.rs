@@ -22,7 +22,7 @@ pub fn spawn(
     let opts = LineOpts { on_connect, idle_timeout: None, ..Default::default() };
     let (client, mut events) = line_client::spawn("belt", addr_rx, opts, cancel.clone());
 
-    tokio::spawn(async move {
+    crate::supervise::spawn("皮帶事件轉送", async move {
         while let Some(ev) = events.recv().await {
             let e = match ev {
                 LineEvent::Connected { addr } => {

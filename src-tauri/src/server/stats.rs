@@ -294,7 +294,14 @@ pub const MAX_RANGE_DAYS: i64 = 366;
 pub fn parse_day(s: Option<&str>) -> Result<NaiveDate, String> {
     match s.map(str::trim).filter(|s| !s.is_empty()) {
         None => Ok(Local::now().date_naive()),
-        Some(s) => NaiveDate::parse_from_str(s, "%Y-%m-%d").map_err(|_| format!("日期格式錯誤：{s}（應為 YYYY-MM-DD）")),
+        Some(s) => {
+            let d = NaiveDate::parse_from_str(s, "%Y-%m-%d").map_err(|_| format!("日期格式錯誤：{s}（應為 YYYY-MM-DD）"))?;
+            // 日期型別能表示到西元 26 萬年，查詢時要「加一天」當右界，邊界日期會讓請求恐慌
+            if !(2000..=9999).contains(&chrono::Datelike::year(&d)) {
+                return Err(format!("日期超出範圍：{s}"));
+            }
+            Ok(d)
+        }
     }
 }
 
@@ -484,21 +491,25 @@ async fn hour_buckets(db: &DbPool, default_chute: &str, ts_from: &str, ts_to: &s
     Ok((hourly, heat))
 }
 
+/// 先依日期挑出區間內的件、按格口彙總，再接到格口表。直接 `chutes LEFT JOIN parcels ON chute_code`
+/// 會變成逐格口撈「該格口所有日子」的件再過濾日期，選一天反而比選半個月慢
+const CHUTE_COUNTS_SQL: &str = "SELECT c.code, c.label, c.enabled,
+                COALESCE(s.total, 0) AS total, COALESCE(s.done, 0) AS done, COALESCE(s.refed_after, 0) AS refed_after
+           FROM chutes c
+           LEFT JOIN (SELECT p.chute_code, COUNT(*) AS total, SUM(p.status = 3) AS done,
+                             SUM(p.status = 3 AND p.barcode <> 'NoRead' AND EXISTS (
+                                 SELECT 1 FROM parcels b
+                                  WHERE b.barcode = p.barcode AND +b.status = 3 AND +b.id > p.id
+                                    AND COALESCE(b.chute_reason, '') <> 'REENTRY'
+                                    AND b.started_ms - p.started_ms BETWEEN 5000 AND 600000)) AS refed_after
+                        FROM parcels p
+                       WHERE p.started_at >= ? AND p.started_at < ? AND p.ended_ms IS NOT NULL
+                       GROUP BY p.chute_code) s ON s.chute_code = c.code
+          ORDER BY c.sort_order, c.code";
+
 /// 各格口件數，照格口表的排序；啟用中的格口即使 0 件也列出來，一眼看得出哪格沒在收
 async fn chute_counts(db: &DbPool, default_chute: &str, ts_from: &str, ts_to: &str) -> anyhow::Result<Vec<ChuteCount>> {
-    let rows = sqlx::query(
-        "SELECT c.code, c.label, c.enabled,
-                COUNT(p.id) AS total, COALESCE(SUM(p.status = 3), 0) AS done,
-                COALESCE(SUM(p.status = 3 AND p.barcode <> 'NoRead' AND EXISTS (
-                    SELECT 1 FROM parcels b
-                     WHERE b.barcode = p.barcode AND +b.status = 3 AND +b.id > p.id
-                       AND COALESCE(b.chute_reason, '') <> 'REENTRY'
-                       AND b.started_ms - p.started_ms BETWEEN 5000 AND 600000)), 0) AS refed_after
-           FROM chutes c
-           LEFT JOIN parcels p ON p.chute_code = c.code AND p.started_at >= ? AND p.started_at < ? AND p.ended_ms IS NOT NULL
-          GROUP BY c.code
-          ORDER BY c.sort_order, c.code",
-    )
+    let rows = sqlx::query(CHUTE_COUNTS_SQL)
     .bind(ts_from)
     .bind(ts_to)
     .fetch_all(db)
@@ -794,19 +805,21 @@ fn stage(key: &'static str, mut v: Vec<i64>, budget_ms: Option<i64>) -> StageSta
     }
 }
 
-/// 各段耗時：一條查詢把每件的四段時間差算出來，分位數在這裡算（區間內最多幾十萬列，記憶體夠）。
-/// 段：相機綁碼（~P→條碼）、中介機回覆（~P→格口）、分揀機受理（Kn→~c）、頭部交接（~j→~g）、落格口（~P→~e，只算正常完成）
-async fn stage_stats(db: &DbPool, ts_from: &str, ts_to: &str) -> anyhow::Result<(Vec<StageStat>, Vec<ChuteTravel>)> {
-    let rows = sqlx::query(
-        "SELECT p.chute_code, p.status, p.travel_ms,
+/// `CROSS JOIN` 在 SQLite 會固定連接順序：先挑區間內的包裹、再依包裹編號查事件。
+/// 寫成一般 JOIN 時查詢規劃會選擇掃整張事件表（上百萬筆）再回頭過濾日期
+const STAGE_SQL: &str = "SELECT p.chute_code, p.status, p.travel_ms,
                 MAX(CASE WHEN pe.source = 'camera' AND pe.kind = 'bind' THEN pe.ts_ms END) - p.started_ms AS bind_ms,
                 MAX(CASE WHEN pe.source = 'api' AND pe.kind = 'chute' THEN pe.ts_ms END) - p.started_ms AS api_ms,
                 MAX(CASE WHEN pe.source = 'sorter' AND pe.kind = 'c' THEN pe.ts_ms END) - MAX(CASE WHEN pe.source = 'tracker' AND pe.kind = 'Kn' THEN pe.ts_ms END) AS accept_ms,
                 MAX(CASE WHEN pe.source = 'sorter' AND pe.kind = 'g' THEN pe.ts_ms END) - MAX(CASE WHEN pe.source = 'sorter' AND pe.kind = 'j' THEN pe.ts_ms END) AS head_ms
-           FROM parcels p JOIN parcel_events pe ON pe.parcel_id = p.id
+           FROM parcels p CROSS JOIN parcel_events pe ON pe.parcel_id = p.id
           WHERE p.started_at >= ? AND p.started_at < ? AND p.ended_ms IS NOT NULL
-          GROUP BY p.id",
-    )
+          GROUP BY p.id";
+
+/// 各段耗時：一條查詢把每件的四段時間差算出來，分位數在這裡算（區間內最多幾十萬列，記憶體夠）。
+/// 段：相機綁碼（~P→條碼）、中介機回覆（~P→格口）、分揀機受理（Kn→~c）、頭部交接（~j→~g）、落格口（~P→~e，只算正常完成）
+async fn stage_stats(db: &DbPool, ts_from: &str, ts_to: &str) -> anyhow::Result<(Vec<StageStat>, Vec<ChuteTravel>)> {
+    let rows = sqlx::query(STAGE_SQL)
     .bind(ts_from)
     .bind(ts_to)
     .fetch_all(db)
@@ -1274,6 +1287,40 @@ mod tests {
         assert_eq!(length_bucket(25), "25-34");
         assert_eq!(length_bucket(35), ">=35");
         assert_eq!(length_bucket(300), ">=35");
+    }
+
+
+    async fn plan(db: &DbPool, sql: &str) -> Vec<String> {
+        let rows: Vec<(i64, i64, i64, String)> = sqlx::query_as(sqlx::AssertSqlSafe(format!("EXPLAIN QUERY PLAN {sql}")))
+            .bind("2026-10-08 00:00:00.000")
+            .bind("2026-10-09 00:00:00.000")
+            .fetch_all(db)
+            .await
+            .unwrap();
+        rows.into_iter().map(|r| r.3).collect()
+    }
+
+    #[tokio::test]
+    async fn 各段耗時不掃整張事件表_各格口件數先依日期挑件() {
+        let db = test_db().await;
+        let stage = plan(&db, STAGE_SQL).await;
+        assert!(!stage.iter().any(|d| d.starts_with("SCAN pe")), "事件表有上百萬筆，不可逐筆掃：{stage:?}");
+        assert!(stage.iter().any(|d| d.contains("idx_parcel_events_parcel")), "{stage:?}");
+        let chute = plan(&db, CHUTE_COUNTS_SQL).await;
+        assert!(chute.iter().any(|d| d.contains("idx_parcels_started_at")), "要先依日期挑件：{chute:?}");
+    }
+
+
+    #[test]
+    fn 日期超出合理年份一律拒絕_不可讓後面加一天時恐慌() {
+        for s in ["+262142-12-31", "262142-12-31", "99999-01-01", "0000-01-01"] {
+            if let Ok(d) = parse_day(Some(s)) {
+                assert!(d.succ_opt().is_some() && d.pred_opt().is_some(), "{s} 解析成 {d}，後面加減一天會恐慌");
+                assert!((2000..=9999).contains(&chrono::Datelike::year(&d)), "{s} 解析成 {d}，不是合理的營運日期");
+            }
+        }
+        assert!(parse_day(Some("2026-10-09")).is_ok());
+        assert!(parse_day(Some("9999-12-31")).is_ok());
     }
 
 }

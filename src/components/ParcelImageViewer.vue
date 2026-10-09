@@ -36,15 +36,18 @@ const open = async img => {
   try { meta = await api.parcelImage(img.id) } catch { /* 拿不到就只顯示圖 */ }
   if (seq !== opening) return
   const src = parcelImageUrl(meta.id, !!meta.has_orig)
+  let blob
   try {
     const res = await fetch(src.startsWith('http') ? src : apiBase() + src)
     if (!res.ok) throw new Error(String(res.status))
-    blobUrl = URL.createObjectURL(await res.blob())
+    blob = await res.blob()
   } catch {
-    emit('update:modelValue', false)
+    if (seq === opening) emit('update:modelValue', false)
     return
   }
+  // 下載途中又開了別張或關掉了：先比對再建 blob 網址，晚到的這張建了就沒人釋放
   if (seq !== opening || !holder.value) return
+  blobUrl = URL.createObjectURL(blob)
   const el = document.createElement('img')
   el.src = blobUrl
   el.alt = meta.file_name || ''

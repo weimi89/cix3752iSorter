@@ -15,6 +15,7 @@ pub mod middleware;
 pub mod protocol;
 pub mod runtime;
 pub mod server;
+pub mod supervise;
 pub mod tracker;
 pub mod updater;
 
@@ -28,7 +29,10 @@ use db::DbPool;
 #[derive(Clone)]
 pub struct AppState {
     pub config: ConfigHandle,
+    /// 狀態機與所有寫入用的連線池
     pub db: DbPool,
+    /// 網頁查詢用的唯讀連線池（見 `db::init_read`）：長查詢再多也搶不到寫入的連線
+    pub read_db: DbPool,
     pub data_dir: PathBuf,
     pub started_at: Instant,
     pub runtime: runtime::Runtime,
@@ -36,4 +40,6 @@ pub struct AppState {
     pub tracker: std::sync::Arc<std::sync::OnceLock<tracker::TrackerHandle>>,
     pub resolver: std::sync::Arc<std::sync::OnceLock<chute::ChuteResolver>>,
     pub printer: std::sync::Arc<std::sync::OnceLock<label::PrintService>>,
+    /// 結束前必須做完的工作（包裹寫入）；結束流程用 `supervise::drain` 等它們
+    pub tasks: tokio_util::task::TaskTracker,
 }

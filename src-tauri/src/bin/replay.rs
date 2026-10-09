@@ -445,6 +445,12 @@ async fn main() -> anyhow::Result<()> {
     let (bs, br) = *belt.stats.lock().await;
     let (ss, sr) = *sorter.stats.lock().await;
     eprintln!("回放完成：belt 送{bs}/收{br}  sorter 送{ss}/收{sr}");
+    // 閘門裡沒放行的 ~c：主程式送的 Kn 比日誌少，這幾件的受理與後續訊號從沒送出，
+    // 主程式那邊看到的「沒完成」是模擬器造成的，判讀回放結果時要扣掉
+    if !c_pending.is_empty() {
+        let held: usize = c_pending.iter().map(|(_, h)| h.len()).sum();
+        eprintln!("~c 閘門未放行 {} 筆（另扣住同車後續訊號 {held} 筆），對應的件在主程式不會完成", c_pending.len());
+    }
     Ok(())
 }
 

@@ -23,7 +23,7 @@ pub fn spawn(
     };
     let (client, mut events) = line_client::spawn("sorter", addr_rx, opts, cancel.clone());
 
-    tokio::spawn(async move {
+    crate::supervise::spawn("分揀機事件轉送", async move {
         while let Some(ev) = events.recv().await {
             let e = match ev {
                 LineEvent::Connected { addr } => {

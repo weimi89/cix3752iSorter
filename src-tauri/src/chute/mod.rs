@@ -285,7 +285,7 @@ impl ChuteResolver {
     ) -> Self {
         let me = Self { app, mw, tracker, chutes: Arc::new(RwLock::new(chutes)), latency: Arc::new(RwLock::new(LatencyWindow::new(2000))) };
         let this = me.clone();
-        tokio::spawn(async move {
+        crate::supervise::spawn("格口查詢", async move {
             loop {
                 let req = tokio::select! {
                     _ = cancel.cancelled() => break,

@@ -467,13 +467,69 @@ impl Default for PrintProfile {
     }
 }
 
+/// 一個超出範圍的欄位：名稱與值用來比對「原本就是這個錯誤值」
+struct RangeViolation {
+    label: &'static str,
+    value: i64,
+    message: String,
+}
+
 impl AppConfig {
+    /// 設定頁有上下限的欄位，存檔時再檢查一次——設定檔可以手改、API 可以直接打，只靠畫面擋不住。
+    /// 範圍與名稱和設定頁一致；超出範圍的值會讓每件都走預設口、綁不到條碼或一直停線
+    pub fn check_ranges(&self) -> Result<(), String> {
+        match self.range_violations().into_iter().next() {
+            Some(v) => Err(v.message),
+            None => Ok(()),
+        }
+    }
+
+    /// 存檔用：只擋這次新改出來的超範圍值。設定檔手改出來、原本就在生效的錯誤值維持原狀
+    /// （開機時已記錄錯誤）——那個欄位畫面上不一定看得到，擋下來現場就什麼都存不了
+    pub fn check_new_violations(&self, old: &AppConfig) -> Result<(), String> {
+        let before = old.range_violations();
+        match self.range_violations().into_iter().find(|v| !before.iter().any(|b| b.label == v.label && b.value == v.value)) {
+            Some(v) => Err(v.message),
+            None => Ok(()),
+        }
+    }
+
+    fn range_violations(&self) -> Vec<RangeViolation> {
+        let mut out = Vec::new();
+        let mut check = |label: &'static str, v: i64, lo: i64, hi: i64, unit: &str| {
+            if !(lo..=hi).contains(&v) {
+                out.push(RangeViolation { label, value: v, message: format!("{label}必須在 {lo}–{hi}{unit}") });
+            }
+        };
+        let (m, s, c) = (&self.middleware, &self.sorter, &self.camera);
+        check("查格口逾時", m.parcel_timeout_ms as i64, 200, 5_000, " 毫秒");
+        check("下載面單逾時", m.label_timeout_ms as i64, 200, 10_000, " 毫秒");
+        check("回報逾時", m.report_timeout_ms as i64, 500, 30_000, " 毫秒");
+        check("同格口卡件告警間隔", m.jam_alert_throttle_ms as i64, 1_000, 600_000, " 毫秒");
+        check("速度", s.speed as i64, 1, 300, "");
+        check("小車數", s.number as i64, 1, 26, "");
+        check("光電數", s.ir_num as i64, 0, 200, "");
+        check("下指令後等待受理", s.c_timeout_ms as i64, 50, 5_000, " 毫秒");
+        check("離開皮帶後等待上車", s.kx_after_e_ms as i64, 0, 5_000, " 毫秒");
+        check("綁碼窗口下限", c.bind_floor_ms, -5_000, 0, " 毫秒");
+        check("綁碼窗口上限", c.bind_ceiling_ms, 100, 10_000, " 毫秒");
+        check("同碼去重", c.dedup_ms as i64, 0, 60_000, " 毫秒");
+        check("資料保留天數", self.general.retention_days as i64, 0, 365, "");
+        check("DPI", self.print.dpi as i64, 72, 600, "");
+        check("每格口送印延遲", self.print.per_chute_delay_ms as i64, 0, 10_000, " 毫秒");
+        out
+    }
+
     /// 讀取設定檔；檔案不存在時以預設值建立一份，讓現場第一次啟動就有可編輯的範本。
     pub async fn load_or_create(path: &Path) -> anyhow::Result<Self> {
         match tokio::fs::read_to_string(path).await {
             Ok(text) => {
                 let cfg: AppConfig = toml::from_str(&text)
                     .map_err(|e| anyhow::anyhow!("設定檔 {} 解析失敗: {e}", path.display()))?;
+                // 手改出範圍外的值照常啟動（擋下來現場整條線就停了），但要留下紀錄；到設定頁存檔時會被要求改正
+                if let Err(e) = cfg.check_ranges() {
+                    tracing::error!(path = %path.display(), "設定檔有超出範圍的值：{e}");
+                }
                 Ok(cfg)
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -491,7 +547,7 @@ impl AppConfig {
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
-        fs_atomic::write_async(path, text.as_bytes()).await?;
+        fs_atomic::write_async(path, text.as_bytes(), fs_atomic::Durability::Synced).await?;
         Ok(())
     }
 }
@@ -528,11 +584,35 @@ impl ConfigHandle {
     /// 以「拿到寫入鎖當下的現況」為基礎產生新設定再落檔；要保留現況某些欄位（例如外網來源
     /// 不得動的 `web_access`）必須走這條，先讀 `current()` 再 `update()` 中間會被別人插隊。
     pub async fn update_with(&self, f: impl FnOnce(&AppConfig) -> AppConfig) -> anyhow::Result<()> {
+        self.try_update_with(|cur| Ok::<_, std::convert::Infallible>(f(cur))).await.map(|_| ())
+    }
+
+    /// 同 [`update_with`]，`f` 回 `Err` 就不寫入。要對照現況的檢查一定要放在 `f` 裡（寫入鎖之內）：
+    /// 鎖外先檢查的話，兩個人同時存，拿舊快照的那一份會通過檢查，再把別人剛改好的值蓋回去
+    pub async fn try_update_with<E>(&self, f: impl FnOnce(&AppConfig) -> Result<AppConfig, E>) -> anyhow::Result<Result<(), E>> {
         let _guard = self.write_lock.lock().await;
-        let cfg = f(&self.tx.borrow());
+        let cfg = match f(&self.tx.borrow()) {
+            Ok(c) => c,
+            Err(e) => return Ok(Err(e)),
+        };
         cfg.save(&self.path).await?;
         self.tx.send_replace(cfg);
-        Ok(())
+        Ok(Ok(()))
+    }
+
+    /// 設定頁送來的整份設定：在寫入鎖內對照當下的設定檢查範圍（只擋新引入的錯誤值）再寫入。
+    /// `keep_web_access`：外網來源不管送來的網頁存取設定長怎樣，一律保留寫入當下的現況
+    /// ——只比對不覆蓋的話，外網拿著舊快照就能把內網剛改好的設定蓋回去
+    pub async fn save_request(&self, next: AppConfig, keep_web_access: bool) -> anyhow::Result<Result<(), String>> {
+        self.try_update_with(move |current| {
+            let mut next = next;
+            if keep_web_access {
+                next.web_access = current.web_access.clone();
+            }
+            next.check_new_violations(current)?;
+            Ok(next)
+        })
+        .await
     }
 
     /// 不改內容、只讓訂閱者重跑一次（例如格口表換了要狀態機重載）；不落檔、不讀舊值再寫回
@@ -560,5 +640,79 @@ mod tests {
         assert_eq!(cfg.belt.addr, "10.0.0.1:1");
         assert_eq!(cfg.belt.cmd.stop, "KM998 1");
         assert_eq!(cfg.sorter.speed, 100);
+    }
+
+    #[test]
+    fn 設定檔原本就有超範圍的值_存別的欄位不可被擋_改成另一個超範圍值要擋() {
+        // 畫面上不一定看得到那個欄位（例如印單關閉時不顯示下載面單逾時），擋下來現場就什麼都存不了
+        let mut old = AppConfig::default();
+        old.middleware.label_timeout_ms = 50;
+        let mut next = old.clone();
+        next.sorter.speed = 120;
+        assert_eq!(next.check_new_violations(&old), Ok(()), "原本的錯誤值沒動，存別的欄位照常");
+        let mut next = old.clone();
+        next.middleware.label_timeout_ms = 60;
+        assert_eq!(next.check_new_violations(&old), Err("下載面單逾時必須在 200–10000 毫秒".into()), "改成另一個錯誤值要擋");
+        let mut next = old.clone();
+        next.middleware.parcel_timeout_ms = 0;
+        assert_eq!(next.check_new_violations(&old), Err("查格口逾時必須在 200–5000 毫秒".into()), "新改出來的錯誤值要擋");
+        assert_eq!(AppConfig::default().check_new_violations(&AppConfig::default()), Ok(()));
+    }
+
+    #[test]
+    fn 存檔範圍檢查_與設定頁一致_超出就擋並說是哪個欄位() {
+        assert_eq!(AppConfig::default().check_ranges(), Ok(()), "預設值一定合法");
+        let mut c = AppConfig::default();
+        c.middleware.parcel_timeout_ms = 0; // 0 = 每次查格口立刻逾時，每件都走預設口
+        assert_eq!(c.check_ranges(), Err("查格口逾時必須在 200–5000 毫秒".into()));
+        let mut c = AppConfig::default();
+        c.camera.bind_floor_ms = 100; // 下限大於 0：條碼比 ~P 早到的件全部綁不到
+        assert!(c.check_ranges().unwrap_err().contains("綁碼窗口下限"));
+        let mut c = AppConfig::default();
+        c.sorter.c_timeout_ms = 10; // 比分揀機正常受理（中位 14ms）還短：每件都會被當成沒受理而停線
+        assert!(c.check_ranges().unwrap_err().contains("下指令後等待受理"));
+        let mut c = AppConfig::default();
+        c.sorter.speed = 0;
+        assert!(c.check_ranges().unwrap_err().contains("速度"));
+        let mut c = AppConfig::default();
+        c.general.retention_days = 400;
+        assert_eq!(c.check_ranges(), Err("資料保留天數必須在 0–365".into()));
+        let mut c = AppConfig::default();
+        c.middleware.report_timeout_ms = 30_000;
+        c.camera.bind_ceiling_ms = 100;
+        assert_eq!(c.check_ranges(), Ok(()), "邊界值本身可以");
+    }
+
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn 兩人同時存設定_舊快照不可把別人剛改正的錯誤值寫回去() {
+        let dir = std::env::temp_dir().join(format!("cfgrace-{}", ulid::Ulid::generate()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut bad = AppConfig::default();
+        bad.middleware.label_timeout_ms = 50;
+        let handle = ConfigHandle::new(dir.join("config.toml"), bad.clone());
+        // B 把錯誤值改正：寫入鎖握著一段時間
+        let b = {
+            let handle = handle.clone();
+            tokio::spawn(async move {
+                handle
+                    .update_with(|cur| {
+                        std::thread::sleep(std::time::Duration::from_millis(400));
+                        let mut next = cur.clone();
+                        next.middleware.label_timeout_ms = 200;
+                        next
+                    })
+                    .await
+                    .unwrap();
+            })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        // A 拿的是 B 改正前的快照（50），只改了別的欄位
+        let mut a = bad.clone();
+        a.sorter.speed = 120;
+        let r = handle.save_request(a, false).await.unwrap();
+        b.await.unwrap();
+        assert!(r.is_err(), "A 寫入當下 50 已經是新引入的錯誤值，要擋");
+        assert_eq!(handle.current().middleware.label_timeout_ms, 200);
     }
 }

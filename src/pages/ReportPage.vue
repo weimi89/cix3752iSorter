@@ -5,6 +5,7 @@ import AppHeader from '@/components/AppHeader.vue'
 import AppDatePicker from '@/components/AppDatePicker.vue'
 import PageActions from '@/components/PageActions.vue'
 import { fmtDate } from '@/composables/useFormat'
+import { useLatestRequest } from '@/composables/useLatestRequest'
 
 const { t } = useI18n()
 
@@ -15,15 +16,28 @@ const loading = ref(false)
 const errorMsg = ref('')
 const today = () => fmtDate(new Date())
 
+// 只採用最後一次查詢的結果；「要不要查」比對的是最後一次要求的日期，不是畫面上的資料——
+// 上一筆還沒回來時畫面資料是更早的，拿它比會漏查，晚到的舊回應還會把日期欄改回去
+const latest = useLatestRequest()
+let requestedDay = null
 const load = async () => {
+  const id = latest.start()
+  requestedDay = day.value
   loading.value = true
   errorMsg.value = ''
   try {
-    data.value = await api.reportDay(day.value)
-    if (day.value !== data.value.day) day.value = data.value.day
-  } catch (e) { errorMsg.value = e.message } finally { loading.value = false }
+    const d = await api.reportDay(day.value)
+    if (!latest.isLatest(id)) return
+    data.value = d
+    // 日期空白時後端回最近有件的那天，填回日期欄（不觸發再查一次）
+    if (day.value !== d.day) { requestedDay = d.day; day.value = d.day }
+  } catch (e) {
+    if (latest.isLatest(id)) errorMsg.value = e.message
+  } finally {
+    if (latest.isLatest(id)) loading.value = false
+  }
 }
-watch(day, (v, old) => { if (v && v !== old && v !== data.value?.day) load() })
+watch(day, v => { if (v && v !== requestedDay) load() })
 onMounted(load)
 
 const o = computed(() => data.value?.overview)

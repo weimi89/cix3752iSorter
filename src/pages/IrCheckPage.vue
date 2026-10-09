@@ -42,16 +42,19 @@ const openDetail = async dev => {
   await loadDetail()
 }
 const loadDetail = async () => {
-  detail.value.loading = true
-  detail.value.error = ''
+  // 回應回來時要還是同一台、而且視窗開著：關掉改開另一台後，前一台晚到的結果不能顯示在這一台
+  const d0 = detail.value
+  d0.loading = true
+  d0.error = ''
   try {
-    const d = await api.irDetail(detail.value.m2)
-    detail.value.irNum = d.ir_num
-    detail.value.triggered = d.triggered
+    const d = await api.irDetail(d0.m2)
+    if (detail.value !== d0) return
+    d0.irNum = d.ir_num
+    d0.triggered = d.triggered
   } catch (e) {
-    detail.value.error = e.message
+    if (detail.value === d0) d0.error = e.message
   } finally {
-    detail.value.loading = false
+    d0.loading = false
   }
 }
 

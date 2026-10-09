@@ -11,8 +11,9 @@
  * 而這次才剛把首次載入壓下來。只收實際用到的一百多個，代價只有幾十 KB。
  *
  * 用法:`node scripts/build-icon-subset.mjs`
- * 什麼時候要重跑:**新增或改用了新的圖示之後**。
- * 忘了重跑會被 `tests/maintenance-guards.test.mjs` 擋下來，不會默默漏掉。
+ * 什麼時候要重跑:**新增或改用了新的圖示之後**。`yarn build` 前會自動跑一次（package.json 的 prebuild），
+ * 名稱在圖示集裡找不到時以失敗結束、打包跟著停下。只認原始碼裡寫死的字面名稱（`'tabler-xxx'`），
+ * 用字串拼出來的名稱掃不到，會在斷網時變空白——圖示名稱一律寫完整字面值。
  */
 
 import { readFileSync, writeFileSync, readdirSync } from 'node:fs'

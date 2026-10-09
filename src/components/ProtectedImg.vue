@@ -7,15 +7,23 @@
  * 改用 fetch（會帶 Origin，桌面來源在放行名單內）拿回位元組再轉成 blob 網址給 <img>。
  */
 import { apiBase } from '@/api/runtime'
+import { useLatestRequest } from '@/composables/useLatestRequest'
 
 const props = defineProps({ src: { type: String, required: true }, alt: { type: String, default: '' } })
+// 載入失敗時通知使用端（例如面單預覽要改顯示說明）
+const emit = defineEmits(['error'])
 const url = ref('')
 const failed = ref(false)
 let current = ''
+// 下載途中換了圖（翻頁、切篩選）或元件已拆掉：晚到的那張不建 blob 網址——
+// 建了就沒人釋放，照片是原圖、一張幾百 KB，翻幾頁就漏掉幾十 MB；也不能蓋掉新的那張
+const latest = useLatestRequest()
+let disposed = false
 
 const release = () => { if (current) { URL.revokeObjectURL(current); current = '' } }
 
 watch(() => props.src, async src => {
+  const id = latest.start()
   release()
   url.value = ''
   failed.value = false
@@ -23,14 +31,16 @@ watch(() => props.src, async src => {
   try {
     const res = await fetch(src.startsWith('http') ? src : apiBase() + src)
     if (!res.ok) throw new Error(String(res.status))
-    current = URL.createObjectURL(await res.blob())
+    const blob = await res.blob()
+    if (disposed || !latest.isLatest(id)) return
+    current = URL.createObjectURL(blob)
     url.value = current
   } catch {
-    failed.value = true
+    if (!disposed && latest.isLatest(id)) { failed.value = true; emit('error') }
   }
 }, { immediate: true })
 
-onBeforeUnmount(release)
+onBeforeUnmount(() => { disposed = true; release() })
 </script>
 
 <template>

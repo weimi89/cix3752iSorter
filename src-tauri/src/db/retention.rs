@@ -30,10 +30,9 @@ impl Purged {
 
 /// 刪掉 `days` 天前（以本機日期 00:00 為界）的資料；回傳各表刪除筆數
 pub async fn purge(db: &DbPool, days: u32) -> Result<Purged, sqlx::Error> {
-    if days == 0 {
+    let Some(cutoff_day) = (days > 0).then(|| crate::db::retention_cutoff_day(days)).flatten() else {
         return Ok(Purged::default());
-    }
-    let cutoff_day = (chrono::Local::now() - chrono::Duration::days(days as i64)).format("%Y-%m-%d").to_string();
+    };
     let cutoff_ts = format!("{cutoff_day} 00:00:00");
     let cutoff_ms = chrono::NaiveDate::parse_from_str(&cutoff_day, "%Y-%m-%d")
         .ok()
@@ -47,20 +46,21 @@ pub async fn purge(db: &DbPool, days: u32) -> Result<Purged, sqlx::Error> {
     for (path,) in &spools {
         let _ = tokio::fs::remove_file(Path::new(path)).await;
     }
-    let print_jobs = sqlx::query("DELETE FROM print_jobs WHERE created_ms < ? AND status IN ('done', 'failed')").bind(cutoff_ms).execute(db).await?.rows_affected();
+    let print_jobs = crate::db::delete_in_batches(db, "print_jobs", "created_ms < ? AND status IN ('done', 'failed')", cutoff_ms).await?;
     // 還沒送出去的回報不刪，重啟後仍要續送
-    let reports = sqlx::query("DELETE FROM report_queue WHERE created_ms < ? AND status IN ('success', 'failed')").bind(cutoff_ms).execute(db).await?.rows_affected();
+    let reports = crate::db::delete_in_batches(db, "report_queue", "created_ms < ? AND status IN ('success', 'failed')", cutoff_ms).await?;
     // parcel_events 隨 parcels 級聯刪除
-    let parcels = sqlx::query("DELETE FROM parcels WHERE started_at < ?").bind(&cutoff_ts).execute(db).await?.rows_affected();
-    let events = sqlx::query("DELETE FROM event_log WHERE created_at < ?").bind(&cutoff_ts).execute(db).await?.rows_affected();
+    // 一件包裹連帶十幾筆事件（外鍵級聯），是最重的一張；分批刪才不會長時間擋住狀態機寫入
+    let parcels = crate::db::delete_in_batches(db, "parcels", "started_at < ?", cutoff_ts.clone()).await?;
+    let events = crate::db::delete_in_batches(db, "event_log", "created_at < ?", cutoff_ts.clone()).await?;
     // 卡件事件跟包裹同一個保留期
-    sqlx::query("DELETE FROM jam_events WHERE created_at < ?").bind(&cutoff_ts).execute(db).await?;
+    crate::db::delete_in_batches(db, "jam_events", "created_at < ?", cutoff_ts.clone()).await?;
     Ok(Purged { parcels, print_jobs, reports, events })
 }
 
 /// 啟動清一次，之後每小時；天數跟著設定即時變。照片另有自己的保留天數（`camera_ftp.retention_days`）
 pub fn start(db: DbPool, data_dir: std::path::PathBuf, cfg: watch::Receiver<AppConfig>, cancel: CancellationToken) {
-    tokio::spawn(async move {
+    crate::supervise::spawn("資料清理", async move {
         loop {
             let (days, image_days, images_dir) = {
                 let c = cfg.borrow();
@@ -134,4 +134,89 @@ mod tests {
 
         assert_eq!(purge(&db, 0).await.unwrap().total(), 0, "0 天 = 不清");
     }
+
+    #[tokio::test]
+    async fn 參照包裹的子表欄位都要有索引_否則清理時每刪一件就整表掃一次() {
+        let db = test_db().await;
+        let tables: Vec<(String,)> = sqlx::query_as("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_sqlx%'").fetch_all(&db).await.unwrap();
+        let mut missing = Vec::new();
+        for (t,) in &tables {
+            let fks: Vec<(String, String)> = sqlx::query_as("SELECT \"table\", \"from\" FROM pragma_foreign_key_list(?)").bind(t).fetch_all(&db).await.unwrap();
+            for (parent, col) in fks.into_iter().filter(|(parent, _)| parent == "parcels") {
+                let leading: Vec<(String,)> = sqlx::query_as("SELECT ii.name FROM pragma_index_list(?) il JOIN pragma_index_info(il.name) ii WHERE ii.seqno = 0")
+                .bind(t)
+                .fetch_all(&db)
+                .await
+                .unwrap();
+                if !leading.iter().any(|(c,)| *c == col) {
+                    missing.push(format!("{t}.{col} → {parent}"));
+                }
+            }
+        }
+        assert!(missing.is_empty(), "沒有索引的外鍵欄位：{missing:?}");
+    }
+
+
+    #[tokio::test]
+    async fn 保留天數大到超出日期範圍_不可崩潰_視為沒有那麼舊的資料() {
+        let db = test_db().await;
+        let p = purge(&db, u32::MAX).await.unwrap();
+        assert_eq!(p.total(), 0);
+    }
+
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn 大量過期包裹一次清理時_分揀寫入不可被擋住太久() {
+        // 保留天數改短、或從不清理改成要清時，一次要刪的可能是幾十天的資料；
+        // 一道 DELETE 刪完會一直占著唯一的寫入鎖，狀態機的包裹寫入只能等（最多 5 秒就放棄）
+        let db = test_db().await;
+        let old_ms = crate::db::now_ms() - 40 * 86_400_000;
+        let old_ts = crate::db::local_ts(old_ms);
+        sqlx::query(
+            "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 20000)
+             INSERT INTO parcels (ulid, barcode, status, started_at, started_ms, updated_ms) SELECT 'OLD' || i, 'x', 3, ?1, ?2, ?2 FROM n",
+        )
+        .bind(&old_ts)
+        .bind(old_ms)
+        .execute(&db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "WITH RECURSIVE k(j) AS (SELECT 1 UNION ALL SELECT j + 1 FROM k WHERE j < 10)
+             INSERT INTO parcel_events (parcel_id, ts_ms, source, kind) SELECT p.id, ?1, 'belt', 'P' FROM parcels p CROSS JOIN k",
+        )
+        .bind(old_ms)
+        .execute(&db)
+        .await
+        .unwrap();
+
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let writer = {
+            let (db, stop) = (db.clone(), stop.clone());
+            tokio::spawn(async move {
+                let mut worst = Duration::ZERO;
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    let t = std::time::Instant::now();
+                    sqlx::query("INSERT INTO event_log (level, category, action, message, created_at) VALUES ('info', 't', 't', 't', datetime('now','localtime'))")
+                        .execute(&db)
+                        .await
+                        .unwrap();
+                    worst = worst.max(t.elapsed());
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+                worst
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let p = purge(&db, 15).await.unwrap();
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        let worst = writer.await.unwrap();
+
+        assert_eq!(p.parcels, 20_000, "過期包裹要全部刪掉");
+        let ev: i64 = sqlx::query_scalar("SELECT count(*) FROM parcel_events").fetch_one(&db).await.unwrap();
+        assert_eq!(ev, 0, "事件跟著包裹刪掉");
+        eprintln!("清理期間寫入最長等了 {worst:?}");
+        assert!(worst < Duration::from_millis(300), "清理期間寫入最長等了 {worst:?}");
+    }
+
 }

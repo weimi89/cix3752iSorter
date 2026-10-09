@@ -54,7 +54,8 @@ pub fn list_printers() -> Vec<(String, PathBuf)> {
     list_printers_in(Path::new(SYS_USBMISC))
 }
 
-/// 同步寫入裝置檔（呼叫端放 `spawn_blocking`）。先以空寫入探測節點是否還活著。
+/// 同步寫入裝置檔（呼叫端放 `spawn_blocking`）。印表機已拔除時開檔就會失敗（交給呼叫端重試）；
+/// 印表機卡紙或暫停時寫入會一直卡住、無法取消，呼叫端不可在它結束前對同一台再寫一次
 pub fn write_device(path: &Path, data: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     let mut f = std::fs::OpenOptions::new().write(true).open(path)?;

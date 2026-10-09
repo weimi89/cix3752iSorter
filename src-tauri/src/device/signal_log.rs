@@ -75,6 +75,8 @@ fn writer(dir: PathBuf, cfg: watch::Receiver<AppConfig>, rx: mpsc::Receiver<Entr
     let mut file: Option<BufWriter<File>> = None;
     let mut last_stopped: HashMap<&'static str, i64> = HashMap::new();
     let mut dirty = false;
+    // 開檔失敗後每筆訊號都再試一次（目錄被搬走、檔案控制代碼暫時用光都會恢復），錯誤只在剛失敗與恢復時各記一次
+    let mut open_failed = false;
     let keep_days = |cfg: &watch::Receiver<AppConfig>| cfg.borrow().general.retention_days;
     prune(&dir, keep_days(&cfg));
     let mut last_prune = std::time::Instant::now();
@@ -108,9 +110,25 @@ fn writer(dir: PathBuf, cfg: watch::Receiver<AppConfig>, rx: mpsc::Receiver<Entr
                     if let Some(mut f) = file.take() {
                         let _ = f.flush();
                     }
-                    current_day = day.clone();
-                    file = open_day(&dir, &day);
+                    current_day = day;
                     prune(&dir, keep_days(&cfg));
+                }
+                if file.is_none() {
+                    match open_day(&dir, &current_day) {
+                        Ok(f) => {
+                            if open_failed {
+                                tracing::warn!(dir = %dir.display(), "訊號日誌恢復寫檔");
+                            }
+                            open_failed = false;
+                            file = Some(f);
+                        }
+                        Err(e) => {
+                            if !open_failed {
+                                tracing::error!(dir = %dir.display(), "訊號日誌開檔失敗，恢復前的訊號不留檔: {e}");
+                            }
+                            open_failed = true;
+                        }
+                    }
                 }
                 if let Some(f) = file.as_mut() {
                     let clock = local.map(|t| t.format("%H:%M:%S%.3f").to_string()).unwrap_or_default();
@@ -142,23 +160,16 @@ fn writer(dir: PathBuf, cfg: watch::Receiver<AppConfig>, rx: mpsc::Receiver<Entr
     }
 }
 
-fn open_day(dir: &Path, day: &str) -> Option<BufWriter<File>> {
-    let path = dir.join(format!("{FILE_PREFIX}{day}.log"));
-    match OpenOptions::new().create(true).append(true).open(&path) {
-        Ok(f) => Some(BufWriter::new(f)),
-        Err(e) => {
-            tracing::error!(path = %path.display(), "訊號日誌開檔失敗: {e}");
-            None
-        }
-    }
+fn open_day(dir: &Path, day: &str) -> std::io::Result<BufWriter<File>> {
+    std::fs::create_dir_all(dir)?;
+    OpenOptions::new().create(true).append(true).open(dir.join(format!("{FILE_PREFIX}{day}.log"))).map(BufWriter::new)
 }
 
 /// 刪掉超過保留天數的訊號檔與應用日誌檔（0 = 不刪）；檔名裡的日期就是依據，不看 mtime
 fn prune(dir: &Path, keep_days: u32) {
-    if keep_days == 0 {
+    let Some(cutoff) = (keep_days > 0).then(|| crate::db::retention_cutoff_day(keep_days)).flatten() else {
         return;
-    }
-    let cutoff = (chrono::Local::now() - chrono::Duration::days(keep_days as i64)).format("%Y-%m-%d").to_string();
+    };
     let Ok(rd) = std::fs::read_dir(dir) else { return };
     for entry in rd.flatten() {
         let name = entry.file_name();
@@ -199,4 +210,43 @@ mod tests {
         assert!(dir.join("other.log").exists(), "非訊號日誌不動");
         std::fs::remove_dir_all(&dir).unwrap();
     }
+
+    #[test]
+    fn 保留天數大到超出日期範圍_不可崩潰_一個都不刪() {
+        let dir = std::env::temp_dir().join(format!("sig-{}", ulid::Ulid::generate()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        std::fs::write(dir.join(format!("{FILE_PREFIX}{today}.log")), "x").unwrap();
+        prune(&dir, u32::MAX);
+        assert!(dir.join(format!("{FILE_PREFIX}{today}.log")).exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+
+    #[test]
+    fn 開檔失敗一次後_同一天恢復了要接著寫_不可整天不留檔() {
+        let root = std::env::temp_dir().join(format!("sig-{}", ulid::Ulid::generate()));
+        let dir = root.join("logs");
+        // 同名路徑被一般檔案佔住：建目錄、開檔都會失敗
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(&dir, b"").unwrap();
+        let (_cfg_tx, cfg_rx) = watch::channel(AppConfig::default());
+        let (tx, rx) = mpsc::channel::<Entry>();
+        let d = dir.clone();
+        let h = std::thread::spawn(move || writer(d, cfg_rx, rx));
+        let send = |text: &str| tx.send(Entry { ts_ms: crate::db::now_ms(), device: "belt", dir: Dir::In, text: text.into() }).unwrap();
+        send("~P1");
+        std::thread::sleep(Duration::from_millis(100));
+        std::fs::remove_file(&dir).unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        send("~P2");
+        drop(tx);
+        h.join().unwrap();
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let text = std::fs::read_to_string(dir.join(format!("{FILE_PREFIX}{today}.log"))).unwrap_or_default();
+        assert!(text.contains("~P2"), "目錄恢復後的訊號要寫進去，實際檔案內容：{text:?}");
+        assert!(!text.contains("~P1"), "失敗當下的那筆本來就寫不進去");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
 }

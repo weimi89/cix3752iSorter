@@ -219,11 +219,12 @@ pub(super) async fn set_password(db: &DbPool, plain: &str) -> anyhow::Result<()>
     let hash = if plain.is_empty() {
         String::new()
     } else {
-        // 鹽由 argon2 自己用系統亂數產生（16 bytes），輸出是標準 PHC 字串
-        Argon2::default()
-            .hash_password(plain.as_bytes())
+        // 鹽由 argon2 自己用系統亂數產生（16 bytes），輸出是標準 PHC 字串；慢雜湊不放在非同步執行緒上
+        let plain = plain.to_string();
+        tokio::task::spawn_blocking(move || Argon2::default().hash_password(plain.as_bytes()).map(|h| h.to_string()))
+            .await
+            .map_err(|e| anyhow::anyhow!("密碼雜湊工作中斷: {e}"))?
             .map_err(|e| anyhow::anyhow!("密碼雜湊失敗: {e}"))?
-            .to_string()
     };
 
     let _serialized = LOGIN_LOCK.lock().await;
@@ -248,6 +249,12 @@ fn verify_password(plain: &str, hash: &str) -> bool {
         Ok(parsed) => Argon2::default().verify_password(plain.as_bytes(), &parsed).is_ok(),
         Err(_) => false,
     }
+}
+
+/// 登入用的密碼驗證。argon2 刻意設計成很慢（除錯版約 0.2 秒），在非同步執行緒上算的話，
+/// 外網持續嘗試登入就能一直佔住一條工作執行緒，排在上面的狀態機跟著被延遲
+async fn verify_password_async(plain: String, hash: String) -> bool {
+    tokio::task::spawn_blocking(move || verify_password(&plain, &hash)).await.unwrap_or(false)
 }
 
 // ── session ────────────────────────────────────────────────────
@@ -585,7 +592,7 @@ pub(super) async fn login(
         _ => return json_error(StatusCode::FORBIDDEN, "尚未設定網頁存取密碼，請先在工控機的系統設定裡設定"),
     };
 
-    if !verify_password(&body.password, &stored) {
+    if !verify_password_async(body.password.clone(), stored).await {
         if let Err(e) = record_fail(&state.app.db, &ip, &cfg).await {
             // 記不起來就等於這次失敗沒被計數，鎖定會比預期晚生效 —— 至少要留下痕跡
             tracing::warn!(?e, %ip, "記錄登入失敗次數失敗，鎖定計數可能不準");
@@ -793,4 +800,32 @@ mod tests {
         assert_eq!(hash_token("abc"), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
         assert_eq!(new_token().len(), 64);
     }
+
+    #[test]
+    fn 驗證密碼不可佔住非同步執行緒_其他工作照常排得到() {
+        // 單執行緒 runtime：argon2 若直接在這條執行緒上算，期間其他工作（例如狀態機）完全排不到
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            let hash = Argon2::default().hash_password(b"correct horse").unwrap().to_string();
+            let started = std::time::Instant::now();
+            let ticker = tokio::spawn(async move {
+                let mut max_gap = std::time::Duration::ZERO;
+                let mut last = std::time::Instant::now();
+                while started.elapsed() < std::time::Duration::from_millis(400) {
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                    max_gap = max_gap.max(last.elapsed());
+                    last = std::time::Instant::now();
+                }
+                max_gap
+            });
+            tokio::task::yield_now().await;
+            let t = std::time::Instant::now();
+            let ok = verify_password_async("wrong".into(), hash).await;
+            let verify_ms = t.elapsed().as_millis();
+            let gap = ticker.await.unwrap();
+            assert!(!ok);
+            assert!(gap < std::time::Duration::from_millis(50), "驗證花 {verify_ms}ms，期間其他工作最久等了 {gap:?}");
+        });
+    }
+
 }

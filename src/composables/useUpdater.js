@@ -2,11 +2,13 @@
  * 自動更新（對齊 cix3752iLabelPrint 的 useUpdater）：Tauri updater 外掛讀 GitHub Release 的 latest.json
  * （minisign 簽章）→ 下載 .deb 安裝 → relaunch。只有桌面視窗有這條；用瀏覽器開後台的人看不到更新。
  *
- * 啟動後 5 秒才做第一次檢查，避開首屏。檢查失敗（沒外網、GitHub 不通）只記 console，
+ * 啟動後 5 秒做第一次檢查（避開首屏），之後每小時再查一次（見 updateSchedule.js）。檢查失敗（沒外網、GitHub 不通）只記 console，
  * 不打擾現場；畫面上只有「真的有新版」才會出現徽章與對話框。
  */
 import { ref } from 'vue'
 import { isTauriRuntime } from '@/api/runtime'
+import { startUpdateChecks } from '@/composables/updateSchedule'
+import { createUpdateHolder } from '@/composables/updateHolder'
 
 const updateAvailable = ref(false)
 const updateInfo = ref(null) // { version, currentVersion, notes, date }
@@ -16,7 +18,7 @@ const downloadProgress = ref(0)
 const stage = ref('') // downloading / installing / restarting
 const lastError = ref(null)
 let wired = false
-let tauriUpdate = null // Tauri updater 的 Update 物件，下載階段要用
+const tauriUpdate = createUpdateHolder() // Tauri updater 的 Update 物件，下載階段要用
 
 export const checkForUpdates = async () => {
   if (!isTauriRuntime || isChecking.value) return
@@ -25,12 +27,12 @@ export const checkForUpdates = async () => {
     const { check } = await import('@tauri-apps/plugin-updater')
     const update = await check()
     if (!update?.available) {
-      tauriUpdate = null
+      tauriUpdate.set(null)
       updateAvailable.value = false
       updateInfo.value = null
       return
     }
-    tauriUpdate = update
+    tauriUpdate.set(update)
     updateInfo.value = { version: update.version, currentVersion: update.currentVersion, notes: update.body || '', date: update.date || '' }
     updateAvailable.value = true
   } catch (e) {
@@ -41,7 +43,7 @@ export const checkForUpdates = async () => {
 }
 
 export const downloadAndInstall = async () => {
-  if (isDownloading.value || !tauriUpdate) return
+  if (isDownloading.value || !tauriUpdate.get()) return
   isDownloading.value = true
   downloadProgress.value = 0
   stage.value = 'downloading'
@@ -49,7 +51,7 @@ export const downloadAndInstall = async () => {
   try {
     let downloaded = 0
     let total = 0
-    await tauriUpdate.downloadAndInstall(event => {
+    await tauriUpdate.get().downloadAndInstall(event => {
       switch (event.event) {
         case 'Started':
           total = event.data.contentLength || 0
@@ -79,7 +81,8 @@ export const dismissUpdate = () => { updateAvailable.value = false }
 export const useUpdater = () => {
   if (!wired) {
     wired = true
-    if (isTauriRuntime) setTimeout(() => { checkForUpdates() }, 5000)
+    // 下載安裝中不重查：重查會換掉正在用的更新物件
+    if (isTauriRuntime) startUpdateChecks(() => { if (!isDownloading.value) checkForUpdates() })
   }
   return { updateAvailable, updateInfo, isChecking, isDownloading, downloadProgress, stage, lastError, checkForUpdates, downloadAndInstall, dismissUpdate }
 }

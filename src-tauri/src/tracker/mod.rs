@@ -192,10 +192,15 @@ impl TrackerHandle {
 pub async fn load_chutes(db: &crate::db::DbPool) -> anyhow::Result<HashMap<String, ChuteRow>> {
     let rows: Vec<(String, i64, Option<String>, i64, String, i64)> =
         sqlx::query_as("SELECT code, cid, printer_port, enabled, label, sort_order FROM chutes").fetch_all(db).await?;
+    // 存檔時已擋無效 CID；這裡防的是直接改資料庫：寧可少一個格口（該件走預設口），也不送出亂組的 Kn
     Ok(rows
         .into_iter()
-        .map(|(code, cid, printer_port, enabled, label, sort_order)| {
-            (code.clone(), ChuteRow { code, cid: Cid(cid as u32), printer_port, enabled: enabled != 0, label, sort_order })
+        .filter_map(|(code, cid, printer_port, enabled, label, sort_order)| match Cid::try_from_i64(cid).filter(|c| c.is_valid()) {
+            Some(cid) => Some((code.clone(), ChuteRow { code, cid, printer_port, enabled: enabled != 0, label, sort_order })),
+            None => {
+                tracing::error!(%code, cid, "格口 CID 不合法，已略過");
+                None
+            }
         })
         .collect())
 }
@@ -372,7 +377,8 @@ impl machine::Outputs for LiveOutputs {
             let q = self.report_queue.clone();
             let ulid = p.ulid.clone();
             let db = self.app.db.clone();
-            tokio::spawn(async move {
+            // 登記在結束前要等的工作裡：關閉當下剛定格口的件，回報才不會沒入列就跟著程式消失
+            self.app.tasks.spawn(async move {
                 if let Err(e) = q.enqueue(&ulid, rid).await {
                     event_log::log(&db, Level::Error, "middleware", "report_enqueue", format!("回報入列失敗 response_id={rid}: {e}"));
                 }
@@ -395,13 +401,13 @@ pub async fn spawn(
     label_tx: mpsc::Sender<LabelJob>,
     cancel: CancellationToken,
 ) -> anyhow::Result<(TrackerHandle, TrackerPorts)> {
-    let closed = store::close_orphans(&app.db).await?;
+    let cfg = app.config.current();
+    let closed = store::close_orphans(&app.db, &cfg.general.default_chute).await?;
     if closed > 0 {
         event_log::log(&app.db, Level::Warn, "tracker", "orphans", format!("上次未收尾的在途件 {closed} 筆已標為失去追蹤"));
     }
     let chutes = load_chutes(&app.db).await?;
     let today = today_count(&app.db).await;
-    let cfg = app.config.current();
 
     let (tx, mut in_rx) = mpsc::channel::<Input>(1024);
     let (query_tx, mut query_rx) = mpsc::channel::<oneshot::Sender<TrackerSnapshot>>(16);
@@ -413,7 +419,7 @@ pub async fn spawn(
     let mut out = LiveOutputs {
         app: app.clone(),
         devices,
-        store: store::Store::spawn(app.db.clone()),
+        store: store::Store::spawn(app.db.clone(), &app.tasks),
         report_queue: crate::middleware::report_queue::ReportQueue::new(app.db.clone()),
         chute_tx,
         label_tx,
@@ -425,7 +431,7 @@ pub async fn spawn(
     let mut machine = Machine::new(cfg, chutes, today, crate::db::now_ms());
     let mut cfg_rx = app.config.subscribe();
 
-    tokio::spawn(async move {
+    crate::supervise::spawn("狀態機", async move {
         let mut tick = tokio::time::interval(Duration::from_millis(20));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut publish_at = std::time::Instant::now();
@@ -487,6 +493,25 @@ fn snapshot(m: &Machine) -> TrackerSnapshot {
         current: m.current.and_then(|k| m.parcels.get(&k).cloned()),
         in_flight: m.in_flight().into_iter().cloned().collect(),
         now_ms: crate::db::now_ms(),
+    }
+}
+
+#[cfg(test)]
+mod load_chutes_tests {
+    #[tokio::test]
+    async fn 格口表裡的無效_cid_略過_其餘照常() {
+        let dir = std::env::temp_dir().join(format!("load-chutes-{}", ulid::Ulid::generate()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = crate::db::init(&dir).await.unwrap();
+        sqlx::query("DELETE FROM chutes").execute(&db).await.unwrap();
+        for (code, cid) in [("L1", 1000323i64), ("BAD", -1), ("WRAP", (1i64 << 32) + 1_004_324), ("RS", 1007301)] {
+            sqlx::query("INSERT INTO chutes (code, label, cid, printer_port, enabled, sort_order) VALUES (?, ?, ?, NULL, 1, 0)")
+                .bind(code).bind(code).bind(cid).execute(&db).await.unwrap();
+        }
+        let m = super::load_chutes(&db).await.unwrap();
+        let mut codes: Vec<&str> = m.keys().map(String::as_str).collect();
+        codes.sort();
+        assert_eq!(codes, vec!["L1", "RS"]);
     }
 }
 

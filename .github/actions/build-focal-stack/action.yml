@@ -98,6 +98,9 @@ runs:
         GLIB_VER=2.78.6
         echo "::group::glib download"
         wget -q "https://download.gnome.org/sources/glib/2.78/glib-${GLIB_VER}.tar.xz"
+        # 下載下來的原始碼要編進現場的安裝包：對不上官方公布的雜湊就停（download.gnome.org 的 .sha256sum）。
+        # 改版本時一併換雜湊
+        echo "244854654dd82c7ebcb2f8e246156d2a05eb9cd1ad07ed7a779659b4602c9fae  glib-${GLIB_VER}.tar.xz" | sha256sum -c -
         tar xf "glib-${GLIB_VER}.tar.xz"
         echo "::endgroup::"
         cd "glib-${GLIB_VER}"
@@ -125,6 +128,8 @@ runs:
         SOUP_VER=3.4.4
         echo "::group::libsoup3 download"
         wget -q "https://download.gnome.org/sources/libsoup/3.4/libsoup-${SOUP_VER}.tar.xz"
+        # 官方雜湊（download.gnome.org 的 .sha256sum）；改版本時一併換
+        echo "291c67725f36ed90ea43efff25064b69c5a2d1981488477c05c481a3b4b0c5aa  libsoup-${SOUP_VER}.tar.xz" | sha256sum -c -
         tar xf "libsoup-${SOUP_VER}.tar.xz"
         echo "::endgroup::"
         cd "libsoup-${SOUP_VER}"
@@ -156,6 +161,8 @@ runs:
         WK_VER=2.42.5
         echo "::group::webkit2gtk download"
         wget -q "https://webkitgtk.org/releases/webkitgtk-${WK_VER}.tar.xz"
+        # 官方雜湊（webkitgtk.org 的 .tar.xz.sums）；改版本時一併換
+        echo "b64278c1f20b8cfdbfb5ff573c37d871aba74a1db26d9b39f74e8953fe61e749  webkitgtk-${WK_VER}.tar.xz" | sha256sum -c -
         tar xf "webkitgtk-${WK_VER}.tar.xz"
         echo "::endgroup::"
         cd "webkitgtk-${WK_VER}"

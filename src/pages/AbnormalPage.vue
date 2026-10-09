@@ -1,8 +1,9 @@
 <script setup>
 import { useI18n } from 'vue-i18n'
 import { api, parcelImageUrl } from '@/api/http'
-import { listen } from '@/api/events'
+import { useServerEvent } from '@/composables/useServerEvent'
 import { fmtDate, statusMeta } from '@/composables/useFormat'
+import { useLatestRequest } from '@/composables/useLatestRequest'
 import AppHeader from '@/components/AppHeader.vue'
 import AppDatePicker from '@/components/AppDatePicker.vue'
 import TablePagination from '@/components/TablePagination.vue'
@@ -33,19 +34,28 @@ const causeCounts = ref([])
 const loading = ref(false)
 const errorMsg = ref('')
 
+// 切類別、原因、頁碼都會重查，只採用最後一次的結果（晚到的舊回應會讓清單跟選的條件對不上）
+const latest = useLatestRequest()
 const load = async () => {
+  const id = latest.start()
   loading.value = true
   errorMsg.value = ''
   try {
     const r = await api.abnormalReview({ day: day.value, kind: kind.value, cause: cause.value, limit: pageSize.value, offset: (page.value - 1) * pageSize.value })
+    if (!latest.isLatest(id)) return
     items.value = r.items
     total.value = r.total
     dayTotal.value = r.day_total
     byKind.value = r.by_kind
     causeCounts.value = r.cause_counts
-  } catch (e) { errorMsg.value = e.message } finally { loading.value = false }
+  } catch (e) {
+    if (latest.isLatest(id)) errorMsg.value = e.message
+  } finally {
+    if (latest.isLatest(id)) loading.value = false
+  }
 }
-const search = () => { page.value = 1; load() }
+// 頁碼不是 1 時改成 1 會經由 watch(page) 重查，這裡就不再查一次
+const search = () => { if (page.value !== 1) page.value = 1; else load() }
 watch([day, kind, cause, pageSize], search)
 watch(page, load)
 
@@ -86,18 +96,13 @@ const actions = computed(() => [
   { key: 'reload', label: t('common.reload'), icon: 'tabler-refresh', loading: loading.value, onClick: load },
 ])
 
-let unlisten = []
-onMounted(() => {
-  load()
-  // 看今天時，新的異常件（終態）與照片到了就補上；翻舊日子不動
-  let timer = null
-  const soon = () => { if (day.value === today() && page.value === 1) { clearTimeout(timer); timer = setTimeout(load, 1500) } }
-  unlisten = [
-    listen('parcel-updated', ({ payload }) => { if (payload.ended_ms) soon() }),
-    listen('parcel-image', soon),
-  ]
-})
-onBeforeUnmount(() => unlisten.forEach(u => u()))
+let timer = null
+// 看今天時，新的異常件（終態）與照片到了就補上；翻舊日子不動
+const soon = () => { if (day.value === today() && page.value === 1) { clearTimeout(timer); timer = setTimeout(load, 1500) } }
+useServerEvent('parcel-updated', ({ payload }) => { if (payload.ended_ms) soon() })
+useServerEvent('parcel-image', soon)
+onMounted(load)
+onBeforeUnmount(() => clearTimeout(timer))
 </script>
 
 <template>
