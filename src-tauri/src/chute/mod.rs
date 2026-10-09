@@ -17,6 +17,7 @@ use crate::event_bus;
 use crate::event_log::{self, Level};
 use crate::middleware::{Middleware, ParcelResp};
 use crate::protocol::Cid;
+use crate::tracker::recent::RecentParcels;
 use crate::tracker::{ChuteRequest, ChuteRow, ChuteSource, LabelPayload, TrackerHandle};
 
 /// 中介機給的面單來源，決定後才去抓
@@ -98,7 +99,7 @@ pub struct Decision {
     pub reason: Option<String>,
 }
 
-/// 今天同一條碼的一筆前科（`history_verdict` 的輸入，從 parcels 表撈）
+/// 同一條碼的一筆前科：`history_verdict` 的輸入從 parcels 表撈，`reentry_hold` 的輸入從記憶體副本取
 #[derive(Debug, Clone)]
 pub struct PriorParcel {
     pub status: i64,
@@ -133,13 +134,14 @@ pub fn reentry_hold(prior: &[PriorParcel], hold_ms: i64) -> Option<i64> {
     prior.iter().find(|p| p.decided_normally()).map(|p| p.started_ms)
 }
 
-/// 查資料庫版：回 `(前科上線時間, 現在)`；`hold_ms` ≤ 0 不查
-pub async fn check_reentry_hold(db: &crate::db::DbPool, barcode: &str, ulid: &str, hold_ms: i64) -> Option<(i64, i64)> {
+/// 查記憶體版：回 `(前科上線時間, 現在)`；`hold_ms` ≤ 0 不查。
+/// 在查格口的時限內執行，不可改回查資料庫——磁碟卡住時會拖到回覆太晚（見 `tracker::recent`）
+pub fn check_reentry_hold(recent: &RecentParcels, barcode: &str, ulid: &str, hold_ms: i64) -> Option<(i64, i64)> {
     if hold_ms <= 0 {
         return None;
     }
     let now = crate::db::now_ms();
-    let prior = load_prior(db, barcode, ulid, now - hold_ms).await;
+    let prior = recent.prior(barcode, ulid, now - hold_ms);
     reentry_hold(&prior, hold_ms).map(|prev_ms| (prev_ms, now))
 }
 
@@ -313,7 +315,7 @@ impl ChuteResolver {
         let general = self.app.config.current().general;
         let default_code = general.default_chute;
         // 幾秒內同碼剛正常分過：不問中介機（問了它會再記一次完成），直接走異常口讓人核對面單
-        let held = if notify_only { None } else { check_reentry_hold(&self.app.db, &barcode, &ulid, general.reentry_hold_ms).await };
+        let held = if notify_only { None } else { check_reentry_hold(self.tracker.recent(), &barcode, &ulid, general.reentry_hold_ms) };
         if let Some((prev_ms, now)) = held {
             let decision = self.fallback(&default_code, format!("{:.1} 秒前同條碼剛分過，疑似讀到鄰件條碼", (now - prev_ms) as f64 / 1000.0), "REENTRY");
             event_log::log(&self.app.db, Level::Warn, "chute", "reentry_hold", format!("條碼 {barcode} → {}：{}", decision.code, decision.note.clone().unwrap_or_default()));
@@ -498,38 +500,29 @@ mod tests {
         assert_eq!(reentry_hold(&[], 8000), None);
     }
 
-    #[tokio::test]
-    async fn 再進線攔截_查資料庫_只攔窗口內正常分過的同碼_不含自己() {
-        let dir = std::env::temp_dir().join(format!("reentry-{}", ulid::Ulid::generate()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let db = crate::db::init(&dir).await.unwrap();
+    #[test]
+    fn 再進線攔截_查記憶體_只攔窗口內正常分過的同碼_不含自己() {
+        let recent = RecentParcels::new();
         let now = crate::db::now_ms();
-        let seed = |bc: &'static str, chute: &'static str, source: &'static str, reason: Option<&'static str>, status: i64, ago_ms: i64| {
-            let db = db.clone();
-            async move {
-                let u = ulid::Ulid::generate().to_string();
-                sqlx::query("INSERT INTO parcels (ulid, barcode, chute_code, chute_source, chute_reason, status, started_at, started_ms, updated_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
-                    .bind(&u).bind(bc).bind(chute).bind(source).bind(reason).bind(status)
-                    .bind(crate::db::local_ts(now - ago_ms)).bind(now - ago_ms).bind(now - ago_ms)
-                    .execute(&db).await.unwrap();
-                u
-            }
+        let seed = |ulid: &str, bc: &str, chute: &str, source: &str, reason: Option<&str>, status: i64, ago_ms: i64| {
+            let p = PriorParcel { status, chute_code: Some(chute.into()), chute_source: Some(source.into()), chute_reason: reason.map(String::from), started_ms: now - ago_ms };
+            recent.record(ulid, bc, p, now);
         };
         // A：3 秒前中介機給了 L2、還在路上（狀態 2）→ 攔
-        seed("A1234567890", "L2", "api", None, 2, 3000).await;
-        let hit = check_reentry_hold(&db, "A1234567890", "me", 6000).await;
+        seed("a", "A1234567890", "L2", "api", None, 2, 3000);
+        let hit = check_reentry_hold(&recent, "A1234567890", "me", 6000);
         assert_eq!(hit.map(|(prev, _)| now - prev >= 3000), Some(true));
         // 同一件自己（ulid 相同）不算前科
-        let me = seed("B1234567890", "L1", "api", None, 3, 1000).await;
-        assert!(check_reentry_hold(&db, "B1234567890", &me, 6000).await.is_none());
+        seed("b", "B1234567890", "L1", "api", None, 3, 1000);
+        assert!(check_reentry_hold(&recent, "B1234567890", "b", 6000).is_none());
         // C：10 秒前分過 → 超出窗口不攔
-        seed("C1234567890", "L1", "api", None, 3, 10_000).await;
-        assert!(check_reentry_hold(&db, "C1234567890", "me", 6000).await.is_none());
+        seed("c", "C1234567890", "L1", "api", None, 3, 10_000);
+        assert!(check_reentry_hold(&recent, "C1234567890", "me", 6000).is_none());
         // D：2 秒前走異常口（門市關轉）→ 重投迴圈，不攔
-        seed("D1234567890", "RS", "default", Some("STORE_CLOSED"), 3, 2000).await;
-        assert!(check_reentry_hold(&db, "D1234567890", "me", 6000).await.is_none());
+        seed("d", "D1234567890", "RS", "default", Some("STORE_CLOSED"), 3, 2000);
+        assert!(check_reentry_hold(&recent, "D1234567890", "me", 6000).is_none());
         // 關閉
-        assert!(check_reentry_hold(&db, "A1234567890", "me", 0).await.is_none());
+        assert!(check_reentry_hold(&recent, "A1234567890", "me", 0).is_none());
     }
 
     fn prior(status: i64, chute: &str, reason: Option<&str>, started_ms: i64) -> PriorParcel {

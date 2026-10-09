@@ -2,6 +2,7 @@
 
 pub mod machine;
 pub mod parcel;
+pub mod recent;
 pub mod store;
 
 #[cfg(test)]
@@ -47,6 +48,7 @@ pub struct TrackerHandle {
     query_tx: mpsc::Sender<oneshot::Sender<TrackerSnapshot>>,
     sorter: LineClient,
     ir: Arc<IrChannel>,
+    recent: Arc<recent::RecentParcels>,
 }
 
 /// 光電檢查的「問一句、等一句」：網頁送 `Kd[`／`p1` 後在這裡等分揀機回覆；
@@ -110,6 +112,10 @@ pub struct TrackerSnapshot {
 }
 
 impl TrackerHandle {
+    /// 最近上線包裹的記憶體副本（查格口用，不等資料庫）
+    pub fn recent(&self) -> &recent::RecentParcels {
+        &self.recent
+    }
     pub async fn belt_start(&self) {
         let _ = self.tx.send(Input::BeltStart { ts_ms: crate::db::now_ms() }).await;
     }
@@ -406,6 +412,8 @@ pub async fn spawn(
     if closed > 0 {
         event_log::log(&app.db, Level::Warn, "tracker", "orphans", format!("上次未收尾的在途件 {closed} 筆已標為失去追蹤"));
     }
+    let recent = Arc::new(recent::RecentParcels::new());
+    store::seed_recent(&app.db, &recent).await?;
     let chutes = load_chutes(&app.db).await?;
     let today = today_count(&app.db).await;
 
@@ -414,7 +422,7 @@ pub async fn spawn(
     let (chute_tx, chute_rx) = mpsc::channel::<ChuteRequest>(256);
     let (jam_tx, jam_rx) = mpsc::channel::<JamAlert>(64);
     let ir = Arc::new(IrChannel { op: tokio::sync::Mutex::new(()), pending: std::sync::Mutex::new(IrPending::default()) });
-    let handle = TrackerHandle { tx, query_tx, sorter: devices.sorter.clone(), ir: ir.clone() };
+    let handle = TrackerHandle { tx, query_tx, sorter: devices.sorter.clone(), ir: ir.clone(), recent: recent.clone() };
     // 狀態機崩潰後沒有人下格口指令，皮帶照轉會把件一路送進分揀機卻分不出去：先停皮帶，等人員確認後重開程式
     let on_crash = {
         let (belt, config, db) = (devices.belt.clone(), app.config.clone(), app.db.clone());
@@ -430,7 +438,7 @@ pub async fn spawn(
     let mut out = LiveOutputs {
         app: app.clone(),
         devices,
-        store: store::Store::spawn(app.db.clone(), &app.tasks),
+        store: store::Store::spawn(app.db.clone(), &app.tasks, recent),
         report_queue: crate::middleware::report_queue::ReportQueue::new(app.db.clone()),
         chute_tx,
         label_tx,

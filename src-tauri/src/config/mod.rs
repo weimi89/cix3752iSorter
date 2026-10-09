@@ -83,6 +83,9 @@ pub struct ServerConfig {
     pub bind: String,
 }
 
+/// 同碼再進線攔截秒數的上限；查格口用的記憶體也只保留這麼久的包裹，兩邊必須同一個數字
+pub const REENTRY_HOLD_MAX_MS: i64 = 60_000;
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct GeneralConfig {

@@ -4,6 +4,7 @@
 //! 重試後仍失敗才記 event_log，不吞掉；狀態機的記憶體狀態不受影響。
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use tokio::sync::mpsc;
 
@@ -11,6 +12,8 @@ use crate::db::{DbPool, local_ts, now_ms};
 use crate::event_log::{self, Level};
 
 use super::parcel::Parcel;
+use super::recent::RecentParcels;
+use crate::chute::PriorParcel;
 
 pub enum StoreOp {
     Insert(Parcel),
@@ -28,17 +31,25 @@ pub enum StoreOp {
 #[derive(Clone)]
 pub struct Store {
     tx: mpsc::Sender<StoreOp>,
+    recent: Arc<RecentParcels>,
 }
 
 impl Store {
-    /// 寫入工作登記在 `tasks`：所有 `Store` 放掉後它會把佇列寫完才結束，結束流程要等它
-    pub fn spawn(db: DbPool, tasks: &tokio_util::task::TaskTracker) -> Self {
+    /// 寫入工作登記在 `tasks`：所有 `Store` 放掉後它會把佇列寫完才結束，結束流程要等它。
+    /// `recent` 是查格口用的記憶體副本，每筆包裹寫入在這裡就同步更新，不等寫進資料庫
+    pub fn spawn(db: DbPool, tasks: &tokio_util::task::TaskTracker, recent: Arc<RecentParcels>) -> Self {
         let (tx, rx) = mpsc::channel(8192);
         crate::supervise::spawn_tracked("包裹寫入", tasks, run(db, rx));
-        Self { tx }
+        Self { tx, recent }
     }
 
     pub fn send(&self, op: StoreOp) {
+        // 包裹列的寫入一律經過這裡，記憶體副本才不會漏掉任何一種寫法
+        match &op {
+            StoreOp::Insert(p) => self.recent.record(&p.ulid, p.barcode_or_noread(), inserted_prior(p), now_ms()),
+            StoreOp::Update(p) | StoreOp::Daily(p, _) => self.recent.record(&p.ulid, p.barcode_or_noread(), updated_prior(p), now_ms()),
+            _ => {}
+        }
         if let Err(e) = self.tx.try_send(op) {
             tracing::error!("store 佇列滿，寫入丟失: {e}");
         }
@@ -97,6 +108,26 @@ pub async fn close_orphans(db: &DbPool, default_chute: &str) -> anyhow::Result<u
     }
     tx.commit().await?;
     Ok(closed)
+}
+
+/// 載入記憶體副本的一列：ulid、條碼、狀態、格口代號、格口來源、原因代碼、上線時間
+type RecentRow = (String, String, i64, Option<String>, Option<String>, Option<String>, i64);
+
+/// 啟動時把資料庫裡最近上線的件載入記憶體副本：重啟前幾秒剛分過的件，重啟後同碼再進線一樣要攔。
+/// 要在 `close_orphans` 之後呼叫，載入的才是收尾後的狀態
+pub async fn seed_recent(db: &DbPool, recent: &RecentParcels) -> Result<usize, sqlx::Error> {
+    let now = now_ms();
+    let rows: Vec<RecentRow> = sqlx::query_as(
+        "SELECT ulid, barcode, status, chute_code, chute_source, chute_reason, started_ms FROM parcels WHERE started_ms >= ?",
+    )
+    .bind(now - crate::config::REENTRY_HOLD_MAX_MS)
+    .fetch_all(db)
+    .await?;
+    let n = rows.len();
+    for (ulid, barcode, status, chute_code, chute_source, chute_reason, started_ms) in rows {
+        recent.record(&ulid, &barcode, PriorParcel { status, chute_code, chute_source, chute_reason, started_ms }, now);
+    }
+    Ok(n)
 }
 
 async fn run(db: DbPool, mut rx: mpsc::Receiver<StoreOp>) {
@@ -216,13 +247,43 @@ async fn insert(db: &DbPool, p: &Parcel) -> Result<i64, sqlx::Error> {
     Ok(row.0)
 }
 
+/// 包裹的格口決定換成 parcels 表的欄位值；寫資料庫與記憶體副本共用，兩邊才會一致
+struct ChuteColumns {
+    code: Option<String>,
+    cid: Option<i64>,
+    source: String,
+    response_id: Option<i64>,
+    reason: Option<String>,
+}
+
+fn chute_columns(p: &Parcel) -> ChuteColumns {
+    match &p.chute {
+        Some(c) => ChuteColumns {
+            code: Some(c.code.clone()),
+            cid: Some(c.cid.0 as i64),
+            source: serde_json::to_value(c.source).ok().and_then(|v| v.as_str().map(String::from)).unwrap_or_else(|| "pending".into()),
+            response_id: c.response_id,
+            reason: c.reason.clone(),
+        },
+        None => ChuteColumns { code: None, cid: None, source: "pending".to_string(), response_id: None, reason: None },
+    }
+}
+
+/// `insert` 寫進去的樣子：還沒有格口
+fn inserted_prior(p: &Parcel) -> PriorParcel {
+    PriorParcel { status: p.status.code() as i64, chute_code: None, chute_source: Some("pending".into()), chute_reason: None, started_ms: p.p_ms }
+}
+
+/// `update` 寫進去的樣子
+fn updated_prior(p: &Parcel) -> PriorParcel {
+    let c = chute_columns(p);
+    PriorParcel { status: p.status.code() as i64, chute_code: c.code, chute_source: Some(c.source), chute_reason: c.reason, started_ms: p.p_ms }
+}
+
 /// `sync_image_barcode`：條碼跟上次同步時不同才傳 true（條碼只在綁碼時會變，每次更新都同步是白寫）
 async fn update(conn: &mut sqlx::SqliteConnection, p: &Parcel, sync_image_barcode: bool) -> Result<(), sqlx::Error> {
     let now = now_ms();
-    let (code, cid, source, response_id, reason) = match &p.chute {
-        Some(c) => (Some(c.code.clone()), Some(c.cid.0 as i64), serde_json::to_value(c.source).ok().and_then(|v| v.as_str().map(String::from)).unwrap_or_else(|| "pending".into()), c.response_id, c.reason.clone()),
-        None => (None, None, "pending".to_string(), None, None),
-    };
+    let ChuteColumns { code, cid, source, response_id, reason } = chute_columns(p);
     sqlx::query(
         "UPDATE parcels SET barcode = ?, chute_code = ?, chute_cid = ?, chute_source = ?, chute_reason = ?, status = ?, cart = ?,
             ir_length = ?, gap = ?, block_pos = ?, lost_pos = ?, response_id = ?, ended_ms = ?, travel_ms = ?, updated_ms = ?
@@ -409,7 +470,7 @@ mod tests {
     /// 起一個寫入端，送完 `ops` 後等它寫完
     async fn run_ops(db: &DbPool, ops: Vec<StoreOp>) {
         let tasks = tokio_util::task::TaskTracker::new();
-        let store = Store::spawn(db.clone(), &tasks);
+        let store = Store::spawn(db.clone(), &tasks, Arc::new(RecentParcels::new()));
         for op in ops {
             store.send(op);
         }
@@ -572,7 +633,7 @@ mod tests {
         rt.block_on(async {
             let db = crate::db::init(&dir).await.unwrap();
             let tasks = tokio_util::task::TaskTracker::new();
-            let store = Store::spawn(db.clone(), &tasks);
+            let store = Store::spawn(db.clone(), &tasks, Arc::new(RecentParcels::new()));
             for i in 0..N {
                 store.insert(&Parcel::new(i as u64, 1, crate::db::now_ms()));
             }
@@ -590,4 +651,92 @@ mod tests {
         assert_eq!(n, N as i64, "結束前送出的 {N} 件應全部寫進資料庫");
     }
 
+
+    /// 各種格口結果的包裹：中介機給格口、走異常口帶原因、逾時、手動指定、讀碼失敗、還沒決定
+    fn parcels_of_every_kind(t: i64) -> Vec<Parcel> {
+        use super::super::parcel::{ChuteDecision, ChuteSource, Status};
+        use crate::protocol::Cid;
+        let mk = |key: u64, barcode: &str, chute: Option<(&str, ChuteSource, Option<&str>)>, status: Status| {
+            let mut p = Parcel::new(key, 1, t + key as i64);
+            p.barcode = Some(barcode.into());
+            p.status = status;
+            p.chute = chute.map(|(code, source, reason)| ChuteDecision { code: code.into(), cid: Cid(1000323), source, response_id: Some(key as i64), decided_ms: t + 300, reason: reason.map(String::from) });
+            p
+        };
+        vec![
+            mk(1, "S0000000001", Some(("L1", ChuteSource::Api, None)), Status::Done),
+            mk(2, "S0000000001", Some(("RS", ChuteSource::Default, Some("STORE_CLOSED"))), Status::Done),
+            mk(3, "S0000000001", Some(("RS", ChuteSource::Timeout, Some("LATE"))), Status::Lost),
+            mk(4, "S0000000001", Some(("L2", ChuteSource::Manual, None)), Status::Received),
+            mk(5, crate::device::camera::NO_READ, Some(("RS", ChuteSource::NoRead, None)), Status::Done),
+            mk(6, "S0000000001", None, Status::Received),
+        ]
+    }
+
+    /// 狀態、格口代號、格口來源、原因代碼、上線時間
+    type PriorRow = (i64, Option<String>, Option<String>, Option<String>, i64);
+
+    fn rows(v: Vec<PriorParcel>) -> Vec<PriorRow> {
+        v.into_iter().map(|p| (p.status, p.chute_code, p.chute_source, p.chute_reason, p.started_ms)).collect()
+    }
+
+    #[tokio::test]
+    async fn 記憶體副本與寫進資料庫的內容一致_查格口改查記憶體不改變判斷() {
+        let db = test_db().await;
+        let recent = Arc::new(RecentParcels::new());
+        let tasks = tokio_util::task::TaskTracker::new();
+        let store = Store::spawn(db.clone(), &tasks, recent.clone());
+        let t = now_ms() - 5_000;
+        let ps = parcels_of_every_kind(t);
+        for p in &ps {
+            store.insert(p);
+        }
+        // 單數件送更新、雙數件走收尾（當日統計那條路也會改包裹列）；最後一件只新增、不更新
+        for (i, p) in ps.iter().take(ps.len() - 1).enumerate() {
+            if i % 2 == 0 { store.update(p) } else { store.send(StoreOp::Daily(p.clone(), "RS".into())) }
+        }
+        drop(store);
+        assert!(crate::supervise::drain(&tasks, std::time::Duration::from_secs(60)).await);
+        for bc in ["S0000000001", crate::device::camera::NO_READ] {
+            let from_db = crate::chute::load_prior(&db, bc, "x", t - 1).await;
+            assert!(!from_db.is_empty());
+            assert_eq!(rows(recent.prior(bc, "x", t - 1)), rows(from_db), "條碼 {bc}：記憶體與資料庫要逐欄相同");
+        }
+    }
+
+    #[tokio::test]
+    async fn 資料庫被占住時_記憶體副本一送出就看得到() {
+        let db = test_db().await;
+        // 模擬磁碟卡住：另一條連線拿著寫鎖不放，寫入端寫不進去
+        let mut lock = db.acquire().await.unwrap();
+        sqlx::query("BEGIN IMMEDIATE").execute(&mut *lock).await.unwrap();
+        let recent = Arc::new(RecentParcels::new());
+        let tasks = tokio_util::task::TaskTracker::new();
+        let store = Store::spawn(db.clone(), &tasks, recent.clone());
+        let mut p = parcels_of_every_kind(now_ms() - 1_000).remove(0);
+        store.insert(&p);
+        p.status = super::super::parcel::Status::Received;
+        store.update(&p);
+        let got = recent.prior("S0000000001", "x", 0);
+        assert_eq!(got.len(), 1);
+        assert_eq!((got[0].chute_code.as_deref(), got[0].chute_source.as_deref()), (Some("L1"), Some("api")));
+        let in_db: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM parcels").fetch_one(&mut *lock).await.unwrap();
+        assert_eq!(in_db, 0, "資料庫此時還沒有這件，查資料庫的舊做法攔不到");
+        sqlx::query("ROLLBACK").execute(&mut *lock).await.unwrap();
+        drop(lock);
+        drop(store);
+        assert!(crate::supervise::drain(&tasks, std::time::Duration::from_secs(60)).await);
+    }
+
+    #[tokio::test]
+    async fn 啟動時載入最近上線的件_超過窗口的不載() {
+        let db = test_db().await;
+        let now = now_ms();
+        seed_in_flight(&db, "R0000000001", "api", Some("L1"), now - 3_000).await;
+        seed_in_flight(&db, "R0000000002", "api", Some("L1"), now - crate::config::REENTRY_HOLD_MAX_MS - 5_000).await;
+        let recent = RecentParcels::new();
+        assert_eq!(seed_recent(&db, &recent).await.unwrap(), 1);
+        assert_eq!(rows(recent.prior("R0000000001", "x", 0)), rows(crate::chute::load_prior(&db, "R0000000001", "x", 0).await));
+        assert!(recent.prior("R0000000002", "x", 0).is_empty());
+    }
 }

@@ -607,7 +607,7 @@ async fn config_put(
         // 換目錄不搬舊圖，但目錄至少要建得出來，否則相機一上傳就全數失敗
         std::fs::create_dir_all(p).map_err(|e| bad(format!("照片存放目錄建立失敗：{e}")))?;
     }
-    if !(0..=60_000).contains(&cfg.general.reentry_hold_ms) {
+    if !(0..=crate::config::REENTRY_HOLD_MAX_MS).contains(&cfg.general.reentry_hold_ms) {
         return Err(bad("同碼再進線攔截秒數必須在 0–60 秒（0 = 關閉）"));
     }
     if (cfg.camera.frame_width == 0) != (cfg.camera.frame_height == 0) || cfg.camera.frame_width > 20_000 || cfg.camera.frame_height > 20_000 {
