@@ -12,6 +12,21 @@ use crate::db::DbPool;
 
 static EVENT_DB: OnceLock<DbPool> = OnceLock::new();
 
+/// 已異常停止的常駐工作。功能要到程式重開才會恢復，畫面依這份清單一直顯示警示，
+/// 不能只靠崩潰當下推一次訊息（那時沒人開著畫面、或之後重新整理就看不到了）
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct StoppedTask {
+    pub name: String,
+    pub reason: String,
+    pub at: String,
+}
+
+static STOPPED: std::sync::Mutex<Vec<StoppedTask>> = std::sync::Mutex::new(Vec::new());
+
+pub fn stopped_tasks() -> Vec<StoppedTask> {
+    STOPPED.lock().map(|v| v.clone()).unwrap_or_default()
+}
+
 /// 啟動時登記一次。登記前（或測試裡沒登記）崩潰的只寫日誌、推畫面，不寫表
 pub fn log_panics_to(db: DbPool) {
     let _ = EVENT_DB.set(db);
@@ -26,6 +41,15 @@ where
     watch(name.into(), tokio::spawn(fut));
 }
 
+/// 同 [`spawn`]，另外登記崩潰時的補救動作（例如狀態機崩潰時停皮帶）；正常結束不執行
+pub fn spawn_or<F>(name: impl Into<String>, fut: F, on_panic: impl FnOnce() + Send + 'static)
+where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    watch_then(name.into(), tokio::spawn(fut), Some(Box::new(on_panic)));
+}
+
 /// 結束前必須做完的常駐工作（例如包裹寫入）：照樣受監督，另外登記在 `tasks`，
 /// 結束流程用 [`drain`] 等它把手上的寫完
 pub fn spawn_tracked<F>(name: impl Into<String>, tasks: &tokio_util::task::TaskTracker, fut: F)
@@ -37,13 +61,25 @@ where
 }
 
 fn watch<T: Send + 'static>(name: String, task: tokio::task::JoinHandle<T>) {
+    watch_then(name, task, None);
+}
+
+fn watch_then<T: Send + 'static>(name: String, task: tokio::task::JoinHandle<T>, on_panic: Option<Box<dyn FnOnce() + Send>>) {
     tokio::spawn(async move {
         let Err(e) = task.await else { return };
         if !e.is_panic() {
             return;
         }
+        if let Some(f) = on_panic {
+            f();
+        }
         let reason = crate::log::panic_text(e.into_panic().as_ref());
-        let message = format!("背景工作「{name}」異常停止：{reason}。這項功能已經停止運作，請重新啟動程式");
+        if let Ok(mut v) = STOPPED.lock() {
+            v.push(StoppedTask { name: name.clone(), reason: reason.clone(), at: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string() });
+        }
+        // 錯誤原文（多半是英文工程訊息）只進日誌檔，畫面與事件紀錄只寫現場看得懂的話
+        tracing::error!(task = %name, %reason, "背景工作異常停止");
+        let message = format!("背景工作「{name}」異常停止，這項功能已經停止運作，請確認現場安全後重新啟動程式");
         if let Some(db) = EVENT_DB.get() {
             crate::event_log::log(db, crate::event_log::Level::Error, "system", "task_panic", message);
             return;
@@ -93,7 +129,8 @@ mod tests {
         .await
         .expect("兩秒內要收到崩潰通知");
         assert_eq!(got["level"], "error");
-        assert!(got["message"].as_str().unwrap().contains("故意崩潰"), "要帶崩潰原因：{got}");
+        // 畫面與事件紀錄給現場看：程式內部的錯誤原文（多半是英文工程訊息）只留在日誌檔與已停止清單
+        assert!(!got["message"].as_str().unwrap().contains("故意崩潰"), "不可把錯誤原文給現場看：{got}");
     }
 
     #[tokio::test]
@@ -132,5 +169,40 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
         assert_eq!(n, 1);
+    }
+
+    #[tokio::test]
+    async fn 常駐工作崩潰時_要執行登記的補救動作() {
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        spawn_or(format!("測試工作-{}", ulid::Ulid::generate()), async { panic!("故意崩潰") }, move || {
+            let _ = tx.send(());
+        });
+        assert!(tokio::time::timeout(std::time::Duration::from_secs(2), rx).await.is_ok_and(|r| r.is_ok()), "崩潰後兩秒內要執行補救動作");
+    }
+
+    #[tokio::test]
+    async fn 常駐工作正常結束_不執行補救動作() {
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        spawn_or("正常結束的工作", async {}, move || {
+            let _ = tx.send(());
+        });
+        let r = tokio::time::timeout(std::time::Duration::from_millis(300), rx).await;
+        assert!(!matches!(r, Ok(Ok(()))), "正常結束不可執行補救動作");
+    }
+
+    #[tokio::test]
+    async fn 常駐工作崩潰後_狀態查詢列得出來_直到程式重開() {
+        let marker = format!("測試工作-{}", ulid::Ulid::generate());
+        spawn(marker.clone(), async { panic!("故意崩潰") });
+        let mut found = None;
+        for _ in 0..40 {
+            found = stopped_tasks().into_iter().find(|t| t.name == marker);
+            if found.is_some() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        let t = found.expect("崩潰的工作要列在已停止清單");
+        assert!(t.reason.contains("故意崩潰"));
     }
 }

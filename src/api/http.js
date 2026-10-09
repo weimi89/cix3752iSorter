@@ -53,6 +53,8 @@ export const parcelImageUrl = (id, orig = false) => `${apiBase()}/api/parcel-ima
 export const api = {
   status: () => request('GET', '/api/status'),
   parcelImage: id => request('GET', `/api/parcel-images/${id}`),
+  // 包裹資料已清除、只剩照片的紀錄（只認完整單號）
+  orphanImages: barcode => request('GET', `/api/parcel-images?${qs({ barcode })}`),
   health: () => request('GET', '/api/health'),
   // 前端錯誤回報（見 api/errorReport.js）；後端記成事件記錄 `ui` 類別
   reportClientError: body => request('POST', '/api/client-errors', body),

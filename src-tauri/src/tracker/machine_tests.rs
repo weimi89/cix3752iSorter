@@ -396,14 +396,14 @@ fn 燈號_作業綠_閒置十秒轉閒置燈() {
 fn 網頁啟停皮帶_立即反映運轉狀態() {
     let mut s = Sim::new();
     assert!(!s.m.belt_running);
-    s.m.handle(Input::BeltStart, &mut s.out);
+    s.m.handle(Input::BeltStart { ts_ms: s.now }, &mut s.out);
     assert!(s.m.belt_running, "啟動後畫面要能立刻切成「停止」鈕");
     assert_eq!(s.out.belt.last().map(String::as_str), Some("KM998 3"));
-    s.m.handle(Input::BeltStop, &mut s.out);
+    s.m.handle(Input::BeltStop { ts_ms: s.now }, &mut s.out);
     assert!(!s.m.belt_running);
     assert_eq!(s.out.belt.last().map(String::as_str), Some("KM998 1"));
     // 皮帶回報停止中（~k-1）一樣會把狀態拉回 false
-    s.m.handle(Input::BeltStart, &mut s.out);
+    s.m.handle(Input::BeltStart { ts_ms: s.now }, &mut s.out);
     s.belt("~k-1 -1");
     assert!(!s.m.belt_running);
 }
@@ -456,4 +456,136 @@ fn 空車卡件_對不到包裹_只在堵塞開始記一筆() {
     // 安靜超過 2 秒堵塞解除，再卡就是新的一次
     s.at(2500).sorter("~k9 25 25");
     assert_eq!(s.out.jam_records.len(), 2);
+}
+
+/// 卡件停線（KM998 1）的共同前段：一件上車後卡在格口
+fn jammed() -> Sim {
+    let mut s = Sim::new();
+    s.belt("~P1 1").at(200).barcode("J0000000001").chute(1, "L1");
+    s.at(1100).belt("~O1 1").at(14).sorter("~c2 2 410 1").at(12).sorter("~j2 1").at(400).sorter("~g2 -1 1");
+    s.at(3000).sorter("~k2 73 73");
+    assert_eq!(s.out.belt, vec!["KM998 1"], "卡件停線");
+    s
+}
+
+fn with_estop(s: &mut Sim) {
+    let mut cfg = AppConfig::default();
+    cfg.emergency_buttons.push(crate::config::EmergencyButton { describe: "急停".into(), device: "belt".into(), m2: 0, bit: 2, action: "estop".into() });
+    s.m.set_config(cfg);
+}
+
+#[test]
+fn 卡件停線期間人員按網頁停止_卡件解除後不自動啟動() {
+    let mut s = jammed();
+    s.at(500);
+    s.m.handle(Input::BeltStop { ts_ms: s.now }, &mut s.out);
+    s.at(3000);
+    assert!(!s.out.belt.contains(&"KM998 3".to_string()), "人員停線後不可自己啟動：{:?}", s.out.belt);
+    assert!(s.out.logs.iter().any(|l| l.contains("不自動啟動")), "要留下為什麼沒啟動的紀錄：{:?}", s.out.logs);
+    // 人員自己按啟動才動
+    s.m.handle(Input::BeltStart { ts_ms: s.now }, &mut s.out);
+    assert_eq!(s.out.belt.last().map(String::as_str), Some("KM998 3"));
+}
+
+#[test]
+fn 急停按住中卡件解除_不自動啟動_放開後也要人員啟動() {
+    let mut s = jammed();
+    with_estop(&mut s);
+    s.belt("~v0 0").at(200).belt("~v0 32");
+    s.at(3000);
+    assert!(!s.out.belt.contains(&"KM998 3".to_string()), "急停按著不可自己啟動：{:?}", s.out.belt);
+    s.belt("~v0 0").at(3000);
+    assert!(!s.out.belt.contains(&"KM998 3".to_string()), "急停放開也不自己啟動：{:?}", s.out.belt);
+}
+
+#[test]
+fn 頭部堵塞期間人員停線_上一件離開頭部後不自動啟動() {
+    let mut s = Sim::new();
+    let mut cfg = AppConfig::default();
+    cfg.ng.on_block = false;
+    s.m.set_config(cfg);
+    s.belt("~P1 1").at(200).barcode("I0000000002").chute(1, "L1");
+    s.at(1100).belt("~O1 1").at(14).sorter("~c5 5 410 1").at(12).sorter("~j5 1");
+    s.at(100).sorter("~k9 42 42");
+    s.at(500);
+    assert_eq!(s.out.belt, vec!["KM998 1"], "堵到頭部停線");
+    s.m.handle(Input::BeltStop { ts_ms: s.now }, &mut s.out);
+    s.at(100).sorter("~g5 -1 1");
+    s.at(2100);
+    assert!(!s.out.belt.contains(&"KM998 3".to_string()), "人員停線後頭部解除、卡件解除都不可自己啟動：{:?}", s.out.belt);
+}
+
+#[test]
+fn 人員停線又啟動之後_下一次卡件照常自動恢復() {
+    let mut s = Sim::new();
+    s.m.handle(Input::BeltStop { ts_ms: s.now }, &mut s.out);
+    s.m.handle(Input::BeltStart { ts_ms: s.now }, &mut s.out);
+    s.out.belt.clear();
+    s.belt("~P1 1").at(200).barcode("J0000000003").chute(1, "L1");
+    s.at(1100).belt("~O1 1").at(14).sorter("~c2 2 410 1").at(12).sorter("~j2 1").at(400).sorter("~g2 -1 1");
+    s.at(3000).sorter("~k2 73 73");
+    s.at(2100);
+    assert_eq!(s.out.belt, vec!["KM998 1", "KM998 3"], "人員已重新啟動過，卡件自動恢復照舊");
+}
+
+#[test]
+fn 已判異常收尾的件_寬限期內才到的格口不接受不回報不印() {
+    let mut s = Sim::new();
+    s.belt("~P3 1").at(200).barcode("N0000000001").at(100).belt("~L3 0 40");
+    assert_eq!(s.parcel(1).status, Status::TriggerNg, "長度為零立即收尾");
+    s.at(60).chute_with_label(1, "L1");
+    assert!(s.out.decided.is_empty(), "已收尾的件不可回報中介機已分揀：{:?}", s.out.decided);
+    assert!(s.out.printed.is_empty(), "已收尾的件不可印面單：{:?}", s.out.printed);
+    assert!(s.parcel(1).chute.as_ref().is_none_or(|c| c.code != "L1"), "不改格口決定");
+    assert!(s.out.events.iter().any(|(_, k)| k == "chute_late"), "要留下回覆晚到的紀錄");
+}
+
+#[test]
+fn 人員停線後_皮帶減速期間的訊號不可解除停線狀態() {
+    let mut s = jammed();
+    s.at(300);
+    s.m.handle(Input::BeltStop { ts_ms: s.now }, &mut s.out);
+    // 按停止的瞬間皮帶還在減速，已經在皮帶上的件還會有出口訊號
+    s.at(100).belt("~E1 1");
+    s.at(3000);
+    assert!(!s.out.belt.contains(&"KM998 3".to_string()), "減速期間的訊號不代表有人重新啟動：{:?}", s.out.belt);
+}
+
+#[test]
+fn 人員停線後_皮帶從控制箱重新啟動_之後卡件照常自動恢復() {
+    let mut s = Sim::new();
+    s.m.handle(Input::BeltStop { ts_ms: s.now }, &mut s.out);
+    s.out.belt.clear();
+    // 5 秒後有新件上線：皮帶被人從別的地方啟動了
+    s.at(5000).belt("~P1 1").at(200).barcode("J0000000004").chute(1, "L1");
+    s.at(1100).belt("~O1 1").at(14).sorter("~c2 2 410 1").at(12).sorter("~j2 1").at(400).sorter("~g2 -1 1");
+    s.at(3000).sorter("~k2 73 73");
+    s.at(2100);
+    assert_eq!(s.out.belt, vec!["KM998 1", "KM998 3"], "皮帶已經重新運轉，卡件恢復照舊：{:?}", s.out.logs);
+}
+
+#[test]
+fn 急停按著時網頁啟動_不送啟動也不解除停線_放開後卡件解除仍不自動啟動() {
+    let mut s = jammed();
+    with_estop(&mut s);
+    s.belt("~v0 0").at(200).belt("~v0 32");
+    s.at(100);
+    s.m.handle(Input::BeltStart { ts_ms: s.now }, &mut s.out);
+    assert!(!s.out.belt.contains(&"KM998 3".to_string()), "急停按著不可啟動：{:?}", s.out.belt);
+    assert!(s.out.logs.iter().any(|l| l.contains("急停仍按著")), "{:?}", s.out.logs);
+    s.belt("~v0 0").at(3000);
+    assert!(!s.out.belt.contains(&"KM998 3".to_string()), "放開急停後也要人員再按啟動：{:?}", s.out.belt);
+}
+
+#[test]
+fn 追蹤核心時鐘落後時按網頁停止_停線時刻用按下的時間_減速訊號不可解除() {
+    let mut s = jammed();
+    s.at(200);
+    // 追蹤核心卡了 4 秒沒處理任何事（時鐘停在 4 秒前），這時有人按停止
+    s.now += 4_000;
+    s.m.handle(Input::BeltStop { ts_ms: s.now }, &mut s.out);
+    s.now += 100;
+    s.belt("~E1 1");
+    s.at(3000);
+    assert!(!s.out.belt.contains(&"KM998 3".to_string()), "減速中的訊號不可當成重新啟動：{:?}", s.out.belt);
 }

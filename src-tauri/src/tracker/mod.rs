@@ -111,10 +111,10 @@ pub struct TrackerSnapshot {
 
 impl TrackerHandle {
     pub async fn belt_start(&self) {
-        let _ = self.tx.send(Input::BeltStart).await;
+        let _ = self.tx.send(Input::BeltStart { ts_ms: crate::db::now_ms() }).await;
     }
     pub async fn belt_stop(&self) {
-        let _ = self.tx.send(Input::BeltStop).await;
+        let _ = self.tx.send(Input::BeltStop { ts_ms: crate::db::now_ms() }).await;
     }
     pub async fn sorter_reset(&self) {
         let _ = self.tx.send(Input::SorterReset).await;
@@ -415,6 +415,17 @@ pub async fn spawn(
     let (jam_tx, jam_rx) = mpsc::channel::<JamAlert>(64);
     let ir = Arc::new(IrChannel { op: tokio::sync::Mutex::new(()), pending: std::sync::Mutex::new(IrPending::default()) });
     let handle = TrackerHandle { tx, query_tx, sorter: devices.sorter.clone(), ir: ir.clone() };
+    // 狀態機崩潰後沒有人下格口指令，皮帶照轉會把件一路送進分揀機卻分不出去：先停皮帶，等人員確認後重開程式
+    let on_crash = {
+        let (belt, config, db) = (devices.belt.clone(), app.config.clone(), app.db.clone());
+        move || {
+            let stop = config.current().belt.cmd.stop;
+            let sent = belt.send(&stop);
+            // 「送出」只代表指令排進皮帶連線的佇列，沒有回覆可以確認皮帶真的停了，文案照實說
+            let msg = if sent { "包裹追蹤異常停止，已送出停皮帶指令；請到現場確認皮帶已停，再重新啟動程式" } else { "包裹追蹤異常停止，皮帶未連線、停止指令送不出去；請到現場手動停線並重新啟動程式" };
+            event_log::log(&db, Level::Error, "belt", "crash_stop", msg);
+        }
+    };
 
     let mut out = LiveOutputs {
         app: app.clone(),
@@ -431,7 +442,7 @@ pub async fn spawn(
     let mut machine = Machine::new(cfg, chutes, today, crate::db::now_ms());
     let mut cfg_rx = app.config.subscribe();
 
-    crate::supervise::spawn("狀態機", async move {
+    crate::supervise::spawn_or("包裹追蹤", async move {
         let mut tick = tokio::time::interval(Duration::from_millis(20));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut publish_at = std::time::Instant::now();
@@ -475,7 +486,7 @@ pub async fn spawn(
             }
         }
         tracing::info!("狀態機結束");
-    });
+    }, on_crash);
 
     Ok((handle, TrackerPorts { chute_rx, jam_rx }))
 }

@@ -52,12 +52,19 @@ async fn run_headless(cli: Cli) -> anyhow::Result<()> {
             cancel.cancel();
         })
     };
-    server::serve(started.app, &started.bind, cancel.clone()).await?;
+    // 網頁服務出錯（埠號被占用等）也要走完收尾：裝置已經連上，直接返回的話皮帶不會收到停止、寫入佇列也沒寫完
+    let served = server::serve(started.app, &started.bind, cancel.clone()).await;
+    if let Err(e) = &served {
+        tracing::error!("網頁服務停止，開始關閉: {e}");
+        cancel.cancel();
+    }
     shutdown.abort();
     // 函式一回傳 runtime 就被丟掉、所有工作中止；寫入佇列裡的包裹與剛定格口的回報要先寫完
     if !cix3752i_sorter::supervise::drain(&tasks, cix3752i_sorter::supervise::DRAIN_LIMIT).await {
         tracing::error!("結束時寫入佇列沒在時限內寫完，部分包裹狀態或回報可能遺失");
     }
+    // 結束前送給裝置的指令（皮帶停止）還在訊號紀錄的緩衝裡，寫進檔案才結束
+    let _ = tokio::task::spawn_blocking(cix3752i_sorter::device::signal_log::flush).await;
     tracing::info!("已關閉");
-    Ok(())
+    served
 }

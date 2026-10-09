@@ -39,6 +39,10 @@ pub struct LineOpts {
     pub keepalive_interval: Duration,
     /// 連上後立即送出的指令（分揀機 `Kx999;Kk2`、皮帶先停止再重置）；用 watch 讓設定改了下次連線就生效
     pub on_connect: watch::Receiver<Vec<String>>,
+    /// 程式結束、斷線前送出的指令（皮帶先停止）；連線中才送
+    pub on_shutdown: watch::Receiver<Vec<String>>,
+    /// 有 `on_shutdown` 的連線要登記在結束流程等的工作裡，否則指令還沒寫出去程序就結束了
+    pub tasks: Option<tokio_util::task::TaskTracker>,
     pub reconnect_min: Duration,
     pub reconnect_max: Duration,
 }
@@ -52,6 +56,8 @@ impl Default for LineOpts {
             keepalive_time: Duration::from_secs(10),
             keepalive_interval: Duration::from_secs(5),
             on_connect: fixed_on_connect(Vec::new()),
+            on_shutdown: fixed_on_connect(Vec::new()),
+            tasks: None,
             reconnect_min: Duration::from_secs(1),
             reconnect_max: Duration::from_secs(5),
         }
@@ -98,6 +104,16 @@ impl LineClient {
     }
 }
 
+/// 背景工作名稱：崩潰時會出現在現場的警示與事件紀錄，用中文；`name` 本身留給日誌與訊號紀錄
+fn task_label(name: &str) -> String {
+    let label = match name {
+        "belt" => "皮帶線",
+        "sorter" => "分揀機",
+        other => other,
+    };
+    format!("{label}連線")
+}
+
 /// 啟動連線 task。`addr_rx` 變動時會斷開重連到新位址。
 pub fn spawn(
     name: &'static str,
@@ -109,7 +125,10 @@ pub fn spawn(
     let (ev_tx, ev_rx) = mpsc::channel::<LineEvent>(1024);
     let (conn_tx, conn_rx) = watch::channel(false);
 
-    crate::supervise::spawn(format!("{name} 連線"), run(name, addr_rx, opts, cancel, cmd_rx, ev_tx, conn_tx));
+    match opts.tasks.clone() {
+        Some(tasks) => crate::supervise::spawn_tracked(task_label(name), &tasks, run(name, addr_rx, opts, cancel, cmd_rx, ev_tx, conn_tx)),
+        None => crate::supervise::spawn(task_label(name), run(name, addr_rx, opts, cancel, cmd_rx, ev_tx, conn_tx)),
+    }
 
     (LineClient { name, cmd_tx, connected: conn_rx }, ev_rx)
 }
@@ -307,6 +326,19 @@ impl<R: AsyncRead + Unpin> LineReader<R> {
     }
 }
 
+/// 程式結束（或沒有人再接收訊號）：斷線前送出 `on_shutdown` 的指令（皮帶先停止）
+async fn farewell<W: tokio::io::AsyncWrite + Unpin>(name: &'static str, opts: &LineOpts, wr: &mut W) {
+    let cmds = opts.on_shutdown.borrow().clone();
+    for cmd in &cmds {
+        tracing::info!(device = name, %cmd, "程式結束前送出");
+        signal_log::record(name, Dir::Out, cmd);
+        if let Err(e) = write_frame(wr, cmd, WRITE_TIMEOUT).await {
+            tracing::error!(device = name, %cmd, "程式結束前的指令送不出去: {e}");
+            break;
+        }
+    }
+}
+
 /// 單一條連線的收發迴圈；回傳結束原因。
 async fn serve_connection(
     name: &'static str,
@@ -336,23 +368,23 @@ async fn serve_connection(
     // 否則只要我們自己一直下指令，對方早就死了也永遠抓不到
     let mut last_rx = tokio::time::Instant::now();
     let mut next_probe = opts.idle_probe.as_ref().map(|(after, _)| last_rx + *after);
-    loop {
+    let reason: String = loop {
         let probe_at = next_probe.unwrap_or_else(|| last_rx + Duration::from_secs(365 * 24 * 3600));
         tokio::select! {
-            _ = cancel.cancelled() => return "服務關閉".into(),
-            _ = addr_rx.changed() => return "位址變更，重連".into(),
+            _ = cancel.cancelled() => break "服務關閉".into(),
+            _ = addr_rx.changed() => break "位址變更，重連".into(),
             _ = tokio::time::sleep_until(probe_at) => {
                 let Some((after, cmd)) = opts.idle_probe.as_ref() else { continue };
                 tracing::debug!(device = name, %cmd, "閒置探詢");
                 signal_log::record(name, Dir::Out, cmd);
                 if let Err(e) = write_frame(&mut wr, cmd, WRITE_TIMEOUT).await {
-                    return format!("閒置探詢寫入失敗: {e}");
+                    break format!("閒置探詢寫入失敗: {e}");
                 }
                 next_probe = Some(probe_at + *after);
             }
             r = tokio::time::timeout_at(last_rx + idle, lines.next()) => match r {
-                Err(_) => return format!("{idle:?} 內無任何資料（讀逾時）"),
-                Ok(Ok(None)) => return "對方關閉連線".into(),
+                Err(_) => break format!("{idle:?} 內無任何資料（讀逾時）"),
+                Ok(Ok(None)) => break "對方關閉連線".into(),
                 Ok(Ok(Some(Chunk::TooLong(n)))) => {
                     last_rx = tokio::time::Instant::now();
                     next_probe = opts.idle_probe.as_ref().map(|(after, _)| last_rx + *after);
@@ -368,24 +400,43 @@ async fn serve_connection(
                         tracing::trace!(device = name, %text, "收到");
                         signal_log::record(name, Dir::In, &text);
                         if ev_tx.send(LineEvent::Line { text, ts_ms }).await.is_err() {
-                            return "事件接收端已關閉".into();
+                            break "事件接收端已關閉".into();
                         }
                     }
                 }
-                Ok(Err(e)) => return format!("讀取錯誤: {e}"),
+                Ok(Err(e)) => break format!("讀取錯誤: {e}"),
             },
             cmd = cmd_rx.recv() => match cmd {
                 Some(cmd) => {
                     tracing::debug!(device = name, %cmd, "送出");
                     signal_log::record(name, Dir::Out, &cmd);
                     if let Err(e) = write_frame(&mut wr, &cmd, WRITE_TIMEOUT).await {
-                        return format!("寫入失敗: {e}");
+                        break format!("寫入失敗: {e}");
                     }
                 }
-                None => return "指令通道已關閉".into(),
+                None => break "指令通道已關閉".into(),
             },
         }
+    };
+    // 程式關閉時其他通道（位址、指令）會跟著關閉，誰先被處理到不一定：不管從哪一路結束，關閉中都先送結束指令
+    if cancel.is_cancelled() {
+        farewell(name, opts, &mut wr).await;
+        return "服務關閉".into();
     }
+    // 沒有人在接收訊號（狀態機崩潰、轉送工作停了）：之後不會再重連，等同關閉。
+    // 佇列裡的指令（例如崩潰補救排進來的停皮帶）先寫出去，再送結束指令；不寫的話斷線後會被當成舊連線的指令丟掉
+    if ev_tx.is_closed() {
+        while let Ok(cmd) = cmd_rx.try_recv() {
+            tracing::info!(device = name, %cmd, "接收端已關閉，送出佇列裡的指令");
+            signal_log::record(name, Dir::Out, &cmd);
+            if let Err(e) = write_frame(&mut wr, &cmd, WRITE_TIMEOUT).await {
+                tracing::error!(device = name, %cmd, "接收端已關閉時的指令送不出去: {e}");
+                break;
+            }
+        }
+        farewell(name, opts, &mut wr).await;
+    }
+    reason
 }
 
 #[cfg(test)]
@@ -445,6 +496,67 @@ mod tests {
 
         drop(addr_tx);
         cancel.cancel();
+    }
+
+    #[tokio::test]
+    async fn 程式結束時先送結束指令再斷線_結束流程等它送完() {
+        // 誰先被處理是隨機的，重複幾次才抓得到
+        for round in 0..10 {
+            let (addr, listener) = fake_device().await;
+            let (addr_tx, addr_rx) = watch::channel(addr);
+            let cancel = CancellationToken::new();
+            let tasks = tokio_util::task::TaskTracker::new();
+            let opts = LineOpts {
+                on_connect: fixed_on_connect(vec!["KM998 1".into(), "KM998 2".into()]),
+                on_shutdown: fixed_on_connect(vec!["KM998 1".into()]),
+                tasks: Some(tasks.clone()),
+                ..Default::default()
+            };
+            let (client, mut events) = spawn("test", addr_rx, opts, cancel.clone());
+            let (mut s, _) = listener.accept().await.unwrap();
+            assert!(matches!(events.recv().await.unwrap(), LineEvent::Connected { .. }));
+            let mut got = vec![0u8; b"KM998 1;\nKM998 2;\n".len()];
+            s.read_exact(&mut got).await.unwrap();
+            assert_eq!(&got[..], b"KM998 1;\nKM998 2;\n");
+            // 正式程式結束時：結束通知、位址通道、送指令的一方（狀態機）幾乎同時消失
+            cancel.cancel();
+            drop(addr_tx);
+            drop(client);
+            assert!(crate::supervise::drain(&tasks, Duration::from_secs(5)).await, "結束流程要等連線送完結束指令");
+            let mut rest = Vec::new();
+            let _ = tokio::time::timeout(Duration::from_secs(2), s.read_to_end(&mut rest)).await;
+            assert_eq!(String::from_utf8_lossy(&rest), "KM998 1;\n", "第 {round} 次：斷線前先送停止");
+        }
+    }
+
+    #[tokio::test]
+    async fn 訊號接收端消失時_佇列裡的指令與結束指令都要送出() {
+        // 包裹追蹤崩潰：它持有的接收端消失，補救動作同時排進一道停皮帶指令；
+        // 連線先處理到「下一行送不出去」就斷線的話，那道指令不可被丟掉。誰先被處理是隨機的，重複幾次
+        for round in 0..10 {
+            let (addr, listener) = fake_device().await;
+            let (_addr_tx, addr_rx) = watch::channel(addr);
+            let cancel = CancellationToken::new();
+            let opts = LineOpts { on_shutdown: fixed_on_connect(vec!["KM998 1".into()]), ..Default::default() };
+            let (client, events) = spawn("test", addr_rx, opts, cancel.clone());
+            let (mut s, _) = listener.accept().await.unwrap();
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            drop(events);
+            s.write_all(b"~P1 1\n").await.unwrap();
+            assert!(client.send("CRASH-STOP"));
+            let mut rest = Vec::new();
+            let _ = tokio::time::timeout(Duration::from_secs(2), s.read_to_end(&mut rest)).await;
+            let text = String::from_utf8_lossy(&rest).into_owned();
+            assert!(text.contains("CRASH-STOP;\n"), "第 {round} 次：佇列裡的指令被丟掉：{text:?}");
+            assert!(text.ends_with("KM998 1;\n"), "第 {round} 次：沒人接收訊號時要送結束指令：{text:?}");
+            cancel.cancel();
+        }
+    }
+
+    #[test]
+    fn 背景工作名稱給現場看_用中文() {
+        assert_eq!(task_label("belt"), "皮帶線連線");
+        assert_eq!(task_label("sorter"), "分揀機連線");
     }
 
     #[tokio::test]

@@ -102,6 +102,8 @@ pub async fn close_orphans(db: &DbPool, default_chute: &str) -> anyhow::Result<u
 async fn run(db: DbPool, mut rx: mpsc::Receiver<StoreOp>) {
     use crate::db::retry_busy;
     let mut ids: HashMap<String, i64> = HashMap::new();
+    // 每件最後一次同步到照片的單號；沒變就不再寫照片表
+    let mut synced: HashMap<String, Option<String>> = HashMap::new();
     while let Some(op) = rx.recv().await {
         match op {
             StoreOp::Insert(p) => match retry_busy("新增包裹", || insert(&db, &p)).await {
@@ -111,8 +113,20 @@ async fn run(db: DbPool, mut rx: mpsc::Receiver<StoreOp>) {
                 Err(e) => event_log::log(&db, Level::Error, "tracker", "db_insert", format!("包裹 {} 寫入失敗: {e}", p.ulid)),
             },
             StoreOp::Update(p) => {
-                if let Err(e) = retry_busy("更新包裹", || async { update(&mut *db.acquire().await?, &p).await }).await {
-                    event_log::log(&db, Level::Error, "tracker", "db_update", format!("包裹 {} 更新失敗: {e}", p.ulid));
+                let bc = image_barcode(&p).map(String::from);
+                let sync = synced.get(&p.ulid) != Some(&bc);
+                // 要同步照片時兩步同一個交易：分開提交的話中途結束會留下包裹有單號、照片沒有的永久不一致
+                match retry_busy("更新包裹", || async {
+                    let mut tx = db.begin().await?;
+                    update(&mut tx, &p, sync).await?;
+                    tx.commit().await
+                })
+                .await
+                {
+                    Ok(()) => {
+                        synced.insert(p.ulid.clone(), bc);
+                    }
+                    Err(e) => event_log::log(&db, Level::Error, "tracker", "db_update", format!("包裹 {} 更新失敗: {e}", p.ulid)),
                 }
             }
             StoreOp::Event { ulid, ts_ms, source, kind, raw } => {
@@ -136,6 +150,7 @@ async fn run(db: DbPool, mut rx: mpsc::Receiver<StoreOp>) {
             }
             StoreOp::Forget(ulid) => {
                 ids.remove(&ulid);
+                synced.remove(&ulid);
             }
             StoreOp::Daily(p, default_chute) => {
                 if let Err(e) = retry_busy("當日統計", || finish(&db, &p, &default_chute)).await {
@@ -167,10 +182,15 @@ async fn run(db: DbPool, mut rx: mpsc::Receiver<StoreOp>) {
     }
 }
 
+/// 照片另存的單號：讀碼失敗或還沒綁碼時是空值
+fn image_barcode(p: &Parcel) -> Option<&str> {
+    p.barcode.as_deref().filter(|b| *b != crate::device::camera::NO_READ)
+}
+
 /// 終態、已計入標記與當日統計同一個交易：要嘛都寫進去、要嘛都沒有；已經計過的不再計
 async fn finish(db: &DbPool, p: &Parcel, default_chute: &str) -> Result<(), sqlx::Error> {
     let mut tx = db.begin().await?;
-    update(&mut tx, p).await?;
+    update(&mut tx, p, true).await?;
     let first = sqlx::query("UPDATE parcels SET daily_counted = 1 WHERE ulid = ? AND daily_counted = 0").bind(&p.ulid).execute(&mut *tx).await?.rows_affected() == 1;
     if first {
         daily(&mut *tx, p, default_chute).await?;
@@ -196,7 +216,8 @@ async fn insert(db: &DbPool, p: &Parcel) -> Result<i64, sqlx::Error> {
     Ok(row.0)
 }
 
-async fn update(conn: &mut sqlx::SqliteConnection, p: &Parcel) -> Result<(), sqlx::Error> {
+/// `sync_image_barcode`：條碼跟上次同步時不同才傳 true（條碼只在綁碼時會變，每次更新都同步是白寫）
+async fn update(conn: &mut sqlx::SqliteConnection, p: &Parcel, sync_image_barcode: bool) -> Result<(), sqlx::Error> {
     let now = now_ms();
     let (code, cid, source, response_id, reason) = match &p.chute {
         Some(c) => (Some(c.code.clone()), Some(c.cid.0 as i64), serde_json::to_value(c.source).ok().and_then(|v| v.as_str().map(String::from)).unwrap_or_else(|| "pending".into()), c.response_id, c.reason.clone()),
@@ -225,6 +246,14 @@ async fn update(conn: &mut sqlx::SqliteConnection, p: &Parcel) -> Result<(), sql
     .bind(&p.ulid)
     .execute(&mut *conn)
     .await?;
+    // 照片另存的條碼跟著包裹走：包裹清掉後要靠它用單號找回照片。讀碼失敗沒有單號，存空值
+    if sync_image_barcode {
+        sqlx::query("UPDATE parcel_images SET barcode = ?1 WHERE parcel_id = (SELECT id FROM parcels WHERE ulid = ?2) AND barcode IS NOT ?1")
+            .bind(image_barcode(p))
+            .bind(&p.ulid)
+            .execute(&mut *conn)
+            .await?;
+    }
     // 回報可能比包裹列早入列（那時查不到包裹、編號留空，之後隨時會被送出），寫入回報編號時補上，
     // 回報佇列頁才對得到條碼與格口
     if let Some(rid) = response_id {
@@ -429,6 +458,53 @@ mod tests {
         close_orphans(&db, "RS").await.unwrap();
         let total: i64 = sqlx::query_scalar("SELECT total FROM daily_stats WHERE day = ?").bind(&day).fetch_one(&db).await.unwrap();
         assert_eq!(total, 1, "再重啟一次不可再計");
+    }
+
+    #[tokio::test]
+    async fn 包裹條碼在照片對上之後才改_照片存的條碼跟著改() {
+        let db = test_db().await;
+        let mut p = finished_parcel(None);
+        p.barcode = Some("OLD0000001".into());
+        run_ops(&db, vec![StoreOp::Insert(p.clone())]).await;
+        let pid: i64 = sqlx::query_scalar("SELECT id FROM parcels WHERE ulid = ?").bind(&p.ulid).fetch_one(&db).await.unwrap();
+        sqlx::query("INSERT INTO parcel_images (parcel_id, barcode, file_name, rel_path, size, orig_size, received_ms, received_at) VALUES (?, 'OLD0000001', 'x.jpg', 'x.jpg', 1, 1, 1, '2026-10-09 07:30:00.000')")
+            .bind(pid).execute(&db).await.unwrap();
+        p.barcode = Some("NEW0000001".into());
+        run_ops(&db, vec![StoreOp::Update(p.clone())]).await;
+        let bc: Option<String> = sqlx::query_scalar("SELECT barcode FROM parcel_images").fetch_one(&db).await.unwrap();
+        assert_eq!(bc.as_deref(), Some("NEW0000001"));
+    }
+
+    #[tokio::test]
+    async fn 包裹條碼變成讀碼失敗_照片存的單號清成空值() {
+        let db = test_db().await;
+        let mut p = finished_parcel(None);
+        p.barcode = Some("OLD0000002".into());
+        run_ops(&db, vec![StoreOp::Insert(p.clone())]).await;
+        let pid: i64 = sqlx::query_scalar("SELECT id FROM parcels WHERE ulid = ?").bind(&p.ulid).fetch_one(&db).await.unwrap();
+        sqlx::query("INSERT INTO parcel_images (parcel_id, barcode, file_name, rel_path, size, orig_size, received_ms, received_at) VALUES (?, 'OLD0000002', 'x.jpg', 'x.jpg', 1, 1, 1, '2026-10-09 07:30:00.000')")
+            .bind(pid).execute(&db).await.unwrap();
+        p.barcode = None;
+        run_ops(&db, vec![StoreOp::Update(p.clone())]).await;
+        let bc: Option<String> = sqlx::query_scalar("SELECT barcode FROM parcel_images").fetch_one(&db).await.unwrap();
+        assert_eq!(bc, None);
+    }
+
+    #[tokio::test]
+    async fn 包裹條碼與照片條碼同一個交易_照片那步失敗時包裹也不改() {
+        // 兩步分開提交的話，中途結束會留下包裹有單號、照片沒有的永久不一致（之後不會再同步）
+        let db = test_db().await;
+        let mut p = finished_parcel(None);
+        p.barcode = Some("TXN0000001".into());
+        run_ops(&db, vec![StoreOp::Insert(p.clone())]).await;
+        let pid: i64 = sqlx::query_scalar("SELECT id FROM parcels WHERE ulid = ?").bind(&p.ulid).fetch_one(&db).await.unwrap();
+        sqlx::query("INSERT INTO parcel_images (parcel_id, barcode, file_name, rel_path, size, orig_size, received_ms, received_at) VALUES (?, 'TXN0000001', 'x.jpg', 'x.jpg', 1, 1, 1, '2026-10-09 07:30:00.000')")
+            .bind(pid).execute(&db).await.unwrap();
+        sqlx::query("CREATE TRIGGER fail_image_update BEFORE UPDATE ON parcel_images BEGIN SELECT RAISE(ABORT, '模擬照片同步失敗'); END").execute(&db).await.unwrap();
+        p.barcode = Some("TXN0000002".into());
+        run_ops(&db, vec![StoreOp::Update(p.clone())]).await;
+        let bc: String = sqlx::query_scalar("SELECT barcode FROM parcels WHERE id = ?").bind(pid).fetch_one(&db).await.unwrap();
+        assert_eq!(bc, "TXN0000001", "照片同步失敗時包裹條碼也不可改");
     }
 
     #[tokio::test]

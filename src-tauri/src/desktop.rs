@@ -129,6 +129,7 @@ pub fn run(config: Option<PathBuf>, data_dir: Option<PathBuf>) {
                         tracing::error!("結束時寫入佇列沒在時限內寫完，部分包裹狀態或回報可能遺失");
                     }
                 }
+                crate::device::signal_log::flush();
                 crate::log::flush();
             }
         });

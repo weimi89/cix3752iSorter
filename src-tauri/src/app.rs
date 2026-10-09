@@ -47,7 +47,7 @@ pub async fn bootstrap(config_path: &Path, data_dir: &Path, cancel: Cancellation
 
     // 裝置層：各裝置一個 task，事件匯進同一條 channel 給狀態機
     let (dev_tx, dev_rx) = tokio::sync::mpsc::channel(4096);
-    let belt = device::belt::spawn(config.subscribe(), dev_tx.clone(), cancel.clone());
+    let belt = device::belt::spawn(config.subscribe(), dev_tx.clone(), cancel.clone(), &app.tasks);
     let sorter = device::sorter::spawn(config.subscribe(), dev_tx.clone(), cancel.clone());
     device::camera::spawn(config.subscribe(), dev_tx.clone(), cancel.clone());
     // 讀碼站照片：讀碼器用 FTP 上傳每件的圖，本程式收下當收件證據

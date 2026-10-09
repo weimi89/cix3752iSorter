@@ -12,6 +12,7 @@ import AppDatePicker from '@/components/AppDatePicker.vue'
 import MultiNoField from '@/components/MultiNoField.vue'
 import { toast } from 'vue3-toastify'
 import { usePagedList } from '@/composables/usePagedList'
+import { useLatestRequest } from '@/composables/useLatestRequest'
 
 const { t } = useI18n()
 // 日期用日曆選；送後端時起日 00:00、迄日 23:59:59.999（整天）
@@ -29,12 +30,30 @@ const filterParams = () => ({
 })
 const { page, pageSize, total, list, loading, errorMsg, load, search, refreshSoon } = usePagedList(p => api.parcels({ ...filterParams(), ...p }))
 const params = () => ({ ...filterParams(), page: page.value, limit: pageSize.value })
-const resetSearch = () => { Object.assign(filters, { startDate: '', endDate: '', barcode: '', chute: '', status: null, source: null }); search() }
+// 用單號查時一併找「包裹資料已超過保留天數被清除、只剩讀碼站照片」的紀錄
+const orphans = ref([])
+// 查詢失敗要講出來：當成「沒有照片」的話，現場會以為沒有收件證據
+const orphanError = ref('')
+const orphanLatest = useLatestRequest()
+const loadOrphans = async () => {
+  const id = orphanLatest.start()
+  orphanError.value = ''
+  if (!filters.barcode.trim()) { orphans.value = []; return }
+  try {
+    const rows = await api.orphanImages(filters.barcode)
+    if (orphanLatest.isLatest(id)) orphans.value = rows
+  } catch (e) {
+    if (orphanLatest.isLatest(id)) { orphans.value = []; orphanError.value = e.message }
+  }
+}
+const doSearch = () => { search(); loadOrphans() }
+const resetSearch = () => { Object.assign(filters, { startDate: '', endDate: '', barcode: '', chute: '', status: null, source: null }); doSearch() }
 const open = id => { detailId.value = id; detailOpen.value = true }
 // 照片按鈕直接放大，不經包裹詳情
 const viewerImage = ref(null)
 const viewerOpen = ref(false)
 const openImage = p => { viewerImage.value = { id: p.image_id }; viewerOpen.value = true }
+const openOrphan = o => { viewerImage.value = { id: o.id, file_name: o.file_name, has_orig: o.has_orig }; viewerOpen.value = true }
 const exportNow = () => window.open(api.parcelsExportUrl(params()), '_blank')
 
 const statusItems = computed(() => [{ value: null, title: t('common.all') }, ...Object.entries(STATUS).map(([v, m]) => ({ value: Number(v), title: t(m.key) }))])
@@ -82,18 +101,29 @@ onMounted(async () => {
                 <AppDatePicker v-model="filters.endDate" :min="filters.startDate" />
               </div>
             </VCol>
-            <VCol cols="12" lg="6" class="px-2 py-1"><div class="search-field"><label>{{ $t('parcel.barcode') }}</label><MultiNoField v-model="filters.barcode" @search="search" /></div></VCol>
+            <VCol cols="12" lg="6" class="px-2 py-1"><div class="search-field"><label>{{ $t('parcel.barcode') }}</label><MultiNoField v-model="filters.barcode" @search="doSearch" /></div></VCol>
             <VCol cols="12" sm="6" lg="4" class="px-2 py-1"><div class="search-field"><label>{{ $t('parcel.chute') }}</label><VSelect v-model="filters.chute" :items="chuteItems" density="compact" hide-details variant="outlined" /></div></VCol>
             <VCol cols="12" sm="6" lg="4" class="px-2 py-1"><div class="search-field"><label>{{ $t('parcel.status') }}</label><VSelect v-model="filters.status" :items="statusItems" density="compact" hide-details variant="outlined" /></div></VCol>
             <VCol cols="12" sm="6" lg="4" class="px-2 py-1"><div class="search-field"><label>{{ $t('parcel.source') }}</label><VSelect v-model="filters.source" :items="sourceItems" density="compact" hide-details variant="outlined" /></div></VCol>
           </VRow>
           <div class="d-flex justify-center ga-2 pt-4">
             <VBtn variant="outlined" color="secondary" @click="resetSearch"><VIcon icon="tabler-eraser" size="18" class="me-1" />{{ $t('common.reset') }}</VBtn>
-            <VBtn variant="elevated" color="primary" :loading="loading" @click="search"><VIcon icon="tabler-database-search" size="18" class="me-1" />{{ $t('common.search') }}</VBtn>
+            <VBtn variant="elevated" color="primary" :loading="loading" @click="doSearch"><VIcon icon="tabler-database-search" size="18" class="me-1" />{{ $t('common.search') }}</VBtn>
           </div>
         </VExpansionPanelText>
       </VExpansionPanel>
     </VExpansionPanels>
+
+    <VAlert v-if="orphanError" type="warning" variant="tonal" class="mb-3">{{ $t('page.parcels.orphanFailed', { msg: orphanError }) }}</VAlert>
+    <VAlert v-if="orphans.length" type="info" variant="tonal" icon="tabler-camera" class="mb-3">
+      <div class="font-weight-medium mb-1">{{ $t('page.parcels.orphanTitle', { n: orphans.length }) }}</div>
+      <div class="text-body-2 mb-2">{{ $t('page.parcels.orphanHint') }}</div>
+      <div class="d-flex flex-wrap ga-2">
+        <VBtn v-for="o in orphans" :key="o.id" size="small" variant="outlined" color="info" @click="openOrphan(o)">
+          <VIcon icon="tabler-camera" size="16" class="me-1" /><span class="selectable">{{ o.barcode }}</span><span class="ms-2 text-medium-emphasis">{{ o.received_at.slice(0, 19) }}</span>
+        </VBtn>
+      </div>
+    </VAlert>
 
     <VCard>
       <TablePagination v-model:page="page" v-model:per-page="pageSize" :total="total" header />

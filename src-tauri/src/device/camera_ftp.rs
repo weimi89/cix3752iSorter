@@ -36,10 +36,21 @@ pub fn images_dir(cfg: &CameraFtpConfig, data_dir: &Path) -> PathBuf {
 
 pub fn spawn(db: DbPool, data_dir: PathBuf, cfg_rx: watch::Receiver<AppConfig>, cancel: CancellationToken) {
     let ftp_rx = super::derive(cfg_rx, |c| c.camera_ftp.clone(), cancel.clone());
-    crate::supervise::spawn("讀碼站照片 FTP", run(db, data_dir, ftp_rx, cancel));
+    crate::supervise::spawn("讀碼站照片接收", run(db, data_dir, ftp_rx, cancel));
 }
 
+/// 啟動時往回補對多久內收到的照片（比稍後補對的 30 秒寬裕，涵蓋關閉到重開的時間）
+const STARTUP_REMATCH_WINDOW_MS: i64 = 10 * 60 * 1000;
+
 async fn run(db: DbPool, data_dir: PathBuf, mut cfg_rx: watch::Receiver<CameraFtpConfig>, cancel: CancellationToken) {
+    {
+        let cfg = cfg_rx.borrow().clone();
+        match rematch_recent(&db, &cfg, crate::db::now_ms() - STARTUP_REMATCH_WINDOW_MS).await {
+            Ok(0) => {}
+            Ok(n) => tracing::info!(n, "啟動時補對上 {n} 張上次還沒對上的照片"),
+            Err(e) => tracing::warn!("啟動時補對照片失敗: {e}"),
+        }
+    }
     loop {
         if cancel.is_cancelled() {
             return;
@@ -516,8 +527,9 @@ async fn insert_image(db: &DbPool, parcel_id: Option<i64>, file_name: &str, rel_
     let received_at = crate::db::local_ts(received_ms);
     crate::db::retry_busy("照片存檔", || {
         sqlx::query_as(
-            "INSERT INTO parcel_images (parcel_id, file_name, rel_path, orig_path, size, orig_size, received_ms, received_at)
-             VALUES ((SELECT ?1 WHERE NOT EXISTS (SELECT 1 FROM parcel_images WHERE parcel_id = ?1)), ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            "INSERT INTO parcel_images (parcel_id, barcode, file_name, rel_path, orig_path, size, orig_size, received_ms, received_at)
+             SELECT linked, (SELECT NULLIF(barcode, 'NoRead') FROM parcels WHERE id = linked), ?2, ?3, ?4, ?5, ?6, ?7, ?8
+               FROM (SELECT (SELECT ?1 WHERE NOT EXISTS (SELECT 1 FROM parcel_images WHERE parcel_id = ?1)) AS linked)
              RETURNING id, parcel_id",
         )
         .bind(parcel_id)
@@ -531,6 +543,40 @@ async fn insert_image(db: &DbPool, parcel_id: Option<i64>, file_name: &str, rel_
         .fetch_one(db)
     })
     .await
+}
+
+/// 包裹資料已清除、只剩照片的收件證據（依單號查）
+#[derive(Debug, Clone, PartialEq, serde::Serialize, sqlx::FromRow)]
+pub struct OrphanImage {
+    pub id: i64,
+    pub barcode: String,
+    pub file_name: String,
+    pub received_at: String,
+    pub has_orig: bool,
+}
+
+// 指定索引：沒有統計資訊時規劃器會改走包裹編號索引、把所有包裹已清除的照片逐筆掃過
+fn orphan_sql(n: usize) -> String {
+    format!(
+        "SELECT id, barcode, file_name, received_at, (orig_path IS NOT NULL) AS has_orig
+           FROM parcel_images INDEXED BY idx_parcel_images_orphan_barcode
+          WHERE parcel_id IS NULL AND barcode IN ({})
+          ORDER BY received_ms DESC LIMIT 200",
+        vec!["?"; n].join(",")
+    )
+}
+
+/// 只認完整單號（走 `idx_parcel_images_orphan_barcode`）；最多回 200 張，新的在前
+pub async fn orphan_images_by_barcode(db: &DbPool, barcodes: &[String]) -> Result<Vec<OrphanImage>, sqlx::Error> {
+    if barcodes.is_empty() {
+        return Ok(Vec::new());
+    }
+    // 組進字串的只有佔位符 `?` 的個數，單號一律走參數
+    let mut q = sqlx::query_as::<_, OrphanImage>(sqlx::AssertSqlSafe(orphan_sql(barcodes.len())));
+    for b in barcodes {
+        q = q.bind(b);
+    }
+    q.fetch_all(db).await
 }
 
 /// 照片對包裹的候選查詢：每張照片都會跑，必須走綁碼事件的時間索引（`idx_parcel_events_bind_ts`）。
@@ -567,7 +613,7 @@ pub async fn rematch(db: &DbPool, cfg: &CameraFtpConfig, image_id: i64, file_nam
         let Some((pid, _)) = match_parcel(db, cfg, file_name, received_ms).await? else { return Ok(None) };
         let n = crate::db::retry_busy("照片補對", || {
             sqlx::query(
-                "UPDATE parcel_images SET parcel_id = ?1
+                "UPDATE parcel_images SET parcel_id = ?1, barcode = (SELECT NULLIF(barcode, 'NoRead') FROM parcels WHERE id = ?1)
                   WHERE id = ?2 AND parcel_id IS NULL AND NOT EXISTS (SELECT 1 FROM parcel_images WHERE parcel_id = ?1)",
             )
             .bind(pid)
@@ -579,15 +625,36 @@ pub async fn rematch(db: &DbPool, cfg: &CameraFtpConfig, image_id: i64, file_nam
         if n == 1 {
             break pid;
         }
-        // 沒寫成：這張已經有包裹就收手；否則是候選被搶先，下一輪比對會排除它
-        let linked: Option<i64> = sqlx::query_scalar("SELECT parcel_id FROM parcel_images WHERE id = ?").bind(image_id).fetch_optional(db).await?.flatten();
-        if linked.is_some() {
+        // 沒寫成：照片已經不在（被清理）或已經有包裹就收手；否則是候選被搶先，下一輪比對會排除它。
+        // 照片不在時不能當成被搶先：候選一直沒有照片，每輪都拿到同一件，會無限重試
+        let row: Option<Option<i64>> = sqlx::query_scalar("SELECT parcel_id FROM parcel_images WHERE id = ?").bind(image_id).fetch_optional(db).await?;
+        if !matches!(row, Some(None)) {
             return Ok(None);
         }
     };
     image_event(db, pid, received_ms, &format!("{file_name}（稍後補對）")).await?;
     crate::event_bus::emit("parcel-image", serde_json::json!({ "image_id": image_id, "parcel_id": pid, "file_name": file_name }));
     Ok(Some(pid))
+}
+
+/// 啟動時補做：`since_ms` 之後收到、還沒對上包裹的照片重新比對一次。
+/// 收到後稍後補對的工作只在記憶體裡，那段時間內關閉程式就沒了；回傳這次對上的張數
+pub async fn rematch_recent(db: &DbPool, cfg: &CameraFtpConfig, since_ms: i64) -> Result<u64, sqlx::Error> {
+    // 走收到時間的索引只看最近這段；用「沒有包裹」找會掃過所有包裹已清除的照片（保留 90 天可達幾十萬張）
+    let rows: Vec<(i64, String, i64)> = sqlx::query_as(
+        "SELECT id, file_name, received_ms FROM parcel_images INDEXED BY idx_parcel_images_received
+          WHERE received_at >= ? AND parcel_id IS NULL ORDER BY id",
+    )
+    .bind(crate::db::local_ts(since_ms))
+        .fetch_all(db)
+        .await?;
+    let mut n = 0;
+    for (id, file_name, received_ms) in rows {
+        if rematch(db, cfg, id, &file_name, received_ms).await?.is_some() {
+            n += 1;
+        }
+    }
+    Ok(n)
 }
 
 /// 清掉 `days` 天前的照片（檔案與資料列），順手移除空掉的日期目錄
@@ -894,6 +961,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn 依單號查只剩照片的紀錄_走部分索引_不掃整張照片表() {
+        let (db, _dir) = test_db().await;
+        let plan: Vec<(i64, i64, i64, String)> = sqlx::query_as(sqlx::AssertSqlSafe(format!("EXPLAIN QUERY PLAN {}", orphan_sql(2))))
+            .bind("A")
+            .bind("B")
+            .fetch_all(&db)
+            .await
+            .unwrap();
+        let detail: Vec<&str> = plan.iter().map(|r| r.3.as_str()).collect();
+        assert!(detail.iter().any(|d| d.contains("idx_parcel_images_orphan_barcode")), "{detail:?}");
+    }
+
+    #[tokio::test]
     async fn 照片比對查詢走綁碼時間索引_不全表掃描事件表() {
         let (db, _dir) = test_db().await;
         let plan: Vec<(i64, i64, i64, String)> = sqlx::query_as(sqlx::AssertSqlSafe(format!("EXPLAIN QUERY PLAN {MATCH_SQL}")))
@@ -959,6 +1039,77 @@ mod tests {
         let mut linked: Vec<Option<i64>> = sqlx::query_scalar("SELECT parcel_id FROM parcel_images ORDER BY parcel_id").fetch_all(&db).await.unwrap();
         linked.sort();
         assert_eq!(linked, vec![Some(p1), Some(p2)], "一件一張照片：第二張要對到下一件");
+    }
+
+    #[tokio::test]
+    async fn 補對時照片資料已被刪除_要收手_不可無限重試() {
+        let (db, _dir) = test_db().await;
+        let cfg = CameraFtpConfig::default();
+        let now = crate::db::now_ms();
+        seed_parcel(&db, "A40000001", now - 300).await;
+        let r = tokio::time::timeout(Duration::from_secs(2), rematch(&db, &cfg, 999_999, "gone.jpg", now)).await;
+        assert!(matches!(r, Ok(Ok(None))), "照片已不在就收手：{r:?}");
+    }
+
+    #[tokio::test]
+    async fn 啟動時把最近還沒對上的照片補對一次() {
+        // 收到照片後 30 秒內關閉程式，稍後補對的工作就沒了；開機要補做
+        let (db, _dir) = test_db().await;
+        let cfg = CameraFtpConfig::default();
+        let now = crate::db::now_ms();
+        let pid = seed_parcel(&db, "A40000002", now - 300).await;
+        sqlx::query("INSERT INTO parcel_images (parcel_id, file_name, rel_path, size, orig_size, received_ms, received_at) VALUES (NULL, 'late.jpg', 'late.jpg', 1, 1, ?, ?)")
+            .bind(now).bind(crate::db::local_ts(now)).execute(&db).await.unwrap();
+        // 很久以前的未對上照片不重新比對
+        sqlx::query("INSERT INTO parcel_images (parcel_id, file_name, rel_path, size, orig_size, received_ms, received_at) VALUES (NULL, 'old.jpg', 'old.jpg', 1, 1, ?, ?)")
+            .bind(now - 3_600_000).bind(crate::db::local_ts(now - 3_600_000)).execute(&db).await.unwrap();
+        assert_eq!(rematch_recent(&db, &cfg, now - 600_000).await.unwrap(), 1);
+        let linked: Option<i64> = sqlx::query_scalar("SELECT parcel_id FROM parcel_images WHERE file_name = 'late.jpg'").fetch_one(&db).await.unwrap();
+        assert_eq!(linked, Some(pid));
+    }
+
+    #[tokio::test]
+    async fn 讀碼失敗件的照片_不存佔位字_包裹清除後用佔位字查不到一堆照片() {
+        let (db, dir) = test_db().await;
+        let cfg = CameraFtpConfig::default();
+        let now = crate::db::now_ms();
+        let pid = seed_parcel(&db, super::super::camera::NO_READ, now - 300).await;
+        ingest(&db, &dir.join("images"), &cfg, "20261009_noread_1_1.jpg", test_jpeg(64, 48), now).await.unwrap();
+        let (linked, bc): (Option<i64>, Option<String>) = sqlx::query_as("SELECT parcel_id, barcode FROM parcel_images").fetch_one(&db).await.unwrap();
+        assert_eq!(linked, Some(pid));
+        assert_eq!(bc, None, "讀碼失敗沒有單號可存");
+        sqlx::query("DELETE FROM parcels WHERE id = ?").bind(pid).execute(&db).await.unwrap();
+        assert!(orphan_images_by_barcode(&db, &[super::super::camera::NO_READ.to_string()]).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn 包裹資料清除後_仍能用單號找到它的照片() {
+        let (db, dir) = test_db().await;
+        let cfg = CameraFtpConfig::default();
+        let now = crate::db::now_ms();
+        let pid = seed_parcel(&db, "A30000001", now - 300).await;
+        ingest(&db, &dir.join("images"), &cfg, "20261009_073000_1_1.jpg", test_jpeg(64, 48), now).await.unwrap();
+        let linked: Option<i64> = sqlx::query_scalar("SELECT parcel_id FROM parcel_images").fetch_one(&db).await.unwrap();
+        assert_eq!(linked, Some(pid));
+        // 保留期滿清掉包裹
+        sqlx::query("DELETE FROM parcels WHERE id = ?").bind(pid).execute(&db).await.unwrap();
+        let got = orphan_images_by_barcode(&db, &["A30000001".to_string()]).await.unwrap();
+        assert_eq!(got.len(), 1, "包裹清掉了照片還要查得到");
+        assert_eq!(got[0].barcode, "A30000001");
+        assert!(orphan_images_by_barcode(&db, &["A3000000".to_string()]).await.unwrap().is_empty(), "只認完整單號");
+    }
+
+    #[tokio::test]
+    async fn 補對上的照片也存條碼() {
+        let (db, _dir) = test_db().await;
+        let cfg = CameraFtpConfig::default();
+        let now = crate::db::now_ms();
+        let pid = seed_parcel(&db, "A30000002", now - 300).await;
+        let id: i64 = sqlx::query_scalar("INSERT INTO parcel_images (parcel_id, file_name, rel_path, size, orig_size, received_ms, received_at) VALUES (NULL, 'x.jpg', 'x.jpg', 1, 1, ?, ?) RETURNING id")
+            .bind(now).bind(crate::db::local_ts(now)).fetch_one(&db).await.unwrap();
+        assert_eq!(rematch(&db, &cfg, id, "x.jpg", now).await.unwrap(), Some(pid));
+        sqlx::query("DELETE FROM parcels WHERE id = ?").bind(pid).execute(&db).await.unwrap();
+        assert_eq!(orphan_images_by_barcode(&db, &["A30000002".to_string()]).await.unwrap().len(), 1);
     }
 
     #[tokio::test]

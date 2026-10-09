@@ -58,6 +58,7 @@ pub(super) fn api_router() -> Router<ServerState> {
         .route("/parcels", get(parcels_list))
         .route("/parcels/export.xlsx", get(parcels_export))
         .route("/parcels/{id}", get(parcel_detail))
+        .route("/parcel-images", get(orphan_images))
         .route("/parcel-images/{id}", get(parcel_image_meta))
         .route("/parcel-images/{id}/file", get(parcel_image_file))
         .route("/stats/daily", get(stats_daily))
@@ -124,6 +125,7 @@ async fn status(State(state): State<ServerState>) -> ApiResult<serde_json::Value
     Ok(Json(serde_json::json!({
         "version": env!("CARGO_PKG_VERSION"),
         "uptime_secs": state.app.started_at.elapsed().as_secs(),
+        "stopped_tasks": crate::supervise::stopped_tasks(),
         "noread_1h": { "total": noread_total, "noread": noread_count },
         "devices": { "belt": rt.belt, "sorter": rt.sorter, "camera": rt.camera },
         "tracker": tracker,
@@ -314,6 +316,18 @@ struct ParcelImageMeta {
 }
 
 #[derive(Deserialize)]
+struct OrphanImagesQuery {
+    #[serde(default)]
+    barcode: String,
+}
+
+/// 包裹資料已清除、只剩照片的收件證據：包裹查詢頁用單號搜尋時一起查（只認完整單號）
+async fn orphan_images(State(state): State<ServerState>, Query(q): Query<OrphanImagesQuery>) -> ApiResult<Vec<crate::device::camera_ftp::OrphanImage>> {
+    let tokens: Vec<String> = split_tokens(&q.barcode).into_iter().take(500).collect();
+    Ok(Json(crate::device::camera_ftp::orphan_images_by_barcode(&state.app.read_db, &tokens).await?))
+}
+
+#[derive(Deserialize)]
 struct ImageQuery {
     /// 1 = 拿保留的原圖（只有讀碼失敗件有）
     #[serde(default)]
@@ -324,7 +338,7 @@ struct ImageQuery {
 async fn parcel_image_meta(State(state): State<ServerState>, Path(id): Path<i64>) -> ApiResult<ParcelImageMeta> {
     let row: Option<ParcelImageMeta> = sqlx::query_as(
         "SELECT i.id, i.file_name, i.size, i.received_at, (i.orig_path IS NOT NULL) AS has_orig,
-                i.parcel_id, p.barcode, p.started_at, p.chute_code
+                i.parcel_id, COALESCE(p.barcode, i.barcode) AS barcode, p.started_at, p.chute_code
            FROM parcel_images i LEFT JOIN parcels p ON p.id = i.parcel_id
           WHERE i.id = ?",
     )

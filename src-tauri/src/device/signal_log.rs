@@ -43,7 +43,13 @@ struct Entry {
     text: String,
 }
 
-static TX: OnceLock<Sender<Entry>> = OnceLock::new();
+enum Msg {
+    Line(Entry),
+    /// 立即寫檔，寫完回覆
+    Flush(Sender<()>),
+}
+
+static TX: OnceLock<Sender<Msg>> = OnceLock::new();
 
 /// 啟動寫檔執行緒；重複呼叫無效。保留天數從設定 watch 讀，改設定即時生效
 pub fn init(dir: PathBuf, cfg: watch::Receiver<AppConfig>) {
@@ -54,7 +60,7 @@ pub fn init(dir: PathBuf, cfg: watch::Receiver<AppConfig>) {
         tracing::error!(dir = %dir.display(), "訊號日誌目錄建立失敗，訊號不留檔: {e}");
         return;
     }
-    let (tx, rx) = mpsc::channel::<Entry>();
+    let (tx, rx) = mpsc::channel::<Msg>();
     if TX.set(tx).is_err() {
         return;
     }
@@ -66,11 +72,20 @@ pub fn init(dir: PathBuf, cfg: watch::Receiver<AppConfig>) {
 
 pub fn record(device: &'static str, dir: Dir, text: &str) {
     if let Some(tx) = TX.get() {
-        let _ = tx.send(Entry { ts_ms: crate::db::now_ms(), device, dir, text: text.to_string() });
+        let _ = tx.send(Msg::Line(Entry { ts_ms: crate::db::now_ms(), device, dir, text: text.to_string() }));
     }
 }
 
-fn writer(dir: PathBuf, cfg: watch::Receiver<AppConfig>, rx: mpsc::Receiver<Entry>) {
+/// 程式結束前呼叫：把還在緩衝裡的訊號（例如剛送出的皮帶停止）寫進檔案，最多等 2 秒
+pub fn flush() {
+    let Some(tx) = TX.get() else { return };
+    let (ack_tx, ack_rx) = mpsc::channel();
+    if tx.send(Msg::Flush(ack_tx)).is_ok() {
+        let _ = ack_rx.recv_timeout(Duration::from_secs(2));
+    }
+}
+
+fn writer(dir: PathBuf, cfg: watch::Receiver<AppConfig>, rx: mpsc::Receiver<Msg>) {
     let mut current_day = String::new();
     let mut file: Option<BufWriter<File>> = None;
     let mut last_stopped: HashMap<&'static str, i64> = HashMap::new();
@@ -95,7 +110,15 @@ fn writer(dir: PathBuf, cfg: watch::Receiver<AppConfig>, rx: mpsc::Receiver<Entr
             last_flush = std::time::Instant::now();
         }
         match rx.recv_timeout(FLUSH_EVERY) {
-            Ok(e) => {
+            Ok(Msg::Flush(ack)) => {
+                if let Some(f) = file.as_mut() {
+                    let _ = f.flush();
+                }
+                dirty = false;
+                last_flush = std::time::Instant::now();
+                let _ = ack.send(());
+            }
+            Ok(Msg::Line(e)) => {
                 // `~k-1`：停止中的週期訊號，60 秒記一次就夠
                 if e.text.starts_with("~k-1") {
                     let last = last_stopped.get(e.device).copied().unwrap_or(i64::MIN / 2);
@@ -231,10 +254,10 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(&dir, b"").unwrap();
         let (_cfg_tx, cfg_rx) = watch::channel(AppConfig::default());
-        let (tx, rx) = mpsc::channel::<Entry>();
+        let (tx, rx) = mpsc::channel::<Msg>();
         let d = dir.clone();
         let h = std::thread::spawn(move || writer(d, cfg_rx, rx));
-        let send = |text: &str| tx.send(Entry { ts_ms: crate::db::now_ms(), device: "belt", dir: Dir::In, text: text.into() }).unwrap();
+        let send = |text: &str| tx.send(Msg::Line(Entry { ts_ms: crate::db::now_ms(), device: "belt", dir: Dir::In, text: text.into() })).unwrap();
         send("~P1");
         std::thread::sleep(Duration::from_millis(100));
         std::fs::remove_file(&dir).unwrap();
@@ -249,4 +272,21 @@ mod tests {
         std::fs::remove_dir_all(&root).unwrap();
     }
 
+
+    #[test]
+    fn 要求立即寫檔時_回覆前最後幾行已經在檔案裡() {
+        // 程式結束前呼叫：定期寫檔每 0.5 秒一次，不等的話最後送出的皮帶停止指令不會留在紀錄裡
+        let dir = std::env::temp_dir().join(format!("sig-flush-{}", ulid::Ulid::generate()));
+        let (_cfg_tx, cfg_rx) = watch::channel(AppConfig::default());
+        let (tx, rx) = mpsc::channel::<Msg>();
+        let d = dir.clone();
+        let _h = std::thread::spawn(move || writer(d, cfg_rx, rx));
+        tx.send(Msg::Line(Entry { ts_ms: crate::db::now_ms(), device: "belt", dir: Dir::Out, text: "KM998 1".into() })).unwrap();
+        let (ack_tx, ack_rx) = mpsc::channel();
+        tx.send(Msg::Flush(ack_tx)).unwrap();
+        ack_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let text = std::fs::read_to_string(dir.join(format!("{FILE_PREFIX}{today}.log"))).unwrap_or_default();
+        assert!(text.contains("> KM998 1"), "回覆時已寫進檔案，實際：{text:?}");
+    }
 }

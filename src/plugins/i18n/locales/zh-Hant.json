@@ -1,6 +1,7 @@
 {
   "app": {
-    "name": "智配通"
+    "name": "智配通",
+    "stoppedTask": "「{name}」在 {at} 異常停止，這項功能已經停止運作。請確認現場安全後重新啟動程式。"
   },
   "common": {
     "confirm": "確認",
@@ -411,7 +412,10 @@
       "subtitleShort": "包裹歷史",
       "from": "起",
       "to": "迄",
-      "export": "匯出 Excel"
+      "export": "匯出 Excel",
+      "orphanTitle": "這些單號的包裹資料已清除，但還留著 {n} 張讀碼站照片",
+      "orphanHint": "包裹資料超過保留天數會被清除，照片保留得比較久。這裡只比對完整單號，點一下可放大查看。",
+      "orphanFailed": "包裹資料已清除的讀碼站照片這次沒查到（{msg}），請再按一次查詢；不代表沒有照片。"
     },
     "printJobs": {
       "title": "列印任務",

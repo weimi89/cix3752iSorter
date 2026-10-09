@@ -29,10 +29,65 @@ pub async fn init(data_dir: &Path) -> anyhow::Result<DbPool> {
         .connect_with(options)
         .await?;
 
-    sqlx::migrate!("./migrations").run(&pool).await?;
+    let migrator = sqlx::migrate!("./migrations");
+    // 備份失敗（磁碟滿、目錄權限）只記錯誤照常升級：起不來會讓整條線停住，比不能降版嚴重
+    if let Err(e) = backup_before_migrate(&pool, data_dir, &migrator).await {
+        tracing::error!("套用資料表變更前的備份失敗，照常升級（這次升級後不能降版）: {e}");
+    }
+    migrator.run(&pool).await?;
 
     tracing::info!(path = %db_path.display(), "SQLite 初始化完成");
     Ok(pool)
+}
+
+/// 升級前的資料庫備份保留幾份
+pub const BACKUPS_KEPT: usize = 3;
+
+/// 有新的資料表變更要套用、而且已經有資料時，先把整個資料庫備份到 `data_dir/backups/`，只留最近幾份。
+///
+/// 變更套用後，舊版程式遇到不認得的變更紀錄會拒絕啟動（不能裝回舊版救急）；要降版只能把這份備份放回去。
+/// 程式內建的自動更新不經過任何人工步驟，所以由程式自己在套用前備份。全新的資料庫沒東西可備，不做
+pub async fn backup_before_migrate(pool: &DbPool, data_dir: &Path, migrator: &sqlx::migrate::Migrator) -> anyhow::Result<Option<std::path::PathBuf>> {
+    let has_table: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = '_sqlx_migrations')").fetch_one(pool).await?;
+    if !has_table {
+        return Ok(None);
+    }
+    let applied: Vec<i64> = sqlx::query_scalar("SELECT version FROM _sqlx_migrations WHERE success").fetch_all(pool).await?;
+    let pending: Vec<i64> = migrator.iter().filter(|m| m.migration_type.is_up_migration() && !applied.contains(&m.version)).map(|m| m.version).collect();
+    let Some(&to) = pending.iter().max() else { return Ok(None) };
+    let from = applied.iter().max().copied().unwrap_or(0);
+    let dir = data_dir.join("backups");
+    tokio::fs::create_dir_all(&dir).await?;
+    // 上次寫到一半（磁碟滿、斷電）留下的殘檔：不能還原，清掉
+    for e in std::fs::read_dir(&dir)?.filter_map(|e| e.ok()) {
+        if e.file_name().to_str().is_some_and(|n| n.starts_with("sorter-") && n.ends_with(".partial")) {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
+    // 檔名以時間開頭，照名稱排序就是新舊順序。先寫到暫存檔名，寫完才改成正式檔名：
+    // 寫到一半失敗的檔案不可被當成可還原的備份，也不可擠掉真正完整的舊備份
+    let name = format!("sorter-{}-v{from}-before-v{to}.sqlite", chrono::Local::now().format("%Y%m%d%H%M%S%3f"));
+    let path = dir.join(&name);
+    let partial = dir.join(format!("{name}.partial"));
+    let started = std::time::Instant::now();
+    if let Err(e) = sqlx::query("VACUUM INTO ?").bind(partial.to_string_lossy().into_owned()).execute(pool).await {
+        let _ = std::fs::remove_file(&partial);
+        return Err(e.into());
+    }
+    std::fs::rename(&partial, &path)?;
+    tracing::warn!(path = %path.display(), ms = started.elapsed().as_millis() as u64, "套用資料表變更前已備份資料庫（v{from} → v{to}）；要降版請把這份放回去");
+    let mut olds: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("sorter-") && n.ends_with(".sqlite")))
+        .collect();
+    olds.sort();
+    let excess = olds.len().saturating_sub(BACKUPS_KEPT);
+    for old in olds.into_iter().take(excess) {
+        if let Err(e) = std::fs::remove_file(&old) {
+            tracing::warn!(path = %old.display(), "舊的升級前備份刪不掉: {e}");
+        }
+    }
+    Ok(Some(path))
 }
 
 /// 網頁查詢用的唯讀連線池最多幾條
@@ -145,6 +200,77 @@ pub fn local_ts(ms: i64) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    fn backups(dir: &Path) -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(dir.join("backups")).map(|rd| rd.filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().into_owned()).collect()).unwrap_or_default();
+        v.sort();
+        v
+    }
+
+    #[tokio::test]
+    async fn 有新的資料表變更要套用時_先備份整個資料庫() {
+        let dir = std::env::temp_dir().join(format!("bk-{}", ulid::Ulid::generate()));
+        let pool = init(&dir).await.unwrap();
+        sqlx::query("INSERT INTO parcels (ulid, barcode, status, started_at, started_ms, updated_ms) VALUES ('BK1', 'A1', 3, '2026-10-09 07:00:00.000', 1, 1)").execute(&pool).await.unwrap();
+        let migrator = sqlx::migrate!("./migrations");
+        assert_eq!(backup_before_migrate(&pool, &dir, &migrator).await.unwrap(), None, "全部已套用就不備份");
+        // 模擬舊版資料庫：最後一個變更還沒套用
+        let last = migrator.iter().map(|m| m.version).max().unwrap();
+        sqlx::query("DELETE FROM _sqlx_migrations WHERE version = ?").bind(last).execute(&pool).await.unwrap();
+        let path = backup_before_migrate(&pool, &dir, &migrator).await.unwrap().expect("有待套用的變更要備份");
+        let copy = sqlx::SqlitePool::connect(&format!("sqlite://{}?mode=ro", path.display())).await.unwrap();
+        let n: i64 = sqlx::query_scalar("SELECT count(*) FROM parcels").fetch_one(&copy).await.unwrap();
+        assert_eq!(n, 1, "備份要有升級前的資料");
+        // 輪替：只留最近 3 份
+        for _ in 0..4 {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            backup_before_migrate(&pool, &dir, &migrator).await.unwrap();
+        }
+        assert_eq!(backups(&dir).len(), 3, "{:?}", backups(&dir));
+    }
+
+    #[tokio::test]
+    async fn 備份失敗時_照常升級_程式要起得來() {
+        let dir = std::env::temp_dir().join(format!("bk-fail-{}", ulid::Ulid::generate()));
+        let pool = init(&dir).await.unwrap();
+        // 0011 只有 CREATE INDEX IF NOT EXISTS，可以安全地再套一次
+        let pending = 11i64;
+        sqlx::query("DELETE FROM _sqlx_migrations WHERE version = ?").bind(pending).execute(&pool).await.unwrap();
+        pool.close().await;
+        // 備份目錄的位置被一個檔案占住：建不了目錄
+        std::fs::write(dir.join("backups"), b"x").unwrap();
+        let pool = init(&dir).await.expect("備份失敗也要能啟動");
+        let n: i64 = sqlx::query_scalar("SELECT count(*) FROM _sqlx_migrations WHERE version = ?").bind(pending).fetch_one(&pool).await.unwrap();
+        assert_eq!(n, 1, "變更照常套用");
+    }
+
+    #[tokio::test]
+    async fn 上次寫到一半的備份殘檔_不算進保留份數_下次備份時清掉() {
+        let dir = std::env::temp_dir().join(format!("bk-partial-{}", ulid::Ulid::generate()));
+        let pool = init(&dir).await.unwrap();
+        let migrator = sqlx::migrate!("./migrations");
+        let last = migrator.iter().map(|m| m.version).max().unwrap();
+        sqlx::query("DELETE FROM _sqlx_migrations WHERE version = ?").bind(last).execute(&pool).await.unwrap();
+        // 磁碟滿時寫到一半的殘檔：檔名比任何正常備份都新
+        std::fs::create_dir_all(dir.join("backups")).unwrap();
+        std::fs::write(dir.join("backups/sorter-29991231235959999-v9-before-v13.sqlite.partial"), b"half").unwrap();
+        for _ in 0..4 {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            backup_before_migrate(&pool, &dir, &migrator).await.unwrap();
+        }
+        let names = backups(&dir);
+        assert_eq!(names.iter().filter(|n| n.ends_with(".sqlite")).count(), 3, "{names:?}");
+        assert!(!names.iter().any(|n| n.ends_with(".partial")), "殘檔要清掉：{names:?}");
+    }
+
+    #[tokio::test]
+    async fn 全新的資料庫_不備份() {
+        let dir = std::env::temp_dir().join(format!("bk-new-{}", ulid::Ulid::generate()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pool = sqlx::SqlitePool::connect(&format!("sqlite://{}?mode=rwc", dir.join("sorter.sqlite").display())).await.unwrap();
+        assert_eq!(backup_before_migrate(&pool, &dir, &sqlx::migrate!("./migrations")).await.unwrap(), None);
+        assert!(backups(&dir).is_empty());
+    }
     use super::*;
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

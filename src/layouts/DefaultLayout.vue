@@ -18,6 +18,12 @@ const status = useStatusStore()
 const visibleNavItems = computed(() => navItems.filter(i => !i.printing || status.print.enabled))
 const { t } = useI18n()
 
+const STICKY_ACTIONS = new Set(['task_panic', 'crash_stop'])
+// 頂端警示按掉後，同一批停止的工作不再顯示；重新整理或又有別的工作停止時再出現
+const dismissedStopped = ref('')
+const stoppedKey = computed(() => status.stoppedTasks.map(s => `${s.name}@${s.at}`).join('|'))
+const showStopped = computed(() => !!stoppedKey.value && stoppedKey.value !== dismissedStopped.value)
+
 let unlistenAlert = null
 let unlistenMsg = null
 let unlistenParcel = null
@@ -29,7 +35,15 @@ onMounted(() => {
     toast(`${payload.message}（${payload.port}）`, { type: 'error', autoClose: 8000 })
   })
   unlistenMsg = listen('system-message', ({ payload }) => {
+    // 背景工作崩潰（含因此自動停皮帶）：功能要到程式重開才恢復，提示留著直到有人按掉，並更新頂端警示
+    if (STICKY_ACTIONS.has(payload.action)) {
+      toast(payload.message, { type: 'error', autoClose: false })
+      status.refresh()
+      return
+    }
     if (payload.level === 'error') toast(payload.message, { type: 'error', autoClose: 6000 })
+    // 卡件解除但人員停過線而不自動啟動：現場要知道皮帶為什麼沒動
+    else if (payload.action === 'auto_start_skipped') toast(payload.message, { type: 'warning', autoClose: 12000 })
   })
   // 包裹層級的現場提示：同一件反覆走異常口、已完成卻又進線、同模組反覆卡件——要停留久一點讓人看到條碼
   unlistenParcel = listen('parcel-alert', ({ payload }) => {
@@ -62,6 +76,10 @@ onBeforeUnmount(() => {
     <template #navbar="{ toggleVerticalOverlayNavActive }">
       <AppNavbar :toggle-vertical-overlay-nav-active="toggleVerticalOverlayNavActive" />
     </template>
+
+    <VAlert v-if="showStopped" type="error" variant="tonal" icon="tabler-alert-octagon" closable class="mb-4" @click:close="dismissedStopped = stoppedKey">
+      <div v-for="s in status.stoppedTasks" :key="s.name + s.at">{{ t('app.stoppedTask', { name: s.name, at: s.at }) }}</div>
+    </VAlert>
 
     <slot />
 

@@ -17,7 +17,6 @@ const routes = [
   { path: '/printers', name: 'printers', component: () => import('@/pages/PrinterSettingsPage.vue'), meta: { title: 'nav.printers', printing: true } },
   { path: '/devices', name: 'devices', component: () => import('@/pages/DeviceSettingsPage.vue'), meta: { title: 'nav.devices' } },
   { path: '/ir', name: 'ir', component: () => import('@/pages/IrCheckPage.vue'), meta: { title: 'nav.ir' } },
-  { path: '/switch-demo', name: 'switch-demo', component: () => import('@/pages/SwitchDemoPage.vue') },
   { path: '/login', name: 'login', component: () => import('@/pages/LoginPage.vue'), meta: { public: true } },
   { path: '/:pathMatch(.*)*', redirect: '/' },
 ]

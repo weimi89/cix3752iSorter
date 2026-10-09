@@ -15,6 +15,9 @@ use super::parcel::{ChuteDecision, ChuteSource, LabelPayload, Parcel, Status};
 
 /// 終態後再留多久才落最終資料並釋放（讓晚到的訊號還能記到事件表）
 const FINALIZE_GRACE_MS: i64 = 300;
+/// 人員停線後，過了這麼久還看到皮帶運轉的訊號（上件、量長、出口），才當成有人用別的方式重新啟動了皮帶；
+/// 剛按停止時皮帶還在減速，已經在皮帶上的件仍會有訊號，不能算
+const MANUAL_HOLD_SETTLE_MS: i64 = 3_000;
 /// `Kn` 後遲遲沒有 `~c`：超過就取消並釋放頭部，避免整線卡死
 const HEAD_STUCK_MS: i64 = 5000;
 /// `~k` 之後多久沒有再收到 `~k` 視為堵塞解除
@@ -72,8 +75,9 @@ pub enum Input {
     Chute { key: u64, code: String, cid: Cid, source: ChuteSource, response_id: Option<i64>, reason: Option<String>, label: Option<LabelPayload> },
     Tick { now_ms: i64 },
     /// 網頁手動控制皮帶
-    BeltStart,
-    BeltStop,
+    /// 網頁啟動／停止；`ts_ms` 是按下的時間（停線時刻要用它，追蹤核心的時鐘可能還沒跟上）
+    BeltStart { ts_ms: i64 },
+    BeltStop { ts_ms: i64 },
     /// 網頁：重置分揀機（等同重連時的處理）
     SorterReset,
     /// 網頁：直接送一條分揀機指令（燈控、光電查詢）
@@ -112,6 +116,9 @@ pub struct Machine {
     sorter_input_bits: u8,
     /// 急停按鍵按住中：放開前「急停恢復」不啟動（對應舊系統 `EmergencyStopIng`）
     estop_latched: bool,
+    /// 人員停線的時間（網頁停止、停止鈕、急停）：要等人員自己啟動，卡件解除的自動恢復不可蓋過去。
+    /// 人員正在處理卡件時皮帶自己動起來會傷人。皮帶之後被別的方式重新啟動（控制箱）也算解除，見 [`MANUAL_HOLD_SETTLE_MS`]
+    manual_hold_since: Option<i64>,
     led: Led,
     led_red_until: Option<i64>,
     led_last_activity: i64,
@@ -143,6 +150,7 @@ impl Machine {
             belt_input_bits: 0,
             sorter_input_bits: 0,
             estop_latched: false,
+            manual_hold_since: None,
             led: Led::Off,
             led_red_until: None,
             led_last_activity: now_ms,
@@ -181,8 +189,14 @@ impl Machine {
             Input::Device(ev) => self.on_device(ev, out),
             Input::Chute { key, code, cid, source, response_id, reason, label } => self.on_chute(key, code, cid, source, response_id, reason, label, out),
             Input::Tick { now_ms } => self.on_tick(now_ms, out),
-            Input::BeltStart => self.belt_start(out, "網頁啟動"),
-            Input::BeltStop => self.belt_stop(out, "網頁停止"),
+            Input::BeltStart { ts_ms } => {
+                self.now_ms = self.now_ms.max(ts_ms);
+                self.manual_start(out, "網頁啟動");
+            }
+            Input::BeltStop { ts_ms } => {
+                self.now_ms = self.now_ms.max(ts_ms);
+                self.manual_stop(out, "網頁停止");
+            }
             Input::SorterReset => {
                 let now = self.now_ms;
                 out.sorter_cmd(command::reset_sorter());
@@ -234,6 +248,7 @@ impl Machine {
         match sig {
             BeltSignal::P { slot, .. } => {
                 self.belt_running = true;
+                self.note_belt_moving(ts, out);
                 // 同一槽還掛著上一件（沒收到 ~E）：那件已經追不到了
                 if let Some(old_key) = self.by_slot.get(&slot).copied() {
                     if let Some(old) = self.parcels.get(&old_key) {
@@ -256,6 +271,7 @@ impl Machine {
             }
             BeltSignal::L { slot, len, gap } => {
                 self.belt_running = true;
+                self.note_belt_moving(ts, out);
                 let Some(key) = self.by_slot.get(&slot).copied() else {
                     out.log(crate::event_log::Level::Warn, "belt", "orphan_L", format!("~L 對應不到包裹: {raw}"));
                     return;
@@ -290,6 +306,7 @@ impl Machine {
             }
             BeltSignal::O { slot, .. } => {
                 self.belt_running = true;
+                self.note_belt_moving(ts, out);
                 let Some(key) = self.by_slot.get(&slot).copied() else {
                     out.log(crate::event_log::Level::Warn, "belt", "orphan_O", format!("~O 對應不到包裹: {raw}"));
                     return;
@@ -309,6 +326,7 @@ impl Machine {
             }
             BeltSignal::E { slot, .. } => {
                 self.belt_running = true;
+                self.note_belt_moving(ts, out);
                 if let Some(key) = self.by_slot.remove(&slot) {
                     if let Some(p) = self.parcels.get_mut(&key) {
                         p.belt_e_ms = Some(ts);
@@ -378,7 +396,7 @@ impl Machine {
                 self.release_head_if(key, ts, out);
                 if self.head_jam {
                     self.head_jam = false;
-                    self.belt_start(out, "頭部堵塞解除");
+                    self.auto_resume(out, "頭部堵塞解除");
                 }
             }
             SorterSignal::N { cart } => {
@@ -595,6 +613,18 @@ impl Machine {
             );
             return;
         }
+        if p.is_ended() {
+            // 已收尾（觸發異常、失去追蹤…）：件沒有進格口，比照回覆太晚只留紀錄；
+            // 接受的話會回報中介機「已分進這格」、有面單還會印出沒有包裹可貼的面單
+            out.store_event(p, ts, "api", "chute_late", Some(&format!("{code} {cid} {source:?} rid={response_id:?} ended")));
+            out.log(
+                crate::event_log::Level::Warn,
+                "chute",
+                "late",
+                format!("條碼 {} 格口 {code} 回覆時這件已經結束（{}），不採用", p.barcode_or_noread(), p.status.label()),
+            );
+            return;
+        }
         if p.chute.as_ref().is_some_and(|c| c.source != ChuteSource::Pending) && source != ChuteSource::Manual {
             // 已決定（重複回覆）：不改決定也不印
             return;
@@ -721,6 +751,39 @@ impl Machine {
         }
     }
 
+    fn manual_stop<O: Outputs>(&mut self, out: &mut O, reason: &str) {
+        self.manual_hold_since = Some(self.now_ms);
+        self.belt_stop(out, reason);
+    }
+
+    /// 人員啟動（網頁、啟動鈕）：急停按著時比照「急停恢復」鈕的互鎖，不啟動也不解除停線
+    fn manual_start<O: Outputs>(&mut self, out: &mut O, reason: &str) {
+        if self.estop_latched {
+            out.log(crate::event_log::Level::Warn, "belt", "estop_blocked", format!("急停仍按著，不理會{reason}"));
+            return;
+        }
+        self.manual_hold_since = None;
+        self.belt_start(out, reason);
+    }
+
+    /// 皮帶運轉的訊號：人員停線已過了減速時間仍看到，代表有人從控制箱等其他地方重新啟動了皮帶
+    fn note_belt_moving<O: Outputs>(&mut self, ts: i64, out: &mut O) {
+        if self.manual_hold_since.is_some_and(|since| ts - since > MANUAL_HOLD_SETTLE_MS) {
+            self.manual_hold_since = None;
+            out.log(crate::event_log::Level::Info, "belt", "manual_hold_cleared", "皮帶已從其他地方重新啟動，之後卡件解除恢復自動啟動".to_string());
+        }
+    }
+
+    /// 卡件解除後的自動恢復：人員停過線或急停按著就不送，留紀錄讓現場知道要自己按啟動
+    fn auto_resume<O: Outputs>(&mut self, out: &mut O, reason: &str) {
+        if self.manual_hold_since.is_some() || self.estop_latched {
+            let why = if self.estop_latched { "急停仍按著" } else { "人員已停線" };
+            out.log(crate::event_log::Level::Warn, "belt", "auto_start_skipped", format!("{reason}，但{why}，不自動啟動；確認安全後請手動啟動"));
+            return;
+        }
+        self.belt_start(out, reason);
+    }
+
     fn belt_start<O: Outputs>(&mut self, out: &mut O, reason: &str) {
         let run = self.cfg.belt.cmd.run.clone();
         let auto = self.cfg.belt.cmd.auto.clone();
@@ -756,24 +819,18 @@ impl Machine {
             let rising = prev & mask == 0 && bits & mask != 0;
             let falling = prev & mask != 0 && bits & mask == 0;
             match b.action.as_str() {
-                "stop" if rising => self.belt_stop(out, &format!("按鈕「{}」", b.describe)),
-                "start" if rising => self.belt_start(out, &format!("按鈕「{}」", b.describe)),
+                "stop" if rising => self.manual_stop(out, &format!("按鈕「{}」", b.describe)),
+                "start" if rising => self.manual_start(out, &format!("按鈕「{}」", b.describe)),
                 // 急停：按下停線並鎖住，放開才解鎖；鎖住期間「急停恢復」按了也不動（舊系統同樣互鎖）
                 "estop" if rising => {
                     self.estop_latched = true;
-                    self.belt_stop(out, &format!("急停「{}」", b.describe));
+                    self.manual_stop(out, &format!("急停「{}」", b.describe));
                 }
                 "estop" if falling => {
                     self.estop_latched = false;
                     out.log(crate::event_log::Level::Info, "belt", "estop_release", format!("急停「{}」已放開", b.describe));
                 }
-                "estop_release" if rising => {
-                    if self.estop_latched {
-                        out.log(crate::event_log::Level::Warn, "belt", "estop_blocked", format!("急停仍按著，「{}」不啟動", b.describe));
-                    } else {
-                        self.belt_start(out, &format!("按鈕「{}」", b.describe));
-                    }
-                }
+                "estop_release" if rising => self.manual_start(out, &format!("按鈕「{}」", b.describe)),
                 _ => {}
             }
         }
@@ -846,7 +903,7 @@ impl Machine {
                 if self.block_stopped_belt || self.head_jam {
                     self.block_stopped_belt = false;
                     self.head_jam = false;
-                    self.belt_start(out, "堵塞解除");
+                    self.auto_resume(out, "堵塞解除");
                 }
             }
         }
