@@ -35,6 +35,28 @@ pub struct ChuteResolver {
     tracker: TrackerHandle,
     chutes: Arc<RwLock<HashMap<String, ChuteRow>>>,
     latency: Arc<RwLock<LatencyWindow>>,
+    /// 讀碼失敗對帳上一次的結果:兩邊格口有變才再記一次,不讓每件讀碼失敗都洗一筆警示
+    noread_check: Arc<std::sync::Mutex<Option<NoReadCheck>>>,
+}
+
+/// 讀碼失敗時中介機回的格口(特殊件分流的「讀碼失敗」)與本機預設格口的對帳結果
+#[derive(Debug, Clone, PartialEq)]
+pub enum NoReadCheck {
+    Same,
+    /// 中介機沒指定(或還是不回格口的舊版)
+    Unset { local: String },
+    Differs { middleware: String, local: String },
+}
+
+/// 讀碼失敗本機不等中介機、當下就送預設格口;中介機回的代碼只拿來對帳。
+/// 兩邊不一樣代表設定不一致(例如一邊改了 NG、另一邊還是 RS),要提醒現場把兩邊改成同一格。
+pub fn noread_check(resp: &ParcelResp, default_code: &str) -> NoReadCheck {
+    let local = default_code.trim();
+    match resp.channel_code.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        None => NoReadCheck::Unset { local: local.to_string() },
+        Some(code) if code == local => NoReadCheck::Same,
+        Some(code) => NoReadCheck::Differs { middleware: code.to_string(), local: local.to_string() },
+    }
 }
 
 /// 最近 N 次格口查詢（含面單下載）的耗時，看板用：中介機變慢時現場能提早察覺
@@ -285,7 +307,14 @@ impl ChuteResolver {
         mut rx: mpsc::Receiver<ChuteRequest>,
         cancel: CancellationToken,
     ) -> Self {
-        let me = Self { app, mw, tracker, chutes: Arc::new(RwLock::new(chutes)), latency: Arc::new(RwLock::new(LatencyWindow::new(2000))) };
+        let me = Self {
+            app,
+            mw,
+            tracker,
+            chutes: Arc::new(RwLock::new(chutes)),
+            latency: Arc::new(RwLock::new(LatencyWindow::new(2000))),
+            noread_check: Arc::new(std::sync::Mutex::new(None)),
+        };
         let this = me.clone();
         crate::supervise::spawn("格口查詢", async move {
             loop {
@@ -327,9 +356,12 @@ impl ChuteResolver {
         let result = self.mw.query_parcel(&barcode).await;
         let elapsed = started.elapsed().as_millis() as i64;
         if notify_only {
-            // NoRead：中介機拍照存證與計數；本機已走預設口，回什麼都不改
+            // NoRead：中介機拍照存證與計數；本機已走預設口，回什麼都不改，只對帳兩邊的格口
             match result {
-                Ok(_) => tracing::info!(%barcode, elapsed, "已通知中介機讀碼失敗"),
+                Ok(resp) => {
+                    tracing::info!(%barcode, elapsed, "已通知中介機讀碼失敗");
+                    self.report_noread_check(noread_check(&resp, &default_code));
+                }
                 Err(e) => event_log::log(&self.app.db, Level::Warn, "chute", "noread_notify", format!("通知中介機讀碼失敗未成功（{elapsed}ms）：{e}")),
             }
             return;
@@ -394,6 +426,37 @@ impl ChuteResolver {
         }
     }
 
+    /// 對帳結果跟上一次不同才記:不一致記警示、恢復一致記一筆說明
+    fn report_noread_check(&self, check: NoReadCheck) {
+        let prev = {
+            let mut last = self.noread_check.lock().unwrap();
+            if last.as_ref() == Some(&check) {
+                return;
+            }
+            last.replace(check.clone())
+        };
+        match check {
+            NoReadCheck::Same if prev.is_some() => {
+                event_log::log(&self.app.db, Level::Info, "chute", "noread_route", "讀碼失敗的格口：中介機與本機預設格口已一致".to_string());
+            }
+            NoReadCheck::Same => {}
+            NoReadCheck::Unset { local } => event_log::log(
+                &self.app.db,
+                Level::Warn,
+                "chute",
+                "noread_route",
+                format!("讀碼失敗的件本機送預設格口 {local}，中介機的「特殊件分流 → 讀碼失敗」沒有指定；請在中介機填 {local}"),
+            ),
+            NoReadCheck::Differs { middleware, local } => event_log::log(
+                &self.app.db,
+                Level::Warn,
+                "chute",
+                "noread_route",
+                format!("讀碼失敗的件本機送預設格口 {local}，中介機的「特殊件分流 → 讀碼失敗」填的是 {middleware}；兩邊要改成同一格"),
+            ),
+        }
+    }
+
     /// 走預設口、不回報、不印
     fn fallback(&self, default_code: &str, note: String, reason: &str) -> Decision {
         let chutes = self.chutes.read().unwrap();
@@ -452,6 +515,16 @@ mod tests {
         let d = decide(&resp, &chutes(), "RS");
         assert_eq!((d.code.as_str(), d.source), ("LS", ChuteSource::Api));
         assert!(d.label.is_none());
+    }
+
+    #[test]
+    fn noread_對帳_比對中介機與本機預設格口() {
+        let resp = |code: Option<&str>| ParcelResp { error_code: Some("NOREAD".into()), channel_code: code.map(Into::into), ..Default::default() };
+        assert_eq!(noread_check(&resp(Some("NG")), "NG"), NoReadCheck::Same);
+        assert_eq!(noread_check(&resp(Some(" NG ")), "NG"), NoReadCheck::Same, "前後空白不算不一致");
+        assert_eq!(noread_check(&resp(Some("RS")), "NG"), NoReadCheck::Differs { middleware: "RS".into(), local: "NG".into() });
+        assert_eq!(noread_check(&resp(None), "NG"), NoReadCheck::Unset { local: "NG".into() });
+        assert_eq!(noread_check(&resp(Some("")), "NG"), NoReadCheck::Unset { local: "NG".into() }, "空字串等於沒指定");
     }
 
     #[test]
