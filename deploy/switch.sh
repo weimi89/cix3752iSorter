@@ -22,9 +22,10 @@ die()  { printf '\033[1;31m✗\033[0m %s\n' "$*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || die "缺少指令 $1"; }
 need supervisorctl; need curl; need ss; need pgrep
 
-# 自動啟動的 .desktop 檔名是程式顯示名稱（中文，含空白），用內容的 Exec 行找比較穩；
+# 自動啟動的 .desktop 檔名是程式顯示名稱（中文，含空白），用 Exec 行執行的程式找比較穩；
+# 只比對 Exec 真的是 sorter 的檔：工控機還有 sorter-keep-screen-on.desktop 這類內容含 sorter 字樣的項目，比對太寬會一起刪掉。
 # 輸出用 NUL 分隔，後面一律接 xargs -0——用空白切會把檔名切成兩半、刪不掉
-autostart_files() { grep -lsZ 'sorter' "$HOME"/.config/autostart/*.desktop 2>/dev/null || true; }
+autostart_files() { grep -lsZE '^Exec=([^[:space:]]*/)?sorter([[:space:]]|$)' "$HOME"/.config/autostart/*.desktop 2>/dev/null || true; }
 # 管線後面不用 grep -q：它讀到就關管線，前面的指令會吃 SIGPIPE，pipefail 下整個判斷變成假的
 old_running()    { sudo supervisorctl status 2>/dev/null | grep -E "^(main_proj|twfilter) +RUNNING" >/dev/null; }
 new_running()    { pgrep -x sorter >/dev/null; }
@@ -162,9 +163,13 @@ to_old() {
   sudo supervisorctl status | grep -E "main_proj|twfilter" | sed 's|^|   |'
 }
 
+# 開工前先取得 sudo：切換到一半才要密碼的話，密碼錯或從沒有終端機的連線執行，會停在新舊都沒在跑；
+# 後面的 sudo 把錯誤導掉，沒權限時 status 也會誤報「沒有登記舊程式」
+require_sudo() { sudo -v || die "取不到 sudo 權限，什麼都沒動。請在可以輸入密碼的終端機執行"; }
+
 case "${1:-}" in
-  to-new) to_new ;;
-  to-old) to_old ;;
-  status) show_status ;;
+  to-new) require_sudo; to_new ;;
+  to-old) require_sudo; to_old ;;
+  status) require_sudo; show_status ;;
   *) echo "用法: sorter-switch to-new | to-old | status"; exit 1 ;;
 esac
