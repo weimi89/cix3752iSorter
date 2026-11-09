@@ -14,6 +14,9 @@ OLD_INI_DIR="/etc/supervisor/conf.d"
 NEW_PORT="${SORTER_PORT:-18090}"
 OLD_PORT=8080
 CAMERA_PORT=8051
+# 舊 Node 的位置各廠不同（桃園 twfilter/app/server.js、台中 twfilter/server.js），兩種都要認得，
+# 認不到時「舊程式行程結束」的檢查會在 Node 還活著時直接放行
+OLD_PROC_PATTERN='[e]cs1000|[t]wfilter/(app/)?server\.js'
 
 say()  { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m!!\033[0m %s\n' "$*"; }
@@ -109,7 +112,7 @@ to_new() {
 
   say "2/5 確認舊程式結束、相機埠與裝置連線都放掉"
   # 樣式用 [e] 這種寫法：pgrep -f 會連跑這條檢查的 bash -c 自己的命令列一起比對，寫成純字串會永遠「還在」
-  wait_for 20 "舊程式行程結束" bash -c "! pgrep -f '[e]cs1000|[t]wfilter/app/server.js' >/dev/null" || die "舊程式的行程還在：$(pgrep -fl '[e]cs1000|[t]wfilter/app/server.js' | tr '\n' ' ')；先看 sudo supervisorctl status"
+  wait_for 20 "舊程式行程結束" bash -c "! pgrep -f '$OLD_PROC_PATTERN' >/dev/null" || die "舊程式的行程還在：$(pgrep -fl "$OLD_PROC_PATTERN" | tr '\n' ' ')；先看 sudo supervisorctl status"
   wait_for 20 "相機埠 :$CAMERA_PORT 釋放" bash -c "! ss -ltn '( sport = :$CAMERA_PORT )' | tail -n +2 | grep -q ." || die "舊 Node 還占著 :$CAMERA_PORT，先看 sudo supervisorctl status"
   wait_for 20 "分揀機／皮帶連線關閉" bash -c "[ \"\$(ss -Htn state established '( dport = :10006 )' | grep -c .)\" -eq 0 ]" || die "還有程式連著分揀機或皮帶（:10006）：$(ss -Htnp state established '( dport = :10006 )' 2>/dev/null | tr '\n' ' ')"
 
