@@ -1,6 +1,8 @@
 //! 讀碼站相機：本程式當 TCP server，相機連進來送幀。
 //!
-//! 幀格式：`code;coord;type;code;coord;type;…@`（每三段一組，`@` 結尾）。
+//! 幀格式：`code;coord;type;code;coord;type;…@`（每三段一組）。結尾的 `@` 視相機設定而定：
+//! 桃園的相機有加、台中的沒加（一次寫入就是一幀）。所以收到 `@` 就切，沒有 `@` 時資料停頓
+//! `FRAME_IDLE_MS` 也當一幀結束（見 `FrameSplitter`）；只認 `@` 的話，沒加結尾的相機每件都會變讀碼失敗。
 //! 一幀可能含多個條碼（面單上的一維碼、QR、內部序號…），`pick_barcode` 依
 //! 舊 `server.js checkcode1` 的規則挑出物流單號；挑不到回 `NoRead`。
 //!
@@ -173,6 +175,71 @@ impl Dedup {
     }
 }
 
+/// 沒有 `@` 結尾時，資料停頓多久算一幀結束。相機一幀在區網上是一次寫入、幾毫秒內到齊；
+/// 前後兩件至少相隔數百毫秒，60 ms 不會把兩件併成一幀，也不會把同一幀切成兩半
+pub const FRAME_IDLE_MS: u64 = 60;
+
+/// 把相機的位元組流切成幀。每幀帶「第一個位元組到達的時間」，綁碼窗口要用到貨時間，不是切出來的時間
+#[derive(Default)]
+pub struct FrameSplitter {
+    buf: Vec<u8>,
+    started_ms: Option<i64>,
+}
+
+impl FrameSplitter {
+    /// 收到一段資料：切出所有以 `@` 結尾的完整幀，剩下的留著等下一段或停頓
+    pub fn push(&mut self, data: &[u8], now_ms: i64) -> Vec<(String, i64)> {
+        if self.started_ms.is_none() && !data.is_empty() {
+            self.started_ms = Some(now_ms);
+        }
+        self.buf.extend_from_slice(data);
+        let mut frames = Vec::new();
+        while let Some(pos) = self.buf.iter().position(|&b| b == b'@') {
+            let bytes: Vec<u8> = self.buf.drain(..=pos).collect();
+            let ts = self.started_ms.unwrap_or(now_ms);
+            frames.push((String::from_utf8_lossy(&bytes).into_owned(), ts));
+            // `@` 之後同一段裡的資料是下一幀，到貨時間就是這一段
+            self.started_ms = if self.buf.is_empty() { None } else { Some(now_ms) };
+        }
+        self.discard_blank();
+        frames
+    }
+
+    /// 有尚未結尾的資料（`@` 之後只剩換行之類的不算）
+    pub fn has_pending(&self) -> bool {
+        !self.buf.is_empty()
+    }
+
+    /// 資料停頓：把手上沒有 `@` 的資料當成一幀交出去
+    pub fn flush(&mut self, now_ms: i64) -> Option<(String, i64)> {
+        self.discard_blank();
+        if self.buf.is_empty() {
+            return None;
+        }
+        let bytes = std::mem::take(&mut self.buf);
+        let ts = self.started_ms.take().unwrap_or(now_ms);
+        Some((String::from_utf8_lossy(&bytes).into_owned(), ts))
+    }
+
+    /// 超過上限仍湊不成一幀：清掉，回傳清掉的長度
+    pub fn clear_if_oversized(&mut self, limit: usize) -> Option<usize> {
+        (self.buf.len() > limit).then(|| {
+            let n = self.buf.len();
+            self.buf.clear();
+            self.started_ms = None;
+            n
+        })
+    }
+
+    /// 只剩空白（`@` 後面接的換行）時丟掉，不然停頓後會被當成一幀空資料、多出一次讀碼失敗
+    fn discard_blank(&mut self) {
+        if self.buf.iter().all(|b| b.is_ascii_whitespace()) {
+            self.buf.clear();
+            self.started_ms = None;
+        }
+    }
+}
+
 pub fn spawn(cfg_rx: watch::Receiver<AppConfig>, out: mpsc::Sender<DeviceEvent>, cancel: CancellationToken) {
     let listen_rx = super::derive_addr(cfg_rx.clone(), |c| c.camera.listen.clone(), cancel.clone());
     crate::supervise::spawn("讀碼站連線", run(listen_rx, cfg_rx, out, cancel));
@@ -234,39 +301,38 @@ async fn serve_camera(
     cancel: CancellationToken,
 ) {
     let mut dedup = Dedup { last: String::new(), last_ms: 0, window_ms: cfg_rx.borrow().camera.dedup_ms as i64 };
-    let mut buf = Vec::with_capacity(1024);
+    let mut splitter = FrameSplitter::default();
     let mut chunk = [0u8; 1024];
     let reason;
     loop {
-        tokio::select! {
+        // 有沒結尾的資料才計時；沒有就永遠不觸發
+        let pending = splitter.has_pending();
+        let idle = async move {
+            if pending {
+                tokio::time::sleep(Duration::from_millis(FRAME_IDLE_MS)).await
+            } else {
+                std::future::pending::<()>().await
+            }
+        };
+        let frames = tokio::select! {
             _ = cancel.cancelled() => { reason = "服務關閉".to_string(); break; }
+            _ = idle => splitter.flush(crate::db::now_ms()).into_iter().collect::<Vec<_>>(),
             r = stream.read(&mut chunk) => match r {
                 Ok(0) => { reason = "相機端關閉".to_string(); break; }
                 Ok(n) => {
-                    buf.extend_from_slice(&chunk[..n]);
-                    // 一次 read 可能含多幀或半幀，以 `@` 切
-                    while let Some(pos) = buf.iter().position(|&b| b == b'@') {
-                        let frame_bytes: Vec<u8> = buf.drain(..=pos).collect();
-                        let frame = String::from_utf8_lossy(&frame_bytes).into_owned();
-                        let ts_ms = crate::db::now_ms();
-                        let (code, window) = {
-                            let c = cfg_rx.borrow();
-                            (pick_barcode(parse_frame(&frame), frame_center(c.camera.frame_width, c.camera.frame_height)), c.camera.dedup_ms as i64)
-                        };
-                        dedup.window_ms = window;
-                        let code = frame_code(&mut dedup, code, ts_ms);
-                        signal_log::record("camera", Dir::In, &format!("{} => {code}", frame.trim()));
-                        if out.send(DeviceEvent::Barcode { code, raw: frame.trim().to_string(), ts_ms }).await.is_err() {
-                            return;
-                        }
+                    let frames = splitter.push(&chunk[..n], crate::db::now_ms());
+                    if let Some(len) = splitter.clear_if_oversized(64 * 1024) {
+                        tracing::warn!(%peer, len, "相機資料 64KB 內湊不成一幀，清空緩衝");
                     }
-                    if buf.len() > 64 * 1024 {
-                        tracing::warn!(%peer, "相機資料 64KB 內沒有幀結尾，清空緩衝");
-                        buf.clear();
-                    }
+                    frames
                 }
                 Err(e) => { reason = format!("讀取錯誤: {e}"); break; }
             },
+        };
+        for (frame, ts_ms) in frames {
+            if !emit_frame(&frame, ts_ms, &cfg_rx, &mut dedup, &out).await {
+                return;
+            }
         }
     }
     tracing::warn!(%peer, "相機連線結束: {reason}");
@@ -276,9 +342,104 @@ async fn serve_camera(
         .await;
 }
 
+/// 一幀挑碼、去重、記訊號並送給狀態機；狀態機已關閉時回 false
+async fn emit_frame(frame: &str, ts_ms: i64, cfg_rx: &watch::Receiver<AppConfig>, dedup: &mut Dedup, out: &mpsc::Sender<DeviceEvent>) -> bool {
+    let (code, window) = {
+        let c = cfg_rx.borrow();
+        (pick_barcode(parse_frame(frame), frame_center(c.camera.frame_width, c.camera.frame_height)), c.camera.dedup_ms as i64)
+    };
+    dedup.window_ms = window;
+    let code = frame_code(dedup, code, ts_ms);
+    signal_log::record("camera", Dir::In, &format!("{} => {code}", frame.trim()));
+    out.send(DeviceEvent::Barcode { code, raw: frame.trim().to_string(), ts_ms }).await.is_ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn 有結尾符號的幀照舊切() {
+        let mut s = FrameSplitter::default();
+        let f = s.push(b"A1234567890;(1,2)(3,4)(5,6)(7,8);QRCode@B9;(0,0)(0,0)(0,0)(0,0);QRCode@", 100);
+        assert_eq!(f, vec![("A1234567890;(1,2)(3,4)(5,6)(7,8);QRCode@".to_string(), 100), ("B9;(0,0)(0,0)(0,0)(0,0);QRCode@".to_string(), 100)]);
+        assert!(!s.has_pending());
+    }
+
+    #[test]
+    fn 半幀等到結尾才切且用第一段的到貨時間() {
+        let mut s = FrameSplitter::default();
+        assert!(s.push(b"A1234567890;(1,2)", 100).is_empty());
+        assert!(s.has_pending());
+        let f = s.push(b"(3,4)(5,6)(7,8);QRCode@", 105);
+        assert_eq!(f, vec![("A1234567890;(1,2)(3,4)(5,6)(7,8);QRCode@".to_string(), 100)]);
+    }
+
+    #[test]
+    fn 沒有結尾符號時停頓才算一幀() {
+        // 台中相機的實際資料：一次寫入就是一幀，沒有 `@`
+        let raw = "TPPJYNJT96C;(3337,3154)(3507,3161)(3514,2973)(3344,2965);QRCode;TPPJYNJT96C;(3600,3085)(3736,3089)(3762,2475)(3624,2467);Code 128";
+        let mut s = FrameSplitter::default();
+        assert!(s.push(raw.as_bytes(), 1000).is_empty());
+        assert!(s.has_pending());
+        let (frame, ts) = s.flush(1060).expect("停頓後要交出一幀");
+        assert_eq!((frame.as_str(), ts), (raw, 1000));
+        assert_eq!(pick_barcode(parse_frame(&frame), None), "TPPJYNJT96C");
+        assert!(!s.has_pending());
+        assert_eq!(s.flush(2000), None, "交出後不可再交一次");
+    }
+
+    #[test]
+    fn 結尾後的換行不會變成多一次讀碼失敗() {
+        let mut s = FrameSplitter::default();
+        assert_eq!(s.push(b"NoRead@\r\n", 100).len(), 1);
+        assert!(!s.has_pending());
+        assert_eq!(s.flush(200), None);
+    }
+
+    #[test]
+    fn 結尾後緊接下一幀的開頭用這一段的時間() {
+        let mut s = FrameSplitter::default();
+        assert_eq!(s.push(b"X1@Y12345", 300).len(), 1);
+        assert_eq!(s.flush(400), Some(("Y12345".to_string(), 300)));
+    }
+
+    /// 走真的 TCP 連線：沒有 `@` 的相機（台中）停頓後要送出單號，時間是資料到達時、不是停頓結束時；
+    /// 有 `@` 的相機（桃園）照舊立即送出
+    #[tokio::test]
+    async fn 連線上兩種相機格式都送得出單號() {
+        use tokio::io::AsyncWriteExt;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (_cfg_tx, cfg_rx) = watch::channel(AppConfig::default());
+        let (tx, mut rx) = mpsc::channel(8);
+        let cancel = CancellationToken::new();
+        let mut cam = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let (server_side, _) = listener.accept().await.unwrap();
+        tokio::spawn(serve_camera(server_side, "test".into(), cfg_rx, tx, cancel.clone()));
+
+        let sent_at = crate::db::now_ms();
+        cam.write_all(b"TPPJYNJT96C;(3337,3154)(3507,3161)(3514,2973)(3344,2965);QRCode;TPPJYNJT96C;(3600,3085)(3736,3089)(3762,2475)(3624,2467);Code 128").await.unwrap();
+        let ev = tokio::time::timeout(Duration::from_secs(2), rx.recv()).await.expect("停頓後要送出").unwrap();
+        let DeviceEvent::Barcode { code, ts_ms, .. } = ev else { panic!("應是條碼事件") };
+        assert_eq!(code, "TPPJYNJT96C");
+        assert!(ts_ms - sent_at < FRAME_IDLE_MS as i64, "時間要用到貨時間：差 {} ms", ts_ms - sent_at);
+
+        cam.write_all(b"99K00298099;(2076,3209)(2213,2871)(1869,2715)(1729,3047);QRCode@").await.unwrap();
+        let ev = tokio::time::timeout(Duration::from_millis(FRAME_IDLE_MS / 2), rx.recv()).await.expect("有 @ 要立即送出，不等停頓").unwrap();
+        let DeviceEvent::Barcode { code, .. } = ev else { panic!("應是條碼事件") };
+        assert_eq!(code, "99K00298099");
+        cancel.cancel();
+    }
+
+    #[test]
+    fn 過大的緩衝會清掉() {
+        let mut s = FrameSplitter::default();
+        s.push(&[b'x'; 10], 1);
+        assert_eq!(s.clear_if_oversized(5), Some(10));
+        assert!(!s.has_pending());
+        assert_eq!(s.flush(2), None);
+    }
 
     fn bc(code: &str, kind: &str) -> Barcode {
         Barcode { code: code.into(), len: code.chars().count(), kind: kind.into(), center: None }
