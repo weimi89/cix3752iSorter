@@ -30,6 +30,8 @@ if [ -d "${HERE}/stack/usr/local" ]; then
 /usr/local/lib
 LDCONF
   ldconfig
+  # 桌面也跟著改載自編 glib，要補上 dconf 模組，否則螢幕閒置 5 分鐘就關並鎖定（見 desktop-settings.sh）
+  bash "${HERE}/desktop-settings.sh"
 else
   echo "1/3 此 distro 走系統 webkit2gtk-4.1，不需自編棧"
 fi

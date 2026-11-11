@@ -5,7 +5,7 @@
   - cix3752i-sorter_<版本>_<distro>_amd64.deb   主程式（桌面視窗 + 內建網頁後台）
   - stack/usr/local/                            只有 Ubuntu 20.04 的包有：自編的 glib 2.78 + libsoup3 + webkit2gtk-4.1
                                                 （20.04 套件源沒有 webkit2gtk-4.1，桌面視窗要靠它）
-  - install.sh、switch.sh
+  - install.sh、switch.sh、desktop-settings.sh（只有 20.04 會用到：讓桌面讀得到使用者設定，install.sh 自動呼叫）
 
 安裝：
   sudo bash install.sh                只裝不啟動；裝完登出再登入一次（印表機權限）
@@ -18,6 +18,9 @@
 後續升級：
   - 程式內「發現新版本」→ 立即更新（會要系統密碼；或 sudo dpkg -i <新版 .deb>）
   - 發版說明寫「webkit 棧有更新」時（只影響 20.04）：重新解開完整安裝包跑一次 install.sh
+
+20.04 螢幕閒置 5 分鐘就關、設定改了沒用：
+  sudo bash desktop-settings.sh       （v0.2.12 以前裝的機台要單獨跑一次；跑完登出再登入）
 
 不可降版：
   新版開機時若要更新資料庫結構，會先把整個資料庫備份到
